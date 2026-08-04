@@ -1,5 +1,0 @@
-SocksPort 9050
-
-# Optional mediator onion service:
-HiddenServiceDir /var/lib/tor/tradep2p/
-HiddenServicePort 7443 127.0.0.1:7443

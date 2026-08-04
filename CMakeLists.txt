@@ -43,4 +43,4 @@ target_link_libraries(tradep2p_unit_tests PRIVATE tradep2p)
 target_compile_options(tradep2p_unit_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
-add_test(NAME tradep2p_unit_tests COMMAND tradep2p_
+add_test(NAME tradep2p_unit_tests COMMAND tradep2p_unit_tests)

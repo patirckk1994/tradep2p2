@@ -1,7 +1,0 @@
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/tradep2p.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/tradep2p_cli.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/tradep2p-dashboard.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/tradep2p_unit_tests.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/test.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/edit_cache.dir
-/home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/build/CMakeFiles/rebuild_cache.dir

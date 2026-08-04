@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed
+CMAKE_SOURCE_DIR = /home/pat/p2p/tradep2p2
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed
+CMAKE_BINARY_DIR = /home/pat/p2p/tradep2p2
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -97,9 +97,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/CMakeFiles /home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/pat/p2p/tradep2p2/CMakeFiles /home/pat/p2p/tradep2p2//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/pat/p2p/TradeP2P-minimal-v0.6.1-dashboard-room-id-fixed/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/pat/p2p/tradep2p2/CMakeFiles 0
 .PHONY : all
 
 # The main clean target

@@ -1,0 +1,7 @@
+/home/pat/p2p/tradep2p2/CMakeFiles/tradep2p.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/tradep2p_cli.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/tradep2p-dashboard.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/tradep2p_unit_tests.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/test.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/edit_cache.dir
+/home/pat/p2p/tradep2p2/CMakeFiles/rebuild_cache.dir
