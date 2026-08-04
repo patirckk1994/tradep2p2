@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/tradep2p-dashboard.dir/link.d "CMakeFiles/tradep2p-dashboard.dir/src/http_dashboard.cpp.o" -o tradep2p-dashboard  libtradep2p.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

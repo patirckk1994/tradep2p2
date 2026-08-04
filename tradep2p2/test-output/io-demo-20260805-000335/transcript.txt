@@ -1,0 +1,124 @@
+TradeP2P deterministic IO demo
+room=cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+rounds=2
+
+===== CLIENT A STDIN =====
+/offer QRL 500000 BTC 100000 2 btc-address-for-party-a
+/sent cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/received cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/received cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/sent cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/quit
+
+===== CLIENT A STDOUT =====
+[A OUT] anonymous client id: e64f891b75d3188e8285f98be207c6d5
+[A OUT] No chat. Publish with /offer, browse with /offers, take with /join.
+[A OUT] Commands:
+[A OUT]   /offer SELL_SYMBOL SELL_AMOUNT BUY_SYMBOL BUY_AMOUNT ROUNDS RECEIVE_ADDRESS
+[A OUT]       publish an open room; your address receives BUY_SYMBOL
+[A OUT]   /offers [AFTER_ROOM_ID] [LIMIT]
+[A OUT]       list up to 32 open rooms; use the printed cursor for the next page
+[A OUT]   /join ROOM_ID RECEIVE_ADDRESS
+[A OUT]       take an offer; your address receives SELL_SYMBOL
+[A OUT]   /cancel ROOM_ID
+[A OUT]       cancel your still-open offer
+[A OUT]   /sent ROOM_ID
+[A OUT]   /received ROOM_ID
+[A OUT]   /abort ROOM_ID
+[A OUT]   /help
+[A OUT]   /quit
+[A OUT] offer room created: cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT] 
+[A OUT] room ready: cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT]   your party: A
+[A OUT]   peer: 86a08cd9b2e53a944c961a24c9265243
+[A OUT]   trade: 500000 QRL <-> 100000 BTC
+[A OUT]   rounds: 2
+[A OUT]   party A receive address: btc-address-for-party-a
+[A OUT]   party B receive address: qrl-address-for-party-b
+[A OUT] 
+[A OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 1: SEND 250000 QRL to qrl-address-for-party-b
+[A OUT] Use /sent ROOM_ID after sending externally.
+[A OUT] peer reported receipt in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT] 
+[A OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 1: EXPECT 50000 BTC to btc-address-for-party-a
+[A OUT] Use /received ROOM_ID after verifying externally.
+[A OUT] peer reported sent in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT] 
+[A OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 2: EXPECT 50000 BTC to btc-address-for-party-a
+[A OUT] Use /received ROOM_ID after verifying externally.
+[A OUT] peer reported sent in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT] 
+[A OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 2: SEND 250000 QRL to qrl-address-for-party-b
+[A OUT] Use /sent ROOM_ID after sending externally.
+[A OUT] peer reported receipt in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[A OUT] room complete: cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+
+===== CLIENT A STDERR =====
+
+===== CLIENT B STDIN =====
+/offers
+/join cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 qrl-address-for-party-b
+/received cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/sent cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/sent cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/received cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+/quit
+
+===== CLIENT B STDOUT =====
+[B OUT] anonymous client id: 86a08cd9b2e53a944c961a24c9265243
+[B OUT] No chat. Publish with /offer, browse with /offers, take with /join.
+[B OUT] Commands:
+[B OUT]   /offer SELL_SYMBOL SELL_AMOUNT BUY_SYMBOL BUY_AMOUNT ROUNDS RECEIVE_ADDRESS
+[B OUT]       publish an open room; your address receives BUY_SYMBOL
+[B OUT]   /offers [AFTER_ROOM_ID] [LIMIT]
+[B OUT]       list up to 32 open rooms; use the printed cursor for the next page
+[B OUT]   /join ROOM_ID RECEIVE_ADDRESS
+[B OUT]       take an offer; your address receives SELL_SYMBOL
+[B OUT]   /cancel ROOM_ID
+[B OUT]       cancel your still-open offer
+[B OUT]   /sent ROOM_ID
+[B OUT]   /received ROOM_ID
+[B OUT]   /abort ROOM_ID
+[B OUT]   /help
+[B OUT]   /quit
+[B OUT] open offers: 1
+[B OUT]   cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 | SELL 500000 QRL | BUY 100000 BTC | rounds 2
+[B OUT] 
+[B OUT] room ready: cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[B OUT]   your party: B
+[B OUT]   peer: e64f891b75d3188e8285f98be207c6d5
+[B OUT]   trade: 500000 QRL <-> 100000 BTC
+[B OUT]   rounds: 2
+[B OUT]   party A receive address: btc-address-for-party-a
+[B OUT]   party B receive address: qrl-address-for-party-b
+[B OUT] 
+[B OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 1: EXPECT 250000 QRL to qrl-address-for-party-b
+[B OUT] Use /received ROOM_ID after verifying externally.
+[B OUT] peer reported sent in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[B OUT] 
+[B OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 1: SEND 50000 BTC to btc-address-for-party-a
+[B OUT] Use /sent ROOM_ID after sending externally.
+[B OUT] peer reported receipt in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[B OUT] 
+[B OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 2: SEND 50000 BTC to btc-address-for-party-a
+[B OUT] Use /sent ROOM_ID after sending externally.
+[B OUT] peer reported receipt in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[B OUT] 
+[B OUT] room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18 round 2: EXPECT 250000 QRL to qrl-address-for-party-b
+[B OUT] Use /received ROOM_ID after verifying externally.
+[B OUT] peer reported sent in room cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+[B OUT] room complete: cb18d24df95a69dab652a307dc03d480e66560c0327c2cf4c5a62db5d9ddaa18
+
+===== CLIENT B STDERR =====
+
+===== MEDIATOR STDOUT =====
+[MED OUT] TradeP2P lobby listening on 127.0.0.1:36792
+[MED OUT] Anonymous offer rooms, address exchange and multi-room settlement.
+[MED OUT] No accounts, client certificates, transaction data or wallet custody.
+[MED OUT] client connected: e64f891b75d3188e8285f98be207c6d5
+[MED OUT] client connected: 86a08cd9b2e53a944c961a24c9265243
+[MED OUT] client removed: e64f891b75d3188e8285f98be207c6d5
+[MED OUT] client removed: 86a08cd9b2e53a944c961a24c9265243
+
+===== MEDIATOR STDERR =====

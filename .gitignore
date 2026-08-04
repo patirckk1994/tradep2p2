@@ -1,0 +1,9 @@
+/build/
+/test-output/
+/logs/
+*.log
+*.pem
+tradep2p_cli
+tradep2p-dashboard
+tradep2p_unit_tests
+libtradep2p.a
