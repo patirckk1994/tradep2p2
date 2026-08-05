@@ -2,11 +2,20 @@
 
 #include "tradep2p/protocol.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -42,12 +51,49 @@ std::string safe_reason(std::string text) {
     return text;
 }
 
+std::string json_escape(const std::string& text) {
+    std::ostringstream out;
+    for (const unsigned char ch : text) {
+        switch (ch) {
+        case '"': out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (ch < 0x20U) {
+                out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                    << static_cast<unsigned int>(ch) << std::dec;
+            } else {
+                out << static_cast<char>(ch);
+            }
+        }
+    }
+    return out.str();
+}
+
+std::string configured_registry_state_file() {
+    const char* value = std::getenv("TRADEP2P_REGISTRY_STATE_FILE");
+    return value == nullptr ? std::string{} : std::string(value);
+}
+
 } // namespace
 
 class RegistryServer::Impl {
 public:
     Impl(Endpoint bind_endpoint, ServerTlsIdentity identity)
-        : bind_endpoint_(std::move(bind_endpoint)), identity_(std::move(identity)) {}
+        : bind_endpoint_(std::move(bind_endpoint)),
+          identity_(std::move(identity)),
+          state_file_(configured_registry_state_file()) {}
+
+    ~Impl() {
+        snapshot_running_.store(false);
+        if (snapshot_thread_.joinable()) {
+            snapshot_thread_.join();
+        }
+    }
 
     void run() {
         SecureListener listener(bind_endpoint_, identity_);
@@ -55,6 +101,12 @@ public:
                   << bind_endpoint_.port << '\n';
         std::cout << "Directory only: registrations are unauthenticated and expire after "
                   << kRegistryTtlSeconds << " seconds.\n";
+
+        if (!state_file_.empty()) {
+            snapshot_running_.store(true);
+            snapshot_thread_ = std::thread([this] { snapshot_loop(); });
+            std::cout << "Local registry state snapshot: " << state_file_ << '\n';
+        }
 
         for (;;) {
             SecureChannel channel;
@@ -167,8 +219,89 @@ private:
         return result;
     }
 
+private:
+    void snapshot_loop() {
+        while (snapshot_running_.load()) {
+            try {
+                write_state_snapshot();
+            } catch (const std::exception& error) {
+                std::cerr << "registry snapshot failed: " << error.what() << '\n';
+            }
+            for (int tick = 0; tick < 10 && snapshot_running_.load(); ++tick) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+    void write_state_snapshot() {
+        const RegistryNodesMessage nodes = snapshot();
+
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t timestamp = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+        std::ostringstream generated;
+        if (::localtime_r(&timestamp, &tm) != nullptr) {
+            generated << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+        } else {
+            generated << "time-unavailable";
+        }
+
+        std::ostringstream json;
+        json << "{\"enabled\":true,\"available\":true"
+             << ",\"generated_at\":\"" << json_escape(generated.str()) << "\""
+             << ",\"bind\":\""
+             << json_escape(bind_endpoint_.host + ":" +
+                            std::to_string(bind_endpoint_.port))
+             << "\",\"node_count\":" << nodes.nodes.size()
+             << ",\"nodes\":[";
+        for (std::size_t index = 0; index < nodes.nodes.size(); ++index) {
+            if (index != 0U) {
+                json << ',';
+            }
+            const auto& node = nodes.nodes[index];
+            json << "{\"host\":\"" << json_escape(node.host)
+                 << "\",\"port\":" << node.port
+                 << ",\"certificate_pin\":\""
+                 << json_escape(certificate_pin_to_hex(node.certificate_pin))
+                 << "\",\"remaining_ttl_seconds\":" << node.remaining_ttl_seconds
+                 << '}';
+        }
+        json << "]}";
+
+        const std::filesystem::path path(state_file_);
+        if (path.has_parent_path()) {
+            std::filesystem::create_directories(path.parent_path());
+        }
+        const std::filesystem::path temporary =
+            path.string() + ".tmp." + std::to_string(::getpid());
+        {
+            std::ofstream output(temporary, std::ios::trunc);
+            if (!output.is_open()) {
+                throw std::runtime_error("cannot open registry snapshot temporary file");
+            }
+            output << json.str() << '\n';
+            if (!output.good()) {
+                throw std::runtime_error("cannot write registry snapshot");
+            }
+        }
+        std::error_code error;
+        std::filesystem::rename(temporary, path, error);
+        if (error) {
+            std::filesystem::remove(path, error);
+            error.clear();
+            std::filesystem::rename(temporary, path, error);
+            if (error) {
+                throw std::runtime_error("cannot replace registry snapshot: " +
+                                         error.message());
+            }
+        }
+    }
+
     Endpoint bind_endpoint_;
     ServerTlsIdentity identity_;
+    std::string state_file_;
+    std::atomic<bool> snapshot_running_{false};
+    std::thread snapshot_thread_;
     std::mutex mutex_;
     std::unordered_map<std::string, RegistryEntry> entries_;
 };

@@ -105,7 +105,8 @@ void acknowledge_current_turn(tradep2p::MediatorSession& session) {
 
 void test_mediator_flow() {
     tradep2p::MediatorSession session(
-        {terms_fixture(), "address-for-party-a"}, room_fixture());
+        {terms_fixture(), "address-for-party-a"}, room_fixture(),
+        tradep2p::FeeTerms{});
     session.join({session.id(), "address-for-party-b"});
 
     auto turn = session.current_turn();
@@ -123,6 +124,30 @@ void test_mediator_flow() {
             "all rounds must complete exactly once");
 }
 
+void test_mediator_fee_flow() {
+    const tradep2p::FeeTerms fee{"BTC", 7U, "mediator-fee-address"};
+    tradep2p::MediatorSession session(
+        {terms_fixture(), "address-for-party-a"}, room_fixture(), fee);
+    session.join({session.id(), "address-for-party-b"});
+
+    while (session.state() != tradep2p::SessionState::WaitingForFeeSent) {
+        acknowledge_current_turn(session);
+    }
+
+    const auto fee_turn = session.current_turn();
+    require(fee_turn.sender == tradep2p::Party::A,
+            "the offer creator must settle the mediator fee");
+    require(fee_turn.asset == fee.asset && fee_turn.amount == fee.amount &&
+                fee_turn.destination == fee.address,
+            "fee turn does not match configured fee terms");
+
+    const tradep2p::RoundSignalMessage fee_signal{
+        fee_turn.room_id, fee_turn.round_index, fee_turn.sender};
+    session.sender_reported_sent(tradep2p::Party::A, fee_signal);
+    require(session.state() == tradep2p::SessionState::Complete,
+            "reporting the fee as sent should complete the room directly");
+}
+
 } // namespace
 
 int main() {
@@ -131,6 +156,7 @@ int main() {
         test_offer_and_address_serialization();
         test_registry_serialization();
         test_mediator_flow();
+        test_mediator_fee_flow();
         std::cout << "unit tests passed\n";
         return 0;
     } catch (const std::exception& error) {

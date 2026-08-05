@@ -89,8 +89,19 @@ struct JoinRoomMessage {
     std::string receive_address_b;
 };
 
+// A mediator-wide fee the operator charges on every settled trade. An empty
+// asset/address with amount 0 means the mediator charges no fee. The fee is
+// never held or verified by the mediator; it is settled as an ordinary final
+// transfer, acknowledged the same way any other round is.
+struct FeeTerms {
+    std::string asset;
+    std::uint64_t amount{};
+    std::string address;
+};
+
 struct WelcomeMessage {
     ClientId client_id{};
+    FeeTerms fee;
 };
 
 struct CreateOfferMessage {
@@ -177,6 +188,7 @@ struct TradeReadyMessage {
     TradeTerms terms;
     std::string receive_address_a;
     std::string receive_address_b;
+    FeeTerms fee;
 };
 
 struct TurnMessage {
@@ -227,6 +239,7 @@ struct RegistryNodesMessage {
 };
 
 void validate_terms(const TradeTerms& terms);
+void validate_fee_terms(const FeeTerms& fee);
 void validate_address(std::string_view address);
 void validate_reason(std::string_view text);
 void validate_room_id(const RoomId& room_id);

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/tradep2p-webclient.dir/link.d "CMakeFiles/tradep2p-webclient.dir/src/http_webclient.cpp.o" -o tradep2p-webclient  libtradep2p.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

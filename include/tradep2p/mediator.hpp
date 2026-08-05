@@ -11,15 +11,19 @@ enum class SessionState : std::uint8_t {
     WaitingForPeer,
     WaitingForSent,
     WaitingForReceived,
+    WaitingForFeeSent,
     Complete,
     Aborted,
 };
 
 // Coordinates turns only. It never creates, inspects, searches, confirms,
-// stores, or identifies cryptocurrency transactions.
+// stores, or identifies cryptocurrency transactions. When a mediator-wide fee
+// is configured, it is settled as one extra final leg paid by the offer
+// creator (party A) after the last real round, acknowledged the same
+// honor-system way as every other transfer.
 class MediatorSession {
 public:
-    MediatorSession(CreateRoomMessage creator, RoomId room_id);
+    MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee);
 
     [[nodiscard]] const RoomId& id() const noexcept { return room_id_; }
     [[nodiscard]] SessionState state() const noexcept { return state_; }
@@ -50,6 +54,7 @@ private:
     CreateRoomMessage creator_;
     RoomId room_id_{};
     std::string receive_address_b_;
+    FeeTerms fee_;
     SessionState state_{SessionState::WaitingForPeer};
     std::uint32_t round_index_{0};
     std::uint8_t leg_index_{0};

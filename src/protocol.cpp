@@ -231,6 +231,22 @@ void append_terms(Writer& writer, const TradeTerms& terms) {
     return terms;
 }
 
+void append_fee_terms(Writer& writer, const FeeTerms& fee) {
+    validate_fee_terms(fee);
+    writer.short_string(fee.asset, kMaxAssetCodeLength);
+    writer.u64(fee.amount);
+    writer.short_string(fee.address, kMaxAddressLength);
+}
+
+[[nodiscard]] FeeTerms read_fee_terms(Reader& reader) {
+    FeeTerms fee;
+    fee.asset = reader.short_string(kMaxAssetCodeLength);
+    fee.amount = reader.u64();
+    fee.address = reader.short_string(kMaxAddressLength);
+    validate_fee_terms(fee);
+    return fee;
+}
+
 void append_registry_node(Writer& writer,
                           const RegistryNode& node,
                           bool include_ttl) {
@@ -274,6 +290,18 @@ void validate_terms(const TradeTerms& terms) {
         throw std::invalid_argument("each round must contain a positive integer amount");
     }
     validate_party(terms.first_sender);
+}
+
+void validate_fee_terms(const FeeTerms& fee) {
+    if (fee.amount == 0U) {
+        if (!fee.asset.empty() || !fee.address.empty()) {
+            throw std::invalid_argument(
+                "fee asset and address must be empty when the fee amount is zero");
+        }
+        return;
+    }
+    validate_asset(fee.asset);
+    validate_address(fee.address);
 }
 
 void validate_address(std::string_view address) {
@@ -545,12 +573,15 @@ std::vector<std::uint8_t> encode_welcome(const WelcomeMessage& message) {
     validate_client_id(message.client_id);
     Writer writer;
     writer.fixed_id(message.client_id);
+    append_fee_terms(writer, message.fee);
     return writer.take();
 }
 
 WelcomeMessage decode_welcome(std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
-    WelcomeMessage message{reader.fixed_id<16U>()};
+    WelcomeMessage message;
+    message.client_id = reader.fixed_id<16U>();
+    message.fee = read_fee_terms(reader);
     validate_client_id(message.client_id);
     reader.require_finished();
     return message;
@@ -720,6 +751,7 @@ std::vector<std::uint8_t> encode_trade_ready(const TradeReadyMessage& message) {
     append_terms(writer, message.terms);
     writer.short_string(message.receive_address_a, kMaxAddressLength);
     writer.short_string(message.receive_address_b, kMaxAddressLength);
+    append_fee_terms(writer, message.fee);
     return writer.take();
 }
 
@@ -732,6 +764,7 @@ TradeReadyMessage decode_trade_ready(std::span<const std::uint8_t> bytes) {
     message.terms = read_terms(reader);
     message.receive_address_a = reader.short_string(kMaxAddressLength);
     message.receive_address_b = reader.short_string(kMaxAddressLength);
+    message.fee = read_fee_terms(reader);
     validate_room_id(message.room_id);
     validate_party(message.assigned_party);
     validate_client_id(message.peer_id);

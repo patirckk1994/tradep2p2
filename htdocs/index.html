@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Progressive Fractional Settlement Protocol — a non-custodial P2P cryptocurrency trading protocol.">
+  <title>Progressive Fractional Settlement Protocol</title>
+  <style>
+    :root {
+      --bg: #f4f2ea;
+      --panel: #fbfaf5;
+      --panel2: #f1efe4;
+      --text: #1a1a15;
+      --muted: #5c5745;
+      --green: #2f6d3a;
+      --cyan: #14508c;
+      --amber: #8a5a10;
+      --border: #b8b09a;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font: 15px/1.65 Verdana, Geneva, Arial, "Helvetica Neue", Helvetica, sans-serif;
+    }
+
+    a { color: var(--cyan); }
+    strong { color: #000; }
+
+    .wrap {
+      width: min(880px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .terminal-bar {
+      margin-top: 20px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-bottom: 0;
+      background: var(--panel2);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border: 1px solid var(--muted);
+      background: transparent;
+    }
+
+    .terminal-title {
+      margin-left: 8px;
+      color: var(--muted);
+      font-size: .8rem;
+      font-family: "Courier New", Courier, monospace;
+    }
+
+    header {
+      padding: 30px clamp(18px, 5vw, 40px);
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    .prompt {
+      color: var(--green);
+      font-weight: 700;
+      font-family: "Courier New", Courier, monospace;
+      font-size: .85rem;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 10px 0 12px;
+      font-size: 1.9rem;
+      line-height: 1.2;
+    }
+
+    .leet { color: var(--green); }
+
+    .subtitle {
+      max-width: 700px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .status {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+    }
+
+    .status b {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--cyan);
+      font-size: .72rem;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    main { padding: 20px 0 50px; }
+
+    nav, section {
+      margin-bottom: 14px;
+      padding: clamp(16px, 4vw, 26px);
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    nav h2, section h2 {
+      margin-top: 0;
+      color: var(--text);
+      font-size: 1.2rem;
+    }
+
+    section h3 {
+      margin-top: 22px;
+      color: var(--green);
+      font-size: .92rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    p { margin: 0 0 14px; }
+
+    ul {
+      margin: 8px 0 16px;
+      padding-left: 20px;
+    }
+
+    li { margin: 6px 0; }
+
+    nav ol {
+      columns: 2;
+      column-gap: 36px;
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    nav li { break-inside: avoid; }
+
+    nav a {
+      color: var(--cyan);
+      text-decoration: none;
+    }
+
+    nav a:hover { text-decoration: underline; }
+
+    .formula {
+      margin: 16px 0;
+      padding: 12px 16px;
+      overflow-x: auto;
+      border-left: 3px solid var(--green);
+      background: var(--panel2);
+      color: var(--text);
+      font-size: 1rem;
+      font-family: "Courier New", Courier, monospace;
+    }
+
+    pre {
+      margin: 14px 0;
+      padding: 14px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      background: #fffef9;
+      color: #202016;
+      line-height: 1.55;
+      font-family: "Courier New", Courier, monospace;
+    }
+
+    code {
+      padding: .08em .28em;
+      color: var(--green);
+      background: #eaf1e6;
+      font-family: "Courier New", Courier, monospace;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    .note {
+      margin: 16px 0;
+      padding: 12px 14px;
+      border: 1px solid var(--amber);
+      background: #f6ecd9;
+      color: #5a4110;
+    }
+
+    .objective {
+      border-color: var(--green);
+      background: #eaf1e6;
+    }
+
+    .tag {
+      display: inline-block;
+      margin: 4px 6px 4px 0;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    footer {
+      padding: 20px 0 36px;
+      border-top: 3px double var(--border);
+      color: var(--muted);
+      text-align: center;
+      font-size: .85rem;
+    }
+
+    @media (max-width: 760px) {
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      nav ol { columns: 1; }
+    }
+
+    @media (max-width: 440px) {
+      .status-grid { grid-template-columns: 1fr; }
+      .wrap { width: min(100% - 20px, 880px); }
+      header, section, nav { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="terminal-bar">
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="terminal-title">p2p://fractional-settlement/specification.html</span>
+    </div>
+
+    <header>
+      <div class="prompt">root@peer-node:~$ ./describe_protocol --serious --slightly-1337</div>
+      <h1>Progressive Fractional <span class="leet">Settlement</span> Protocol</h1>
+      <p class="subtitle">
+        A non-custodial peer-to-peer cryptocurrency trading protocol that minimizes
+        counterparty loss by streaming trades through cryptographically verified
+        fractional settlement rounds.
+      </p>
+
+      <div class="status-grid">
+        <div class="status"><b>Custody</b>None</div>
+        <div class="status"><b>Network</b>Peer-to-peer</div>
+        <div class="status"><b>Privacy</b>Tor-capable</div>
+        <div class="status"><b>Risk model</b>Bounded exposure</div>
+      </div>
+    </header>
+
+    <main>
+      <nav>
+        <h2>// contents</h2>
+        <ol>
+          <li><a href="#overview">Overview</a></li>
+          <li><a href="#principle">Core principle</a></li>
+          <li><a href="#operation">Protocol operation</a></li>
+          <li><a href="#network">Network architecture</a></li>
+          <li><a href="#modes">Settlement modes</a></li>
+          <li><a href="#security">Security model</a></li>
+          <li><a href="#economics">Economic considerations</a></li>
+          <li><a href="#market-risk">Market-risk controls</a></li>
+          <li><a href="#identity">Reputation and identity</a></li>
+          <li><a href="#scope">Scope</a></li>
+          <li><a href="#use-cases">Intended use cases</a></li>
+          <li><a href="#objective">Project objective</a></li>
+        </ol>
+      </nav>
+
+      <section id="overview">
+        <h2>01 // Overview</h2>
+        <p>
+          The project is a non-custodial peer-to-peer trading protocol for exchanging
+          cryptocurrency without requiring either participant to transfer the full amount
+          at once.
+        </p>
+        <p>
+          Instead of treating a trade as a single indivisible transaction, the protocol
+          divides the agreed total into a sequence of smaller settlement rounds. In each
+          round, both parties exchange only a fraction of the total value. The next round
+          begins only after the previous transfers have been verified according to the
+          rules of the relevant blockchains.
+        </p>
+        <p>
+          The purpose is to reduce counterparty exposure when a fully atomic exchange is
+          unavailable. If one participant stops cooperating or attempts to defect, the
+          honest participant loses at most the value exposed during the current settlement
+          round rather than the entire trade.
+        </p>
+      </section>
+
+      <section id="principle">
+        <h2>02 // Core principle</h2>
+        <p>For a trade divided into <em>n</em> equal rounds, the nominal exposure per round is:</p>
+        <div class="formula">E = V / n</div>
+        <p>
+          Here, <strong>V</strong> is the total trade value. A trade worth 10,000 units
+          divided into 100 rounds would therefore expose approximately 100 units at any
+          individual step.
+        </p>
+        <p>
+          Increasing the number of rounds reduces the value that can be lost through a
+          single act of non-cooperation, although it also increases latency, transaction
+          costs and protocol complexity.
+        </p>
+        <div class="note">
+          The system does not claim to make betrayal impossible. It makes betrayal
+          bounded, observable and economically limited.
+        </div>
+      </section>
+
+      <section id="operation">
+        <h2>03 // Protocol operation</h2>
+        <p>Two peers first negotiate and sign a trade agreement containing:</p>
+        <ul>
+          <li>the assets and total quantities being exchanged;</li>
+          <li>the exchange rate or price-calculation rule;</li>
+          <li>the number and size of settlement rounds;</li>
+          <li>the order in which transfers occur;</li>
+          <li>blockchain confirmation requirements;</li>
+          <li>timeout and cancellation conditions;</li>
+          <li>fee allocation;</li>
+          <li>optional collateral or security deposits;</li>
+          <li>the rules for resuming or terminating an interrupted trade.</li>
+        </ul>
+
+        <p>
+          The agreement is identified by a cryptographic hash and signed by both
+          participants. Every subsequent settlement message references that agreement and
+          includes a monotonically increasing round number.
+        </p>
+
+        <p>A simplified settlement sequence is:</p>
+        <pre><code>TRADE_NEGOTIATED
+        |
+        v
+CONTRACT_SIGNED
+        |
+        v
+ROUND_1_ASSET_A_SENT
+        |
+        v
+ROUND_1_ASSET_A_CONFIRMED
+        |
+        v
+ROUND_1_ASSET_B_SENT
+        |
+        v
+ROUND_1_ASSET_B_CONFIRMED
+        |
+        v
+ROUND_2
+        |
+       ...
+        |
+        v
+TRADE_COMPLETED</code></pre>
+
+        <p>
+          If a required transfer or confirmation does not occur before its deadline, the
+          state machine stops. No later rounds are executed.
+        </p>
+      </section>
+
+      <section id="network">
+        <h2>04 // Network architecture</h2>
+        <p>
+          The system is intended to operate as a decentralized protocol rather than a
+          custodial exchange.
+        </p>
+        <p>
+          Peers may publish signed offers to a distributed order-discovery network.
+          Matching peers communicate directly and negotiate the final contract without
+          depositing assets with a central operator.
+        </p>
+        <p>Tor can be used as an optional transport layer for:</p>
+        <ul>
+          <li>peer discovery;</li>
+          <li>order propagation;</li>
+          <li>negotiation;</li>
+          <li>transaction coordination;</li>
+          <li>hiding participants’ network addresses.</li>
+        </ul>
+        <p>
+          Tor protects network-layer metadata, but it does not automatically hide public
+          blockchain activity. Transaction amounts, timing patterns, address reuse and
+          repeated settlement intervals may still make related transfers correlatable.
+          Privacy therefore has to be considered independently at the transport, protocol
+          and blockchain layers.
+        </p>
+      </section>
+
+      <section id="modes">
+        <h2>05 // Settlement modes</h2>
+
+        <h3>Native atomic settlement</h3>
+        <p>
+          Where both blockchains support compatible atomic-swap primitives, each
+          settlement round can itself be atomic. This provides the strongest guarantees.
+        </p>
+
+        <h3>Progressive unilateral settlement</h3>
+        <p>
+          Where atomic swaps are unavailable, transfers alternate according to the signed
+          schedule. Exposure is limited to one round, but one participant must still move
+          first during each round.
+        </p>
+
+        <h3>Collateralized settlement</h3>
+        <p>
+          Both parties lock collateral before trading. A participant who abandons the
+          trade or violates the signed schedule risks losing some or all of that collateral.
+        </p>
+        <p>Collateral can reduce effective exposure below the value of one settlement round:</p>
+        <div class="formula">L<sub>max</sub> = max(0, E - C)</div>
+        <p>
+          Here, <strong>E</strong> is round exposure and <strong>C</strong> is recoverable
+          collateral.
+        </p>
+
+        <h3>Channel-based settlement</h3>
+        <p>
+          For assets supporting payment channels or equivalent off-chain mechanisms, many
+          fractional transfers can occur without publishing every round as a separate
+          on-chain transaction. This can substantially reduce fees and settlement time.
+        </p>
+      </section>
+
+      <section id="security">
+        <h2>06 // Security model</h2>
+        <p>
+          The protocol assumes that either participant may become dishonest, disappear,
+          delay settlement or attempt to exploit favorable price changes.
+        </p>
+        <p>It therefore aims to provide:</p>
+        <ul>
+          <li>bounded counterparty exposure;</li>
+          <li>authenticated and signed negotiation;</li>
+          <li>deterministic state transitions;</li>
+          <li>replay protection;</li>
+          <li>strict round numbering;</li>
+          <li>transaction verification;</li>
+          <li>configurable confirmation thresholds;</li>
+          <li>timeout-based termination;</li>
+          <li>optional collateral;</li>
+          <li>minimal or no third-party custody;</li>
+          <li>recoverable local state after interruption.</li>
+        </ul>
+        <p>
+          The implementation should treat all peer messages as untrusted input. Trade
+          messages must be signed, validated against the active contract and rejected when
+          they refer to an invalid state transition.
+        </p>
+        <p>
+          A peer must not be able to skip rounds, reuse an old transaction, modify the
+          agreed quantities or persuade another node to continue from an inconsistent
+          state.
+        </p>
+      </section>
+
+      <section id="economics">
+        <h2>07 // Economic considerations</h2>
+        <p>
+          Very small settlement rounds reduce fraud exposure but increase fees and latency.
+          The protocol should therefore allow users to choose a risk budget rather than
+          requiring a fixed number of rounds.
+        </p>
+        <p>For example, a participant might specify:</p>
+        <pre><code>Maximum acceptable counterparty exposure: 50 EUR</code></pre>
+        <p>The software could then calculate an appropriate round size based on:</p>
+        <ul>
+          <li>total trade value;</li>
+          <li>network fees;</li>
+          <li>expected confirmation time;</li>
+          <li>collateral;</li>
+          <li>asset volatility;</li>
+          <li>minimum transferable amount.</li>
+        </ul>
+        <p>
+          The optimal settlement schedule balances security against practical execution
+          cost.
+        </p>
+      </section>
+
+      <section id="market-risk">
+        <h2>08 // Market-risk controls</h2>
+        <p>
+          Fractional settlement introduces a risk that one participant stops trading after
+          the market moves against them.
+        </p>
+        <p>Possible controls include:</p>
+        <ul>
+          <li>a fixed exchange rate for the complete trade;</li>
+          <li>a deterministic price oracle;</li>
+          <li>rolling price recalculation;</li>
+          <li>cancellation penalties;</li>
+          <li>locked collateral;</li>
+          <li>maximum settlement duration;</li>
+          <li>minimum completion commitments.</li>
+        </ul>
+        <p>
+          The price mechanism must be included in the signed contract so neither participant
+          can change it unilaterally during execution.
+        </p>
+      </section>
+
+      <section id="identity">
+        <h2>09 // Reputation and identity</h2>
+        <p>
+          The protocol can remain pseudonymous while still supporting persistent
+          cryptographic identities.
+        </p>
+        <p>
+          A participant may be represented by a public key rather than a legal name. Trade
+          history, successful completion records and collateral behavior can be associated
+          with that key.
+        </p>
+        <p>
+          Reputation alone is not sufficient because users can create new identities. A
+          stronger model combines:
+        </p>
+        <ul>
+          <li>persistent public-key identities;</li>
+          <li>signed trade histories;</li>
+          <li>collateral requirements;</li>
+          <li>limits for new identities;</li>
+          <li>increasing trade capacity after successful settlements.</li>
+        </ul>
+        <p>
+          This makes abandoning a dishonest identity more expensive without requiring
+          centralized identity verification.
+        </p>
+      </section>
+
+      <section id="scope">
+        <h2>10 // Scope</h2>
+        <p>
+          The initial project is best treated as an open protocol and reference
+          implementation, not as a hosted brokerage.
+        </p>
+        <p>Its main components would be:</p>
+        <pre><code>peer identity and cryptographic signing
+signed offer format
+peer discovery and order propagation
+trade negotiation
+fractional settlement state machine
+blockchain adapters
+transaction verification
+timeout and recovery logic
+optional Tor transport
+optional collateral support
+audit logs and reproducible trade records</code></pre>
+        <p>
+          Blockchain-specific behavior should be isolated behind adapters so the settlement
+          engine does not depend on one coin or one transaction model.
+        </p>
+      </section>
+
+      <section id="use-cases">
+        <h2>11 // Intended use cases</h2>
+        <p>The protocol is particularly suited to:</p>
+        <ul>
+          <li>direct cryptocurrency-to-cryptocurrency exchange;</li>
+          <li>illiquid or uncommon trading pairs;</li>
+          <li>large peer-to-peer or OTC transactions;</li>
+          <li>chains that cannot participate in conventional atomic swaps;</li>
+          <li>users who do not want to deposit the complete trade value with a centralized intermediary;</li>
+          <li>experimental privacy-preserving trading networks.</li>
+        </ul>
+        <p>
+          It is less suited to high-frequency exchange trading, where centralized matching
+          engines and pooled liquidity provide much faster execution.
+        </p>
+      </section>
+
+      <section id="objective" class="objective">
+        <h2>12 // Project objective</h2>
+        <p>
+          The objective is not to eliminate trust through marketing language. It is to
+          reduce the amount of trust required at any individual moment.
+        </p>
+        <p>
+          The protocol converts one large counterparty risk into a controlled sequence of
+          smaller risks. Every completed settlement round moves the trade forward, while
+          any failure terminates the process before the remaining value is exposed.
+        </p>
+        <div class="formula">
+          A decentralized peer-to-peer exchange protocol that minimizes counterparty loss
+          by streaming trades through cryptographically verified fractional settlement
+          rounds.
+        </div>
+        <div>
+          <span class="tag">non-custodial</span>
+          <span class="tag">peer-to-peer</span>
+          <span class="tag">fractional settlement</span>
+          <span class="tag">Tor-capable</span>
+          <span class="tag">bounded risk</span>
+          <span class="tag">open protocol</span>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span class="prompt">[protocol_status: concept]</span>
+      &nbsp; No custody. No single full-value leap of faith. No ceremonial “trust us.”
+    </footer>
+  </div>
+</body>
+</html>

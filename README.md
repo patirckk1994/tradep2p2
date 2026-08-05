@@ -78,6 +78,59 @@ The optional mediator snapshot contains counts, public offer terms, active room
 IDs, round number and state. It deliberately omits client IDs and receiving
 addresses. More detail is in [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
 
+The same snapshot also powers a read-only operator dashboard, separate from
+the trading dashboard above:
+
+```sh
+./build/tradep2p-mediator-dashboard "$PWD/logs/lobby-state.json" --port 8091
+```
+
+Open `http://127.0.0.1:8091` for connected-client counts, open offers and
+active-room state at a glance. It never speaks the TradeP2P protocol itself.
+
+## Public web client
+
+`tradep2p-webclient` lets a website offer visitors a hosted client instead of
+requiring them to install anything. Unlike `tradep2p-dashboard`, one process
+serves many browser sessions:
+
+```sh
+./build/tradep2p-webclient client \
+  127.0.0.1:7443 MEDIATOR_CERT_SHA256 \
+  --port 8090 --accounts "$PWD/logs/webclient-accounts.tsv"
+```
+
+Open `http://127.0.0.1:8090` to register a username and password. That
+account is a local convenience session for this web client only — it is
+never sent to the mediator and has nothing to do with the anonymous protocol
+identity a session gets when it connects. Logging in re-attaches your
+existing session (and its live mediator connection) if one is still running;
+logging out terminates it. The page carries a standing privacy warning: the
+operator of a hosted web client can see session activity and source IP even
+though the trade protocol stays anonymous to the mediator. Put this behind a
+TLS-terminating reverse proxy before exposing it publicly, and point your
+site's `webclient_url` (in `htdocs/config.php`) at that proxied address.
+
+## Mediator fees
+
+An operator can charge a fee per settled trade by setting environment
+variables before starting the mediator:
+
+```sh
+export TRADEP2P_FEE_ASSET=BTC
+export TRADEP2P_FEE_AMOUNT=500
+export TRADEP2P_FEE_ADDRESS=your-fee-receive-address
+./build/tradep2p_cli mediator 0.0.0.0:7443 mediator.cert.pem mediator.key.pem
+```
+
+Leaving `TRADEP2P_FEE_ASSET` unset charges no fee (the default). When a fee is
+configured, the mediator advertises it to every connecting client and adds it
+to the settlement as one extra final leg, paid by the offer creator after the
+last trade round. It settles through the same `sent`/`received` acknowledgement
+flow as every other transfer — the mediator is simply its own recipient, so it
+completes the room as soon as the fee is reported sent, without waiting on the
+other party.
+
 ## Terminal commands
 
 Publish an offer lobby:
@@ -178,6 +231,36 @@ List mediator nodes:
 ./build/tradep2p_cli nodes registry.example:7555 REGISTRY_PIN
 ```
 
+Set `TRADEP2P_REGISTRY_STATE_FILE` before starting the registry to get the
+same kind of local snapshot the mediator writes, and view it with the
+registry's own read-only operator dashboard:
+
+```sh
+export TRADEP2P_REGISTRY_STATE_FILE="$PWD/logs/registry-state.json"
+./build/tradep2p_cli registry 0.0.0.0:7555 registry.cert.pem registry.key.pem &
+./build/tradep2p-registry-dashboard "$PWD/logs/registry-state.json" --port 8092
+```
+
+## Quick setup scripts
+
+`setup_mediator.sh` and `setup_registry.sh` wrap the steps above: they
+generate a TLS identity if one is missing, build the project if needed, and
+launch the mediator or registry together with its operator dashboard. Both
+read from (and can write) a small config file so repeat runs don't need
+flags:
+
+```sh
+./setup_registry.sh --init-config          # write registry.conf, then edit it
+./setup_registry.sh                        # start the registry + dashboard
+
+./setup_mediator.sh --init-config \
+  --fee-asset BTC --fee-amount 500 --fee-address your-address
+./setup_mediator.sh                        # start the mediator + dashboard
+```
+
+Run either with `--help` for the full flag list, including `--registry` /
+`--registry-pin` to have `setup_mediator.sh` register with a running registry.
+
 ## Terminal client
 
 Direct:
@@ -250,7 +333,9 @@ The old `tests/*.sh` entry points remain as wrappers around the restored
 - offer and room state is memory-only;
 - no reconnect or crash recovery for an interrupted trade;
 - no automatic offer or room timeout yet;
-- acknowledgements are user claims, not transaction proofs;
+- acknowledgements are user claims, not transaction proofs, including the
+  mediator fee leg — it is an honor-system settlement round like any other,
+  not a cryptographically enforced payment;
 - browser dashboard does not control a wallet or broadcast transactions;
 - registry advertisements are unauthenticated;
 - no NAT traversal;

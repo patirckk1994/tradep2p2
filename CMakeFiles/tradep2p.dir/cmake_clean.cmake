@@ -1,4 +1,6 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o"
+  "CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o.d"
   "CMakeFiles/tradep2p.dir/src/lobby.cpp.o"
   "CMakeFiles/tradep2p.dir/src/lobby.cpp.o.d"
   "CMakeFiles/tradep2p.dir/src/mediator.cpp.o"

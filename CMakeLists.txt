@@ -14,6 +14,7 @@ add_library(tradep2p
     src/secure_channel.cpp
     src/lobby.cpp
     src/registry.cpp
+    src/dashboard_client.cpp
 )
 target_include_directories(tradep2p PUBLIC include)
 target_link_libraries(tradep2p PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
@@ -34,6 +35,36 @@ target_include_directories(tradep2p-dashboard PRIVATE
 target_link_libraries(tradep2p-dashboard PRIVATE tradep2p Threads::Threads)
 target_compile_features(tradep2p-dashboard PRIVATE cxx_std_20)
 target_compile_options(tradep2p-dashboard PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p-webclient src/http_webclient.cpp)
+target_include_directories(tradep2p-webclient PRIVATE
+    ${CMAKE_SOURCE_DIR}/cpp-httplib-master
+)
+target_link_libraries(tradep2p-webclient PRIVATE tradep2p Threads::Threads)
+target_compile_features(tradep2p-webclient PRIVATE cxx_std_20)
+target_compile_options(tradep2p-webclient PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p-mediator-dashboard src/http_mediator_dashboard.cpp)
+target_include_directories(tradep2p-mediator-dashboard PRIVATE
+    ${CMAKE_SOURCE_DIR}/cpp-httplib-master
+)
+target_link_libraries(tradep2p-mediator-dashboard PRIVATE Threads::Threads)
+target_compile_features(tradep2p-mediator-dashboard PRIVATE cxx_std_20)
+target_compile_options(tradep2p-mediator-dashboard PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p-registry-dashboard src/http_registry_dashboard.cpp)
+target_include_directories(tradep2p-registry-dashboard PRIVATE
+    ${CMAKE_SOURCE_DIR}/cpp-httplib-master
+)
+target_link_libraries(tradep2p-registry-dashboard PRIVATE Threads::Threads)
+target_compile_features(tradep2p-registry-dashboard PRIVATE cxx_std_20)
+target_compile_options(tradep2p-registry-dashboard PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 

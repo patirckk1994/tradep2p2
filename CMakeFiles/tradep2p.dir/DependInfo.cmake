@@ -8,6 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/home/pat/p2p/tradep2p2/src/dashboard_client.cpp" "CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o" "gcc" "CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o.d"
   "/home/pat/p2p/tradep2p2/src/lobby.cpp" "CMakeFiles/tradep2p.dir/src/lobby.cpp.o" "gcc" "CMakeFiles/tradep2p.dir/src/lobby.cpp.o.d"
   "/home/pat/p2p/tradep2p2/src/mediator.cpp" "CMakeFiles/tradep2p.dir/src/mediator.cpp.o" "gcc" "CMakeFiles/tradep2p.dir/src/mediator.cpp.o.d"
   "/home/pat/p2p/tradep2p2/src/protocol.cpp" "CMakeFiles/tradep2p.dir/src/protocol.cpp.o" "gcc" "CMakeFiles/tradep2p.dir/src/protocol.cpp.o.d"

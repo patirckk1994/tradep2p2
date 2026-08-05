@@ -142,13 +142,28 @@ CMakeFiles/tradep2p.dir/src/registry.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/tradep2p.dir/src/registry.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/pat/p2p/tradep2p2/src/registry.cpp -o CMakeFiles/tradep2p.dir/src/registry.cpp.s
 
+CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o: CMakeFiles/tradep2p.dir/flags.make
+CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o: src/dashboard_client.cpp
+CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o: CMakeFiles/tradep2p.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/pat/p2p/tradep2p2/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o -MF CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o.d -o CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o -c /home/pat/p2p/tradep2p2/src/dashboard_client.cpp
+
+CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/pat/p2p/tradep2p2/src/dashboard_client.cpp > CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.i
+
+CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/pat/p2p/tradep2p2/src/dashboard_client.cpp -o CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.s
+
 # Object files for target tradep2p
 tradep2p_OBJECTS = \
 "CMakeFiles/tradep2p.dir/src/protocol.cpp.o" \
 "CMakeFiles/tradep2p.dir/src/mediator.cpp.o" \
 "CMakeFiles/tradep2p.dir/src/secure_channel.cpp.o" \
 "CMakeFiles/tradep2p.dir/src/lobby.cpp.o" \
-"CMakeFiles/tradep2p.dir/src/registry.cpp.o"
+"CMakeFiles/tradep2p.dir/src/registry.cpp.o" \
+"CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o"
 
 # External object files for target tradep2p
 tradep2p_EXTERNAL_OBJECTS =
@@ -158,9 +173,10 @@ libtradep2p.a: CMakeFiles/tradep2p.dir/src/mediator.cpp.o
 libtradep2p.a: CMakeFiles/tradep2p.dir/src/secure_channel.cpp.o
 libtradep2p.a: CMakeFiles/tradep2p.dir/src/lobby.cpp.o
 libtradep2p.a: CMakeFiles/tradep2p.dir/src/registry.cpp.o
+libtradep2p.a: CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o
 libtradep2p.a: CMakeFiles/tradep2p.dir/build.make
 libtradep2p.a: CMakeFiles/tradep2p.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/pat/p2p/tradep2p2/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX static library libtradep2p.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/pat/p2p/tradep2p2/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX static library libtradep2p.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/tradep2p.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/tradep2p.dir/link.txt --verbose=$(VERBOSE)
 

@@ -166,6 +166,45 @@ tradep2p-dashboard/fast:
 .PHONY : tradep2p-dashboard/fast
 
 #=============================================================================
+# Target rules for targets named tradep2p-webclient
+
+# Build rule for target.
+tradep2p-webclient: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 tradep2p-webclient
+.PHONY : tradep2p-webclient
+
+# fast build rule for target.
+tradep2p-webclient/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-webclient.dir/build.make CMakeFiles/tradep2p-webclient.dir/build
+.PHONY : tradep2p-webclient/fast
+
+#=============================================================================
+# Target rules for targets named tradep2p-mediator-dashboard
+
+# Build rule for target.
+tradep2p-mediator-dashboard: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 tradep2p-mediator-dashboard
+.PHONY : tradep2p-mediator-dashboard
+
+# fast build rule for target.
+tradep2p-mediator-dashboard/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-mediator-dashboard.dir/build.make CMakeFiles/tradep2p-mediator-dashboard.dir/build
+.PHONY : tradep2p-mediator-dashboard/fast
+
+#=============================================================================
+# Target rules for targets named tradep2p-registry-dashboard
+
+# Build rule for target.
+tradep2p-registry-dashboard: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 tradep2p-registry-dashboard
+.PHONY : tradep2p-registry-dashboard
+
+# fast build rule for target.
+tradep2p-registry-dashboard/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-registry-dashboard.dir/build.make CMakeFiles/tradep2p-registry-dashboard.dir/build
+.PHONY : tradep2p-registry-dashboard/fast
+
+#=============================================================================
 # Target rules for targets named tradep2p_unit_tests
 
 # Build rule for target.
@@ -177,6 +216,30 @@ tradep2p_unit_tests: cmake_check_build_system
 tradep2p_unit_tests/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p_unit_tests.dir/build.make CMakeFiles/tradep2p_unit_tests.dir/build
 .PHONY : tradep2p_unit_tests/fast
+
+src/dashboard_client.o: src/dashboard_client.cpp.o
+.PHONY : src/dashboard_client.o
+
+# target to build an object file
+src/dashboard_client.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p.dir/build.make CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o
+.PHONY : src/dashboard_client.cpp.o
+
+src/dashboard_client.i: src/dashboard_client.cpp.i
+.PHONY : src/dashboard_client.i
+
+# target to preprocess a source file
+src/dashboard_client.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p.dir/build.make CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.i
+.PHONY : src/dashboard_client.cpp.i
+
+src/dashboard_client.s: src/dashboard_client.cpp.s
+.PHONY : src/dashboard_client.s
+
+# target to generate assembly for a file
+src/dashboard_client.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p.dir/build.make CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.s
+.PHONY : src/dashboard_client.cpp.s
 
 src/http_dashboard.o: src/http_dashboard.cpp.o
 .PHONY : src/http_dashboard.o
@@ -201,6 +264,78 @@ src/http_dashboard.s: src/http_dashboard.cpp.s
 src/http_dashboard.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-dashboard.dir/build.make CMakeFiles/tradep2p-dashboard.dir/src/http_dashboard.cpp.s
 .PHONY : src/http_dashboard.cpp.s
+
+src/http_mediator_dashboard.o: src/http_mediator_dashboard.cpp.o
+.PHONY : src/http_mediator_dashboard.o
+
+# target to build an object file
+src/http_mediator_dashboard.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-mediator-dashboard.dir/build.make CMakeFiles/tradep2p-mediator-dashboard.dir/src/http_mediator_dashboard.cpp.o
+.PHONY : src/http_mediator_dashboard.cpp.o
+
+src/http_mediator_dashboard.i: src/http_mediator_dashboard.cpp.i
+.PHONY : src/http_mediator_dashboard.i
+
+# target to preprocess a source file
+src/http_mediator_dashboard.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-mediator-dashboard.dir/build.make CMakeFiles/tradep2p-mediator-dashboard.dir/src/http_mediator_dashboard.cpp.i
+.PHONY : src/http_mediator_dashboard.cpp.i
+
+src/http_mediator_dashboard.s: src/http_mediator_dashboard.cpp.s
+.PHONY : src/http_mediator_dashboard.s
+
+# target to generate assembly for a file
+src/http_mediator_dashboard.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-mediator-dashboard.dir/build.make CMakeFiles/tradep2p-mediator-dashboard.dir/src/http_mediator_dashboard.cpp.s
+.PHONY : src/http_mediator_dashboard.cpp.s
+
+src/http_registry_dashboard.o: src/http_registry_dashboard.cpp.o
+.PHONY : src/http_registry_dashboard.o
+
+# target to build an object file
+src/http_registry_dashboard.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-registry-dashboard.dir/build.make CMakeFiles/tradep2p-registry-dashboard.dir/src/http_registry_dashboard.cpp.o
+.PHONY : src/http_registry_dashboard.cpp.o
+
+src/http_registry_dashboard.i: src/http_registry_dashboard.cpp.i
+.PHONY : src/http_registry_dashboard.i
+
+# target to preprocess a source file
+src/http_registry_dashboard.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-registry-dashboard.dir/build.make CMakeFiles/tradep2p-registry-dashboard.dir/src/http_registry_dashboard.cpp.i
+.PHONY : src/http_registry_dashboard.cpp.i
+
+src/http_registry_dashboard.s: src/http_registry_dashboard.cpp.s
+.PHONY : src/http_registry_dashboard.s
+
+# target to generate assembly for a file
+src/http_registry_dashboard.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-registry-dashboard.dir/build.make CMakeFiles/tradep2p-registry-dashboard.dir/src/http_registry_dashboard.cpp.s
+.PHONY : src/http_registry_dashboard.cpp.s
+
+src/http_webclient.o: src/http_webclient.cpp.o
+.PHONY : src/http_webclient.o
+
+# target to build an object file
+src/http_webclient.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-webclient.dir/build.make CMakeFiles/tradep2p-webclient.dir/src/http_webclient.cpp.o
+.PHONY : src/http_webclient.cpp.o
+
+src/http_webclient.i: src/http_webclient.cpp.i
+.PHONY : src/http_webclient.i
+
+# target to preprocess a source file
+src/http_webclient.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-webclient.dir/build.make CMakeFiles/tradep2p-webclient.dir/src/http_webclient.cpp.i
+.PHONY : src/http_webclient.cpp.i
+
+src/http_webclient.s: src/http_webclient.cpp.s
+.PHONY : src/http_webclient.s
+
+# target to generate assembly for a file
+src/http_webclient.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/tradep2p-webclient.dir/build.make CMakeFiles/tradep2p-webclient.dir/src/http_webclient.cpp.s
+.PHONY : src/http_webclient.cpp.s
 
 src/lobby.o: src/lobby.cpp.o
 .PHONY : src/lobby.o
@@ -381,11 +516,26 @@ help:
 	@echo "... test"
 	@echo "... tradep2p"
 	@echo "... tradep2p-dashboard"
+	@echo "... tradep2p-mediator-dashboard"
+	@echo "... tradep2p-registry-dashboard"
+	@echo "... tradep2p-webclient"
 	@echo "... tradep2p_cli"
 	@echo "... tradep2p_unit_tests"
+	@echo "... src/dashboard_client.o"
+	@echo "... src/dashboard_client.i"
+	@echo "... src/dashboard_client.s"
 	@echo "... src/http_dashboard.o"
 	@echo "... src/http_dashboard.i"
 	@echo "... src/http_dashboard.s"
+	@echo "... src/http_mediator_dashboard.o"
+	@echo "... src/http_mediator_dashboard.i"
+	@echo "... src/http_mediator_dashboard.s"
+	@echo "... src/http_registry_dashboard.o"
+	@echo "... src/http_registry_dashboard.i"
+	@echo "... src/http_registry_dashboard.s"
+	@echo "... src/http_webclient.o"
+	@echo "... src/http_webclient.i"
+	@echo "... src/http_webclient.s"
 	@echo "... src/lobby.o"
 	@echo "... src/lobby.i"
 	@echo "... src/lobby.s"

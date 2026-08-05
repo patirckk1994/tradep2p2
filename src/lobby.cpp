@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -113,6 +114,7 @@ const char* session_state_name(SessionState state) {
     case SessionState::WaitingForPeer: return "waiting_for_peer";
     case SessionState::WaitingForSent: return "waiting_for_sent";
     case SessionState::WaitingForReceived: return "waiting_for_received";
+    case SessionState::WaitingForFeeSent: return "waiting_for_fee_sent";
     case SessionState::Complete: return "complete";
     case SessionState::Aborted: return "aborted";
     }
@@ -124,6 +126,40 @@ std::string configured_state_file() {
     return value == nullptr ? std::string{} : std::string(value);
 }
 
+std::string env_or_empty(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string{} : std::string(value);
+}
+
+// A mediator-wide fee configured by the operator through environment
+// variables, kept out of the CLI argument list so existing invocations stay
+// unchanged. Unset or empty TRADEP2P_FEE_ASSET means no fee is charged.
+FeeTerms configured_fee() {
+    FeeTerms fee;
+    fee.asset = env_or_empty("TRADEP2P_FEE_ASSET");
+    if (fee.asset.empty()) {
+        return fee;
+    }
+    const std::string amount_text = env_or_empty("TRADEP2P_FEE_AMOUNT");
+    const std::string address = env_or_empty("TRADEP2P_FEE_ADDRESS");
+    if (amount_text.empty() || address.empty()) {
+        throw std::invalid_argument(
+            "TRADEP2P_FEE_ASSET requires TRADEP2P_FEE_AMOUNT and "
+            "TRADEP2P_FEE_ADDRESS to also be set");
+    }
+    std::uint64_t amount = 0U;
+    const char* begin = amount_text.data();
+    const char* end = begin + amount_text.size();
+    const auto [ptr, error] = std::from_chars(begin, end, amount, 10);
+    if (error != std::errc{} || ptr != end || amount == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_FEE_AMOUNT");
+    }
+    fee.amount = amount;
+    fee.address = address;
+    validate_fee_terms(fee);
+    return fee;
+}
+
 } // namespace
 
 class LobbyServer::Impl {
@@ -131,7 +167,8 @@ public:
     Impl(Endpoint bind_endpoint, ServerTlsIdentity identity)
         : bind_endpoint_(std::move(bind_endpoint)),
           identity_(std::move(identity)),
-          state_file_(configured_state_file()) {}
+          state_file_(configured_state_file()),
+          fee_(configured_fee()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -146,6 +183,10 @@ public:
                   << bind_endpoint_.port << '\n';
         std::cout << "Anonymous offer rooms, address exchange and multi-room settlement.\n";
         std::cout << "No accounts, client certificates, transaction data or wallet custody.\n";
+        if (fee_.amount > 0U) {
+            std::cout << "Mediator fee: " << fee_.amount << ' ' << fee_.asset
+                      << " to " << fee_.address << " per settled trade.\n";
+        }
 
         if (!state_file_.empty()) {
             snapshot_running_.store(true);
@@ -291,23 +332,25 @@ private:
     struct RoomEntry {
         RoomEntry(const PendingInvite& invite,
                   RoomId room_id,
-                  std::string receive_address_b)
+                  std::string receive_address_b,
+                  FeeTerms fee)
             : id(room_id),
               party_a(invite.from),
               party_b(invite.to),
               session(CreateRoomMessage{invite.terms, invite.receive_address_a},
-                      room_id) {
+                      room_id, std::move(fee)) {
             session.join(JoinRoomMessage{room_id, std::move(receive_address_b)});
         }
 
         RoomEntry(const OpenOffer& offer,
                   ClientId joining_client,
-                  std::string receive_address_b)
+                  std::string receive_address_b,
+                  FeeTerms fee)
             : id(offer.id),
               party_a(offer.creator),
               party_b(joining_client),
               session(CreateRoomMessage{offer.terms, offer.receive_address_a},
-                      offer.id) {
+                      offer.id, std::move(fee)) {
             session.join(JoinRoomMessage{offer.id, std::move(receive_address_b)});
         }
 
@@ -335,7 +378,7 @@ private:
             client->channel.set_timeout(kConnectionIoTimeoutSeconds);
             client->channel.send_frame(
                 MessageType::Welcome,
-                encode_welcome(WelcomeMessage{client->id}));
+                encode_welcome(WelcomeMessage{client->id, fee_}));
 
             std::cout << "client connected: " << client_key << '\n';
 
@@ -553,7 +596,7 @@ private:
             // The room id published in /offers remains stable for both parties and
             // for all later /sent, /received and /abort messages.
             room = std::make_shared<RoomEntry>(offer, client->id,
-                                               message.receive_address_b);
+                                               message.receive_address_b, fee_);
             rooms_.emplace(key, room);
             offers_.erase(offer_it);
         }
@@ -694,7 +737,7 @@ private:
             } while (rooms_.contains(room_key));
 
             room = std::make_shared<RoomEntry>(
-                invite, room_id, message.receive_address_b);
+                invite, room_id, message.receive_address_b, fee_);
             rooms_.emplace(room_key, room);
             invites_.erase(invite_it);
         }
@@ -736,6 +779,7 @@ private:
                      const RoundSignalMessage& message) {
         const auto room = find_room_for(client->id, message.room_id);
         std::shared_ptr<Client> receiver;
+        bool complete = false;
         {
             std::scoped_lock lock(room->mutex);
             if (!room->active) {
@@ -744,7 +788,22 @@ private:
             const Party reporting_party = party_for(*room, client->id);
             room->session.sender_reported_sent(reporting_party, message);
             receiver = client_for_party(*room, other_party(reporting_party));
+            // Reporting a mediator fee as sent can complete the room directly,
+            // since the mediator (not the counterparty) is the recipient of
+            // that leg and needs no separate receipt acknowledgement.
+            complete = room->session.state() == SessionState::Complete;
+            if (complete) {
+                room->active = false;
+            }
         }
+
+        if (complete) {
+            erase_room(room->id, room);
+            const auto payload = encode_complete(CompleteMessage{room->id});
+            send_to_room(room, MessageType::Complete, payload);
+            return;
+        }
+
         if (!receiver) {
             abort_room(room, "peer disconnected");
             return;
@@ -1021,7 +1080,8 @@ private:
             snapshot.state = session_state_name(room->session.state());
             snapshot.round = room->session.round_index() + 1U;
             if (room->session.state() == SessionState::WaitingForSent ||
-                room->session.state() == SessionState::WaitingForReceived) {
+                room->session.state() == SessionState::WaitingForReceived ||
+                room->session.state() == SessionState::WaitingForFeeSent) {
                 snapshot.current_sender =
                     room->session.current_sender() == Party::A ? "A" : "B";
             }
@@ -1050,7 +1110,10 @@ private:
                             std::to_string(bind_endpoint_.port))
              << "\",\"clients\":" << client_count
              << ",\"pending_invites\":" << pending_invites
-             << ",\"offers\":[";
+             << ",\"fee_asset\":\"" << json_escape(fee_.asset)
+             << "\",\"fee_amount\":" << fee_.amount
+             << ",\"fee_address\":\"" << json_escape(fee_.address)
+             << "\",\"offers\":[";
 
         for (std::size_t index = 0; index < offer_snapshots.size(); ++index) {
             if (index != 0U) {
@@ -1114,6 +1177,7 @@ private:
     Endpoint bind_endpoint_;
     ServerTlsIdentity identity_;
     std::string state_file_;
+    FeeTerms fee_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
     std::mutex hub_mutex_;

@@ -5,11 +5,12 @@
 
 namespace tradep2p {
 
-MediatorSession::MediatorSession(CreateRoomMessage creator, RoomId room_id)
-    : creator_(std::move(creator)), room_id_(room_id) {
+MediatorSession::MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee)
+    : creator_(std::move(creator)), room_id_(room_id), fee_(std::move(fee)) {
     validate_terms(creator_.terms);
     validate_address(creator_.receive_address_a);
     validate_room_id(room_id_);
+    validate_fee_terms(fee_);
 }
 
 void MediatorSession::join(const JoinRoomMessage& message) {
@@ -34,7 +35,7 @@ TradeReadyMessage MediatorSession::ready_message(Party party, ClientId peer_id) 
     validate_client_id(peer_id);
     return TradeReadyMessage{
         room_id_, party, peer_id, creator_.terms,
-        creator_.receive_address_a, receive_address_b_};
+        creator_.receive_address_a, receive_address_b_, fee_};
 }
 
 Party MediatorSession::first_sender_for_round() const {
@@ -49,6 +50,10 @@ Party MediatorSession::current_sender() const {
         state_ == SessionState::Aborted) {
         throw std::logic_error("session has no active sender");
     }
+    if (state_ == SessionState::WaitingForFeeSent) {
+        // The offer creator always settles the mediator fee.
+        return Party::A;
+    }
     const Party first = first_sender_for_round();
     return leg_index_ == 0U ? first : other_party(first);
 }
@@ -58,6 +63,16 @@ Party MediatorSession::current_receiver() const {
 }
 
 TurnMessage MediatorSession::current_turn() const {
+    if (state_ == SessionState::WaitingForFeeSent) {
+        TurnMessage message;
+        message.room_id = room_id_;
+        message.round_index = round_index_;
+        message.sender = Party::A;
+        message.asset = fee_.asset;
+        message.amount = fee_.amount;
+        message.destination = fee_.address;
+        return message;
+    }
     const Party sender = current_sender();
     TurnMessage message;
     message.room_id = room_id_;
@@ -92,6 +107,24 @@ void MediatorSession::validate_signal(const RoundSignalMessage& message) const {
 void MediatorSession::sender_reported_sent(
     Party reporting_party,
     const RoundSignalMessage& message) {
+    if (state_ == SessionState::WaitingForFeeSent) {
+        // The mediator is the recipient of the fee leg, so there is no
+        // counterparty to confirm receipt; the fee follows the same
+        // honor-system acknowledgement as every other transfer in this
+        // protocol and completes the room immediately.
+        if (message.room_id != room_id_) {
+            throw std::invalid_argument("signal has wrong room id");
+        }
+        if (message.round_index != round_index_) {
+            throw std::invalid_argument("signal has wrong round index");
+        }
+        if (reporting_party != Party::A || message.sender != Party::A) {
+            throw std::invalid_argument(
+                "only the offer creator settles the mediator fee");
+        }
+        state_ = SessionState::Complete;
+        return;
+    }
     if (state_ != SessionState::WaitingForSent) {
         throw std::logic_error("not waiting for sent acknowledgement");
     }
@@ -125,7 +158,8 @@ void MediatorSession::advance_after_receipt() {
     leg_index_ = 0U;
     ++round_index_;
     if (round_index_ == creator_.terms.rounds) {
-        state_ = SessionState::Complete;
+        state_ = fee_.amount > 0U ? SessionState::WaitingForFeeSent
+                                  : SessionState::Complete;
     } else {
         state_ = SessionState::WaitingForSent;
     }
