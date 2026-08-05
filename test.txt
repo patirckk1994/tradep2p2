@@ -1,1 +1,0 @@
-grep -B 5 -A 20 registry.cpp /home/pat/.claude/projects/-home-pat-p2p-tradep2p2/d081460d-86e8-4ba8-b4d7-8749c14eb4c0.jsonl
