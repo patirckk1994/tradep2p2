@@ -79,7 +79,19 @@ public:
     SecureListener(const SecureListener&) = delete;
     SecureListener& operator=(const SecureListener&) = delete;
 
-    [[nodiscard]] SecureChannel accept();
+    // Accepts a raw TCP connection only. No TLS happens here, so this never
+    // blocks on a slow or hostile peer; it only blocks until some connection
+    // arrives, exactly like a bare accept(2). The caller owns the returned
+    // descriptor and must eventually pass it to complete_handshake() or
+    // close it directly.
+    [[nodiscard]] int accept_raw();
+
+    // Performs the TLS handshake for a descriptor obtained from accept_raw().
+    // This is the part that can block for up to the handshake timeout on a
+    // peer that opens the connection and stalls, so it must run on a
+    // per-connection thread rather than the thread driving the accept loop.
+    // Closes the descriptor itself on failure.
+    [[nodiscard]] SecureChannel complete_handshake(int socket_fd) const;
 
 private:
     int listen_fd_{-1};

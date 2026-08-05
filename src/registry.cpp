@@ -26,6 +26,12 @@
 namespace tradep2p {
 namespace {
 
+// Bounds how many TLS handshakes may be in flight at once. Handshakes run
+// concurrently, one per accepted connection, rather than serialized on the
+// accept loop; without this bound a burst of bare TCP connections that never
+// send a ClientHello could still spawn unbounded threads.
+constexpr std::size_t kMaxPendingHandshakes = 64U;
+
 struct RegistryEntry {
     RegistryNode node;
     std::chrono::steady_clock::time_point expires_at;
@@ -109,17 +115,40 @@ public:
         }
 
         for (;;) {
-            SecureChannel channel;
+            int fd = -1;
             try {
-                channel = listener.accept();
+                fd = listener.accept_raw();
             } catch (const std::exception& error) {
-                // Garbage or a timed-out TLS handshake must not terminate the
-                // registry process.
-                std::cerr << "rejected registry connection: "
-                          << error.what() << '\n';
+                // A bare accept() failure; it does not block on a slow or
+                // hostile peer, so it cannot itself starve other connections
+                // the way the old combined accept-plus-handshake call could.
+                std::cerr << "accept failed: " << error.what() << '\n';
                 continue;
             }
-            std::thread([this, channel = std::move(channel)]() mutable {
+
+            if (pending_handshakes_.fetch_add(1U) >= kMaxPendingHandshakes) {
+                pending_handshakes_.fetch_sub(1U);
+                ::close(fd);
+                continue;
+            }
+
+            std::thread([this, &listener, fd]() {
+                struct HandshakeGuard {
+                    std::atomic<std::size_t>& counter;
+                    ~HandshakeGuard() { counter.fetch_sub(1U); }
+                } guard{pending_handshakes_};
+
+                // The handshake (and its up-to-10-second timeout) now runs
+                // here, on a per-connection thread, so one stalled peer can
+                // no longer block the accept loop from servicing anyone else.
+                SecureChannel channel;
+                try {
+                    channel = listener.complete_handshake(fd);
+                } catch (const std::exception& error) {
+                    std::cerr << "rejected registry connection: "
+                              << error.what() << '\n';
+                    return;
+                }
                 handle_connection(std::move(channel));
             }).detach();
         }
@@ -302,6 +331,7 @@ private:
     std::string state_file_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
+    std::atomic<std::size_t> pending_handshakes_{0U};
     std::mutex mutex_;
     std::unordered_map<std::string, RegistryEntry> entries_;
 };

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/tradep2p-registry-dashboard.dir/link.d "CMakeFiles/tradep2p-registry-dashboard.dir/src/http_registry_dashboard.cpp.o" -o tradep2p-registry-dashboard

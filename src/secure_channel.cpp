@@ -675,8 +675,8 @@ SecureListener::~SecureListener() {
     }
 }
 
-SecureChannel SecureListener::accept() {
-    if (listen_fd_ < 0 || ctx_ == nullptr) {
+int SecureListener::accept_raw() {
+    if (listen_fd_ < 0) {
         throw std::logic_error("listener is closed");
     }
 
@@ -689,12 +689,20 @@ SecureChannel SecureListener::accept() {
         throw std::runtime_error(std::string("accept failed: ") + std::strerror(errno));
     }
 
+    set_close_on_exec(fd);
+    append_log("accept incoming client");
+    return fd;
+}
+
+SecureChannel SecureListener::complete_handshake(int socket_fd) const {
+    if (ctx_ == nullptr) {
+        close_fd(socket_fd);
+        throw std::logic_error("listener is closed");
+    }
     try {
-        set_close_on_exec(fd);
-        append_log("accept incoming client");
-        return SecureChannel::make_server(fd, ctx_);
+        return SecureChannel::make_server(socket_fd, ctx_);
     } catch (...) {
-        close_fd(fd);
+        close_fd(socket_fd);
         throw;
     }
 }

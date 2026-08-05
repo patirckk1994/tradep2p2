@@ -36,6 +36,11 @@ namespace tradep2p {
 namespace {
 
 constexpr std::size_t kMaxClients = 128U;
+// Bounds how many TLS handshakes may be in flight at once. Handshakes now
+// run concurrently, one per accepted connection, rather than serialized on
+// the accept loop; without this bound a burst of bare TCP connections that
+// never send a ClientHello could still spawn unbounded threads.
+constexpr std::size_t kMaxPendingHandshakes = 64U;
 constexpr std::size_t kMaxRooms = 256U;
 constexpr std::size_t kMaxOpenOffers = 256U;
 constexpr std::size_t kMaxOffersPerClient = 16U;
@@ -195,42 +200,69 @@ public:
         }
 
         for (;;) {
-            SecureChannel channel;
+            int fd = -1;
             try {
-                channel = listener.accept();
+                fd = listener.accept_raw();
             } catch (const std::exception& error) {
-                // A malformed or timed-out TLS handshake is a rejected client,
-                // not a fatal mediator error.
-                std::cerr << "rejected connection: " << error.what() << '\n';
+                // Only a bare accept() failure lands here now; it does not
+                // block on a slow or hostile peer, so this cannot itself
+                // starve other connections the way the old combined
+                // accept-plus-handshake call could.
+                std::cerr << "accept failed: " << error.what() << '\n';
                 continue;
             }
 
-            std::shared_ptr<Client> client;
-            {
-                std::scoped_lock lock(hub_mutex_);
-                if (clients_.size() >= kMaxClients) {
-                    try {
-                        channel.send_frame(
-                            MessageType::Error,
-                            encode_error({"mediator is full"}));
-                    } catch (...) {
-                    }
-                    continue;
-                }
-
-                ClientId id{};
-                std::string key;
-                do {
-                    id = random_id<ClientId>();
-                    validate_client_id(id);
-                    key = client_id_to_hex(id);
-                } while (clients_.contains(key));
-
-                client = std::make_shared<Client>(id, std::move(channel));
-                clients_.emplace(key, client);
+            if (pending_handshakes_.fetch_add(1U) >= kMaxPendingHandshakes) {
+                pending_handshakes_.fetch_sub(1U);
+                ::close(fd);
+                continue;
             }
 
-            std::thread([this, client] { client_loop(client); }).detach();
+            std::thread([this, &listener, fd] {
+                struct HandshakeGuard {
+                    std::atomic<std::size_t>& counter;
+                    ~HandshakeGuard() { counter.fetch_sub(1U); }
+                } guard{pending_handshakes_};
+
+                // The handshake itself (and its up-to-10-second timeout) now
+                // runs here, on a per-connection thread, so one stalled peer
+                // can no longer block the accept loop from servicing anyone
+                // else.
+                SecureChannel channel;
+                try {
+                    channel = listener.complete_handshake(fd);
+                } catch (const std::exception& error) {
+                    std::cerr << "rejected connection: " << error.what() << '\n';
+                    return;
+                }
+
+                std::shared_ptr<Client> client;
+                {
+                    std::scoped_lock lock(hub_mutex_);
+                    if (clients_.size() >= kMaxClients) {
+                        try {
+                            channel.send_frame(
+                                MessageType::Error,
+                                encode_error({"mediator is full"}));
+                        } catch (...) {
+                        }
+                        return;
+                    }
+
+                    ClientId id{};
+                    std::string key;
+                    do {
+                        id = random_id<ClientId>();
+                        validate_client_id(id);
+                        key = client_id_to_hex(id);
+                    } while (clients_.contains(key));
+
+                    client = std::make_shared<Client>(id, std::move(channel));
+                    clients_.emplace(key, client);
+                }
+
+                client_loop(client);
+            }).detach();
         }
     }
 
@@ -1180,6 +1212,7 @@ private:
     FeeTerms fee_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
+    std::atomic<std::size_t> pending_handshakes_{0U};
     std::mutex hub_mutex_;
     std::unordered_map<std::string, std::shared_ptr<Client>> clients_;
     std::unordered_map<std::string, OpenOffer> offers_;
