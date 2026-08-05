@@ -62,7 +62,7 @@ add_executable(tradep2p-registry-dashboard src/http_registry_dashboard.cpp)
 target_include_directories(tradep2p-registry-dashboard PRIVATE
     ${CMAKE_SOURCE_DIR}/cpp-httplib-master
 )
-target_link_libraries(tradep2p-registry-dashboard PRIVATE Threads::Threads)
+target_link_libraries(tradep2p-registry-dashboard PRIVATE tradep2p Threads::Threads)
 target_compile_features(tradep2p-registry-dashboard PRIVATE cxx_std_20)
 target_compile_options(tradep2p-registry-dashboard PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow

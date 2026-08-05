@@ -14,6 +14,8 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <sys/stat.h>
+
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -45,7 +47,12 @@ using tradep2p::dashboard::now_text;
 using tradep2p::dashboard::random_token;
 
 constexpr const char* kSessionCookie = "tp2p_session";
-constexpr int kPbkdf2Iterations = 200000;
+// Double-submit cookie used only to defend /api/register and /api/login
+// against CSRF before any session exists to hold a synchronizer token in.
+constexpr const char* kPreAuthCookie = "tp2p_csrf";
+constexpr const char* kPreAuthHeader = "X-TradeP2P-PreAuth";
+// OWASP's current minimum recommendation for PBKDF2-HMAC-SHA256.
+constexpr int kPbkdf2Iterations = 600000;
 constexpr std::size_t kSaltLength = 16U;
 constexpr std::size_t kHashLength = 32U;
 
@@ -174,6 +181,25 @@ bool same_origin(const httplib::Request& request) {
     return origin.substr(scheme_end + 3U) == request.get_header_value("Host");
 }
 
+// json_escape() is for JSON string literals and does not escape '<', '>' or
+// '&'; anything placed into HTML body content (as opposed to a JSON payload
+// or a JS string literal) must go through this instead.
+std::string html_escape(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char ch : text) {
+        switch (ch) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&#39;"; break;
+        default: out += ch;
+        }
+    }
+    return out;
+}
+
 std::string to_hex(const std::vector<std::uint8_t>& bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string text;
@@ -235,6 +261,11 @@ public:
         std::scoped_lock lock(mutex_);
         const auto it = accounts_.find(username);
         if (it == accounts_.end()) {
+            // Pay the same PBKDF2 cost as a real lookup even for an unknown
+            // username, so response timing cannot be used to enumerate which
+            // usernames are registered.
+            static const std::vector<std::uint8_t> dummy_salt(kSaltLength, 0U);
+            (void)derive(password, dummy_salt);
             return false;
         }
         const auto candidate = derive(password, it->second.salt);
@@ -290,6 +321,10 @@ private:
         }
         output << account.username << '\t' << to_hex(account.salt) << '\t'
                << to_hex(account.hash) << '\t' << account.created_at << '\n';
+        output.close();
+        // The file holds password salts and hashes; keep it readable only by
+        // whoever runs this process, regardless of the process umask.
+        ::chmod(path_.c_str(), S_IRUSR | S_IWUSR);
     }
 
     std::string path_;
@@ -416,62 +451,80 @@ constexpr const char* kPrivacyNotice =
     "stronger privacy guarantees, run the CLI or dashboard client yourself, "
     "ideally over Tor.";
 
+// Matches htdocs/assets/css/style.css so this page reads as part of the
+// same site once reverse-proxied under the marketing site's domain.
 std::string page_head(const std::string& title) {
     std::ostringstream out;
     out << "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+        << "<meta name=\"theme-color\" content=\"#f4f2ea\">\n"
         << "<title>" << title << "</title>\n<style>\n"
-        << ":root{--bg:#071019;--panel:#0d1824;--panel2:#101f2e;--line:#20384d;"
-           "--text:#dcecff;--muted:#8da7bd;--cyan:#58d8ff;--green:#77ff9b;"
-           "--amber:#ffd166;--red:#ff7575}\n"
+        << ":root{--bg:#f4f2ea;--panel:#fbfaf5;--panel2:#f1efe4;--line:#b8b09a;"
+           "--text:#1a1a15;--muted:#5c5745;--link:#14508c;--accent:#2f6d3a;"
+           "--accent-soft:#e4ecdf;--amber:#8a5a10;--danger:#8a2f2a}\n"
         << "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:"
-           "var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,"
-           "Consolas,monospace}\n"
+           "var(--text);font:15px/1.55 Verdana,Geneva,Arial,\"Helvetica Neue\","
+           "Helvetica,sans-serif}\n"
+        << "a{color:var(--link)}code{font-family:\"Courier New\",Courier,"
+           "monospace}\n"
+        << ".site-strip{border-bottom:3px double var(--line);background:var(--"
+           "panel)}\n"
+        << ".site-strip .row{width:min(900px,calc(100% - 24px));margin:0 auto;"
+           "min-height:44px;justify-content:space-between}\n"
+        << ".site-strip a{text-decoration:none;font:700 13px \"Courier New\","
+           "Courier,monospace;color:var(--text)}\n"
+        << ".site-strip span{color:var(--muted);font-size:12px}\n"
         << ".wrap{width:min(900px,calc(100% - 24px));margin:24px auto 60px}\n"
-        << ".wide{width:min(1500px,calc(100% - 24px))}\n"
-        << ".panel{border:1px solid var(--line);background:rgba(13,24,36,.96);"
-           "border-radius:10px;padding:20px;margin-bottom:16px}\n"
-        << ".warning{border:1px solid #6b4d1c;background:#241a08;color:#ffd166;"
-           "padding:16px 18px;border-radius:10px;margin-bottom:20px;line-height:"
-           "1.6}\n"
-        << ".warning b{color:#ffe19b}\n"
-        << "h1{font-size:1.5rem;margin:0 0 6px}h2{margin:0 0 14px;color:var(--"
-           "cyan);font-size:1.05rem}\n"
+        << ".wide{width:min(1300px,calc(100% - 24px))}\n"
+        << ".panel{border:1px solid var(--line);background:var(--panel);"
+           "padding:18px;margin-bottom:14px}\n"
+        << ".warning{border:1px solid var(--amber);background:#f6ecd9;color:"
+           "#5a4110;padding:14px 16px;margin-bottom:18px;line-height:1.6}\n"
+        << ".warning b{color:var(--amber)}\n"
+        << "h1{font-size:1.35rem;margin:0 0 6px}h2{margin:0 0 12px;color:var(--"
+           "text);font-size:1.02rem}\n"
         << ".muted{color:var(--muted)}\n"
         << "label{display:grid;gap:5px;color:var(--muted);margin-bottom:12px}\n"
-        << "input,button{font:inherit;border-radius:8px;border:1px solid var(--"
-           "line)}\n"
-        << "input{width:100%;padding:9px 10px;background:#07111b;color:var(--"
-           "text)}\n"
-        << "button{padding:8px 14px;background:#15334a;color:var(--text);"
-           "cursor:pointer}\n"
-        << "button:hover{border-color:var(--cyan)}button.primary{background:#"
-           "135534;color:#effff4}button.danger{background:#622727}\n"
-        << ".row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}\n"
-        << ".two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}\n"
-        << ".notice{margin:10px 0 0;color:var(--amber)}.error{color:var(--red)}"
+        << "input,button{font:inherit;border:1px solid var(--line)}\n"
+        << "input{width:100%;padding:8px 9px;background:#fff;color:var(--text)}"
            "\n"
-        << "table{width:100%;border-collapse:collapse}th,td{padding:9px 8px;"
+        << "button{padding:7px 13px;background:var(--panel2);color:var(--text);"
+           "cursor:pointer}\n"
+        << "button:hover{background:var(--accent-soft)}button.primary{"
+           "background:var(--accent);border-color:var(--accent);color:#fff}"
+           "button.primary:hover{background:#285c31}button.danger{border-color:"
+           "var(--danger);color:var(--danger)}\n"
+        << ".row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}\n"
+        << ".two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}\n"
+        << ".notice{margin:10px 0 0;color:var(--amber)}.error{color:var(--"
+           "danger)}\n"
+        << "table{width:100%;border-collapse:collapse}th,td{padding:8px 7px;"
            "border-bottom:1px solid var(--line);text-align:left;white-space:"
-           "nowrap}th{color:var(--muted);font-size:.8rem}\n"
+           "nowrap}th{color:var(--muted);font-size:.78rem}\n"
         << ".room{border:1px solid var(--line);background:var(--panel2);"
-           "border-radius:10px;padding:13px;margin-bottom:10px}\n"
-        << ".mono-break{word-break:break-all}.turn{margin-top:10px;padding:10px;"
-           "border-left:3px solid var(--amber);background:#09131d}\n"
-        << ".events{max-height:280px;overflow:auto;margin:0;padding-left:20px}"
-           ".events li{margin:5px 0;color:#bfd1df}\n"
-        << ".status{display:inline-block;padding:.25rem .6rem;border-radius:99px"
-           ";background:#38495c}.status.connected,.status.active,.status."
-           "complete{background:#155c35}.status.connecting{background:#604d16}"
-           ".status.disconnected,.status.aborted{background:#6b2525}\n"
+           "padding:12px;margin-bottom:10px}\n"
+        << ".mono-break{word-break:break-all;font-family:\"Courier New\",Courier"
+           ",monospace}.turn{margin-top:10px;padding:9px;border-left:3px solid "
+           "var(--amber);background:#f6ecd9}\n"
+        << ".events{max-height:260px;overflow:auto;margin:0;padding-left:20px}"
+           ".events li{margin:5px 0;color:var(--text)}\n"
+        << ".status{display:inline-block;padding:.2rem .55rem;border:1px solid "
+           "var(--line);background:var(--panel2);font-size:.8rem}.status."
+           "connected,.status.active,.status.complete{border-color:var(--"
+           "accent);color:var(--accent)}.status.connecting{border-color:var(--"
+           "amber);color:var(--amber)}.status.disconnected,.status.aborted{"
+           "border-color:var(--danger);color:var(--danger)}\n"
         << ".topline{display:flex;align-items:center;justify-content:space-"
            "between;gap:12px;flex-wrap:wrap}\n"
         << "@media(max-width:760px){.two-col{grid-template-columns:1fr}}\n"
-        << "</style>\n</head>\n<body>\n";
+        << "</style>\n</head>\n<body>\n"
+        << "<div class=\"site-strip\"><div class=\"row\"><a href=\"/\">TradeP2P "
+           "web client</a><span>hosted session &middot; not the mediator "
+           "itself</span></div></div>\n";
     return out.str();
 }
 
-std::string landing_html() {
+std::string landing_html(const std::string& preauth_token) {
     std::ostringstream out;
     out << page_head("TradeP2P Web Client")
         << "<div class=\"wrap\">\n"
@@ -505,12 +558,13 @@ std::string landing_html() {
            "never shown to your trade counterparty or the mediator.</p>\n"
         << "</div>\n"
         << "<script>\n"
+        << "const PREAUTH_TOKEN=\"" << preauth_token << "\";\n"
         << "function notice(t,bad){const n=document.getElementById('notice');"
            "n.textContent=t;n.className=bad?'notice error':'notice'}\n"
         << "async function submitForm(form,path){const d=Object.fromEntries(new "
            "FormData(form));const r=await "
            "fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-"
-           "form-urlencoded'},body:new "
+           "form-urlencoded','" << kPreAuthHeader << "':PREAUTH_TOKEN},body:new "
            "URLSearchParams(d)});const body=await "
            "r.json().catch(()=>({ok:false,error:'invalid response'}));if(!r.ok||"
            "!body.ok)throw new Error(body.error||('HTTP '+r.status));location."
@@ -533,7 +587,7 @@ std::string app_html(const std::string& username, const std::string& csrf_token)
         << "</div>\n"
         << "<div class=\"panel topline\">\n"
         << "<div><div class=\"muted\">TRADEP2P WEB CLIENT</div><h1>Session: "
-        << json_escape(username) << "</h1>"
+        << html_escape(username) << "</h1>"
         << "<div id=\"identity\" class=\"muted\">connecting&hellip;</div></div>\n"
         << "<div class=\"row\"><span id=\"connection\" class=\"status "
            "connecting\">connecting</span>"
@@ -800,6 +854,22 @@ int main(int argc, char** argv) {
                                 "script-src 'unsafe-inline'; frame-ancestors 'none'");
         };
 
+        // A reverse proxy terminating TLS in front of this process sets
+        // X-Forwarded-Proto; only then is it correct to mark cookies Secure
+        // (the default bind is plain HTTP on loopback, where that flag would
+        // just make the cookie stop working).
+        const auto cookie_suffix = [](const httplib::Request& request) {
+            return request.get_header_value("X-Forwarded-Proto") == "https"
+                       ? "; Secure"
+                       : "";
+        };
+
+        const auto require_preauth = [&](const httplib::Request& request) {
+            const auto cookie = read_cookie(request, kPreAuthCookie);
+            const std::string header = request.get_header_value(kPreAuthHeader);
+            return cookie.has_value() && !cookie->empty() && cookie == header;
+        };
+
         server.Get("/", [&](const httplib::Request& request, httplib::Response& response) {
             if (!host_allowed(request)) {
                 response.status = 403;
@@ -812,14 +882,22 @@ int main(int argc, char** argv) {
             if (session) {
                 response.set_content(app_html(session->username, session->csrf_token),
                                      "text/html; charset=utf-8");
-            } else {
-                response.set_content(landing_html(), "text/html; charset=utf-8");
+                return;
             }
+            auto preauth = read_cookie(request, kPreAuthCookie);
+            if (!preauth || preauth->empty()) {
+                preauth = random_token();
+                response.set_header(
+                    "Set-Cookie", std::string(kPreAuthCookie) + "=" + *preauth +
+                                      "; Path=/; SameSite=Strict" + cookie_suffix(request));
+            }
+            response.set_content(landing_html(*preauth), "text/html; charset=utf-8");
         });
 
         server.Post("/api/register", [&](const httplib::Request& request,
                                          httplib::Response& response) {
-            if (!host_allowed(request) || !same_origin(request)) {
+            if (!host_allowed(request) || !same_origin(request) ||
+                !require_preauth(request)) {
                 set_json_result(response, false, "forbidden", 403);
                 return;
             }
@@ -832,7 +910,8 @@ int main(int argc, char** argv) {
                 const std::string token = sessions.login(username);
                 response.set_header(
                     "Set-Cookie", std::string(kSessionCookie) + "=" + token +
-                                      "; Path=/; HttpOnly; SameSite=Strict");
+                                      "; Path=/; HttpOnly; SameSite=Strict" +
+                                      cookie_suffix(request));
                 set_json_result(response, true, "account created");
             } catch (const std::exception& error) {
                 set_json_result(response, false, error.what(), 400);
@@ -841,7 +920,8 @@ int main(int argc, char** argv) {
 
         server.Post("/api/login", [&](const httplib::Request& request,
                                       httplib::Response& response) {
-            if (!host_allowed(request) || !same_origin(request)) {
+            if (!host_allowed(request) || !same_origin(request) ||
+                !require_preauth(request)) {
                 set_json_result(response, false, "forbidden", 403);
                 return;
             }
@@ -854,7 +934,8 @@ int main(int argc, char** argv) {
                 const std::string token = sessions.login(username);
                 response.set_header(
                     "Set-Cookie", std::string(kSessionCookie) + "=" + token +
-                                      "; Path=/; HttpOnly; SameSite=Strict");
+                                      "; Path=/; HttpOnly; SameSite=Strict" +
+                                      cookie_suffix(request));
                 set_json_result(response, true, "logged in");
             } catch (const std::exception& error) {
                 set_json_result(response, false, error.what(), 400);

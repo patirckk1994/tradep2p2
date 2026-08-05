@@ -1,0 +1,43 @@
+# Example nginx config that puts tradep2p-webclient on its own subdomain,
+# TLS-terminated by nginx, so it appears as part of your site while none of
+# the pinned-TLS protocol code has to run inside nginx or PHP.
+#
+# A *subdomain* (not a path under your main domain) is what tradep2p-webclient
+# expects: its pages link and fetch absolute paths like "/" and "/api/state",
+# so it needs to own the whole origin it is served from. Point htdocs'
+# config.php `webclient_url` at this subdomain once it is live.
+#
+# Adjust server_name, certificate paths and the upstream port (must match
+# whatever --port tradep2p-webclient was started with) for your deployment.
+
+server {
+    listen 443 ssl http2;
+    server_name trade.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/trade.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/trade.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+
+        # Required: this is how tradep2p-webclient knows to mark its session
+        # cookie Secure. Without it, cookies stay non-Secure and still work,
+        # but lose the extra protection against being sent over plain HTTP.
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Cookies and the CSRF header pass through untouched by default;
+        # do not add proxy_cookie_path/proxy_cookie_domain rewrites here
+        # unless you know you need them.
+    }
+}
+
+server {
+    listen 80;
+    server_name trade.example.com;
+    location / { return 301 https://$host$request_uri; }
+}

@@ -107,9 +107,21 @@ identity a session gets when it connects. Logging in re-attaches your
 existing session (and its live mediator connection) if one is still running;
 logging out terminates it. The page carries a standing privacy warning: the
 operator of a hosted web client can see session activity and source IP even
-though the trade protocol stays anonymous to the mediator. Put this behind a
-TLS-terminating reverse proxy before exposing it publicly, and point your
-site's `webclient_url` (in `htdocs/config.php`) at that proxied address.
+though the trade protocol stays anonymous to the mediator.
+
+Put this behind a TLS-terminating reverse proxy before exposing it publicly
+— see [`nginx-webclient.conf.example`](nginx-webclient.conf.example). Use a
+**subdomain** (e.g. `trade.example.com`), not a path under your main domain:
+the pages fetch and link absolute paths like `/api/state`, so the web client
+needs to own the whole origin it is served from. Once it's live, point your
+site's `webclient_url` (in `htdocs/config.php`) at that subdomain.
+
+`X-Forwarded-Proto` from the proxy is what tells the web client to mark its
+session cookie `Secure`; the config example sets it. Registration and login
+are also protected by a double-submit CSRF cookie in addition to the
+`Origin` header check, and every other state-changing request needs a
+matching per-session token, the same synchronizer-token pattern
+`tradep2p-dashboard` already uses.
 
 ## Mediator fees
 
