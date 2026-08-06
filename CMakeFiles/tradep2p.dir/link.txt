@@ -1,2 +1,0 @@
-/usr/bin/ar qc libtradep2p.a CMakeFiles/tradep2p.dir/src/protocol.cpp.o CMakeFiles/tradep2p.dir/src/mediator.cpp.o CMakeFiles/tradep2p.dir/src/secure_channel.cpp.o CMakeFiles/tradep2p.dir/src/lobby.cpp.o CMakeFiles/tradep2p.dir/src/registry.cpp.o CMakeFiles/tradep2p.dir/src/dashboard_client.cpp.o
-/usr/bin/ranlib libtradep2p.a

@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/tradep2p_cli.dir/link.d CMakeFiles/tradep2p_cli.dir/src/main.cpp.o -o tradep2p_cli  libtradep2p.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so
