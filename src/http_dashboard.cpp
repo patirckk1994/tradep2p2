@@ -1,14 +1,19 @@
 #include <httplib.h>
 
 #include "tradep2p/dashboard_client.hpp"
+#include "tradep2p/history.hpp"
+#include "tradep2p/keystore.hpp"
 
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -23,6 +28,128 @@ using tradep2p::TradeTerms;
 using tradep2p::dashboard::DashboardClient;
 using tradep2p::dashboard::json_escape;
 using tradep2p::dashboard::random_token;
+
+// ---------------------------------------------------------------------------
+// Phase 4 CLI/dashboard wiring: a single operator's keystore and counterparty
+// history, held for the lifetime of this dashboard process. Guarded by its
+// own mutex, separate from DashboardClient's internal state_mutex_, since
+// httplib::Server services requests from a small thread pool - see each
+// route handler below for exactly what is held under this lock and for how
+// long (never across the AEAD/KDF work itself is unusual, but every access
+// to identity_state's fields is).
+//
+// Security posture, matching the CLI's identical posture in main.cpp: the
+// passphrase travels as an ordinary application/x-www-form-urlencoded POST
+// field to this LOOPBACK-ONLY dashboard process (see host_allowed() below,
+// already enforced for every route) - it is never sent to the mediator, and
+// never leaves loopback. This is the same trust model the rest of this
+// dashboard already has (see the README's "do not expose it directly to the
+// public Internet" guidance) - no new exposure is introduced by adding a
+// passphrase field to it.
+// ---------------------------------------------------------------------------
+struct IdentityDashboardState {
+    std::mutex mutex;
+    std::optional<tradep2p::IdentityKeystore> keystore;
+    std::string keystore_path;
+    std::optional<tradep2p::LocalCounterpartyHistory> history;
+    // This dashboard process's mediator endpoint text (e.g. "host:port"),
+    // used as the implicit mediator_id for history records - a dashboard
+    // process only ever talks to one mediator at a time, matching the CLI's
+    // identical design choice (see history.hpp's fingerprint-scoping
+    // decision for why this is per-mediator, not global).
+    std::string mediator_id;
+};
+
+template <std::size_t N>
+std::string hex_encode(const std::array<std::uint8_t, N>& bytes) {
+    std::ostringstream stream;
+    stream << std::hex << std::setfill('0');
+    for (const std::uint8_t byte : bytes) {
+        stream << std::setw(2) << static_cast<unsigned int>(byte);
+    }
+    return stream.str();
+}
+
+// PRECONDITION: state.mutex already held.
+std::string identity_state_json_locked(const IdentityDashboardState& state) {
+    if (!state.keystore.has_value()) {
+        return "{\"ok\":true,\"loaded\":false}";
+    }
+    const auto identity = state.keystore->public_identity();
+    std::ostringstream json;
+    json << "{\"ok\":true,\"loaded\":true"
+         << ",\"unlocked\":" << (state.keystore->is_unlocked() ? "true" : "false")
+         << ",\"path\":\"" << json_escape(state.keystore_path) << "\""
+         << ",\"alias\":\"" << json_escape(identity.alias) << "\""
+         << ",\"identity_id\":\"" << json_escape(hex_encode(identity.identity_id)) << "\""
+         << ",\"public_key\":\"" << json_escape(hex_encode(identity.identity_public_key)) << "\""
+         << ",\"created_at\":" << identity.created_at
+         << ",\"key_generation\":" << identity.key_generation << "}";
+    return json.str();
+}
+
+// PRECONDITION: state.mutex already held. Throws std::invalid_argument if no
+// keystore is currently unlocked - callers (the /api/history/* routes) let
+// this propagate to action()'s existing try/catch, matching how every other
+// validation failure in this file is already reported to the browser.
+//
+// Deliberately checks is_unlocked() every time, not merely "was a history
+// handle already opened earlier this session" - unlike the CLI (main.cpp),
+// which documents that an already-open Journal/LocalCounterpartyHistory
+// handle stays usable after /keystore lock until the process exits. This is
+// an intentional divergence: the dashboard's "Lock" button is a visual,
+// walk-away-from-the-screen affordance, and a Lock click that left history
+// entries still rendering in the browser would defeat the point of it. The
+// CLI has no equivalent "someone might glance at the screen" concern in the
+// same way, so it optimizes for not re-deriving keys unnecessarily instead.
+tradep2p::LocalCounterpartyHistory& ensure_history_open_locked(IdentityDashboardState& state) {
+    if (!state.keystore.has_value() || !state.keystore->is_unlocked()) {
+        throw std::invalid_argument("no unlocked keystore; unlock or create one first");
+    }
+    if (!state.history.has_value()) {
+        state.history = tradep2p::LocalCounterpartyHistory::open(state.keystore_path + ".history",
+                                                                  *state.keystore);
+    }
+    return *state.history;
+}
+
+// PRECONDITION: state.mutex already held.
+std::string history_list_json_locked(IdentityDashboardState& state) {
+    if (!state.keystore.has_value() || !state.keystore->is_unlocked()) {
+        return "{\"ok\":true,\"unlocked\":false,\"entries\":[]}";
+    }
+    auto& history = ensure_history_open_locked(state);
+    std::ostringstream json;
+    json << "{\"ok\":true,\"unlocked\":true,\"entries\":[";
+    bool first_entry = true;
+    for (const auto& entry : history.entries()) {
+        if (!first_entry) {
+            json << ',';
+        }
+        first_entry = false;
+        json << "{\"fingerprint\":\"" << json_escape(tradep2p::fingerprint_to_hex(entry.fingerprint))
+             << "\",\"mediator_id\":\"" << json_escape(entry.mediator_id) << "\""
+             << ",\"first_seen\":" << entry.first_seen << ",\"last_seen\":" << entry.last_seen
+             << ",\"encounter_count\":" << entry.encounter_count
+             << ",\"locally_blocked\":" << (entry.locally_blocked ? "true" : "false")
+             << ",\"confidence\":\"" << tradep2p::confidence_level_name(entry.confidence) << "\""
+             << ",\"display_category\":\""
+             << tradep2p::display_category_name(tradep2p::classify_for_display(entry)) << "\""
+             << ",\"notes\":[";
+        bool first_note = true;
+        for (const auto& note : entry.notes) {
+            if (!first_note) {
+                json << ',';
+            }
+            first_note = false;
+            json << "{\"recorded_at\":" << note.recorded_at << ",\"text\":\"" << json_escape(note.text)
+                 << "\"}";
+        }
+        json << "],\"evidence_count\":" << entry.evidence_hashes.size() << "}";
+    }
+    json << "]}";
+    return json.str();
+}
 
 std::uint16_t parse_port(const std::string& value) {
     std::size_t used = 0U;
@@ -127,6 +254,23 @@ std::string dashboard_html(const std::string& token,
   <div class="grid">
     <div class="stack">
       <section class="panel">
+        <h2>// identity / keystore</h2>
+        <div id="identity-status" class="muted">loading identity status&hellip;</div>
+        <form id="keystore-form" class="form-grid">
+          <label class="span2">Keystore file path<input name="ks_path" placeholder="/path/to/identity.ks" required></label>
+          <label class="span2">Passphrase<input name="ks_passphrase" type="password" required></label>
+          <label class="span2">Alias (optional, used by Create only)<input name="ks_alias" maxlength="255"></label>
+          <div class="actions span2">
+            <button type="button" id="ks-create" class="primary">Create</button>
+            <button type="button" id="ks-unlock" class="primary">Unlock</button>
+            <button type="button" id="ks-lock">Lock</button>
+            <button type="button" id="ks-rotate">Rotate service key</button>
+            <button type="button" id="ks-destroy" class="danger">Destroy</button>
+          </div>
+        </form>
+        <p class="muted">The passphrase is sent to this loopback-only dashboard process as an ordinary form field; it is never sent to the mediator.</p>
+      </section>
+      <section class="panel">
         <h2>// publish offer</h2>
         <form id="offer-form" class="form-grid">
           <label>Sell symbol<input name="sell_asset" value="QRL" maxlength="16" required></label>
@@ -161,6 +305,16 @@ std::string dashboard_html(const std::string& token,
         <h2>// my settlement rooms</h2>
         <div id="rooms"><p class="muted">No active rooms.</p></div>
       </section>
+      <section class="panel">
+        <div class="topline"><h2>// counterparty history &amp; blocklist</h2><button id="refresh-history">Refresh</button></div>
+        <div id="history-status" class="muted">requires an unlocked keystore</div>
+        <div class="table-wrap"><table><thead><tr><th>Fingerprint</th><th>Mediator</th><th>First / last seen</th><th>Encounters</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="history-rows"><tr><td colspan="7" class="muted">no data yet</td></tr></tbody></table></div>
+        <form id="note-form" class="form-grid">
+          <label class="span2">Fingerprint (64 hex chars)<input name="note_fp" maxlength="64" placeholder="counterparty fingerprint"></label>
+          <label class="span2">Note text<input name="note_text" placeholder="e.g. slow to respond but completed the trade"></label>
+          <div class="actions span2"><button type="submit" class="primary">Add note (creates the record if new)</button></div>
+        </form>
+      </section>
     </div>
   </div>
 </div>
@@ -172,7 +326,7 @@ const short=(v)=>{v=String(v??'');return v.length>22?v.slice(0,10)+'…'+v.slice
 function notice(text,bad=false){const n=document.getElementById('notice');n.textContent=text;n.className=bad?'notice error':'notice';setTimeout(()=>{if(n.textContent===text)n.textContent=''},5000)}
 async function post(path,data={}){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-TradeP2P-Token':TOKEN},body:new URLSearchParams(data)});const body=await r.json().catch(()=>({ok:false,error:'invalid dashboard response'}));if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));return body}
 function renderOffers(offers){const target=document.getElementById('offers');if(!offers.length){target.innerHTML='<tr><td colspan="5" class="muted">No open offers.</td></tr>';return}target.innerHTML=offers.map(o=>`<tr><td title="${esc(o.room_id)}">${esc(short(o.room_id))}</td><td>${esc(o.sell_amount)} ${esc(o.sell_asset)}</td><td>${esc(o.buy_amount)} ${esc(o.buy_asset)}</td><td>${esc(o.rounds)}</td><td><div class="actions"><button data-join="${esc(o.room_id)}" class="primary">Join</button><button data-cancel="${esc(o.room_id)}" class="danger">Cancel mine</button></div></td></tr>`).join('');target.querySelectorAll('[data-join]').forEach(b=>b.onclick=async()=>{try{const address=document.getElementById('join-address').value.trim();if(!address)throw new Error('enter your receiving address first');await post('/api/offers/join',{room_id:b.dataset.join,address});notice('join request queued')}catch(e){notice(e.message,true)}});target.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=async()=>{try{await post('/api/offers/cancel',{room_id:b.dataset.cancel});notice('cancel request queued')}catch(e){notice(e.message,true)}})}
-function renderRooms(rooms){const target=document.getElementById('rooms');if(!rooms.length){target.innerHTML='<p class="muted">No settlement rooms in this browser session.</p>';return}target.innerHTML=rooms.map(r=>{const turn=r.turn?`<div class="turn"><b>${r.turn.is_fee?'Mediator fee':'Round '+esc(r.turn.round)}:</b> party ${esc(r.turn.sender)} sends <b>${esc(r.turn.amount)} ${esc(r.turn.asset)}</b><br><span class="muted mono-break">destination: ${esc(r.turn.destination)}</span></div>`:'';let primary='';if(r.status==='active'&&r.action==='sent')primary=`<button class="primary" data-sent="${esc(r.room_id)}">${r.turn&&r.turn.is_fee?'I paid the mediator fee':'I sent it'}</button>`;if(r.status==='active'&&r.action==='received')primary=`<button class="primary" data-received="${esc(r.room_id)}">I verified receipt</button>`;if(r.status==='active'&&r.turn&&r.turn.is_fee&&r.action==='none')primary=`<span class="muted">waiting for the offer creator to settle the mediator fee</span>`;const abort=r.status==='active'?`<button class="danger" data-abort="${esc(r.room_id)}">Abort room</button>`:'';const fee=r.fee_amount>0?`<div class="muted mono-break">mediator fee: ${esc(r.fee_amount)} ${esc(r.fee_asset)} &rarr; ${esc(r.fee_address)}</div>`:'';return `<article class="room"><div class="room-head"><div><h3 title="${esc(r.room_id)}">Room ${esc(short(r.room_id))}</h3><div class="muted">party ${esc(r.party)} · peer ${esc(short(r.peer_id))}</div></div><span class="status ${esc(r.status)}">${esc(r.status)}</span></div><p>${esc(r.sell_amount)} ${esc(r.sell_asset)} ↔ ${esc(r.buy_amount)} ${esc(r.buy_asset)} · ${esc(r.rounds)} rounds</p><div class="muted mono-break">party A receives: ${esc(r.receive_address_a)}<br>party B receives: ${esc(r.receive_address_b)}</div>${fee}${turn}${r.detail?`<p class="notice">${esc(r.detail)}</p>`:''}<div class="actions">${primary}${abort}</div></article>`}).join('');target.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/sent',b.dataset.sent));target.querySelectorAll('[data-received]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/received',b.dataset.received));target.querySelectorAll('[data-abort]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/abort',b.dataset.abort))}
+function renderRooms(rooms){const target=document.getElementById('rooms');if(!rooms.length){target.innerHTML='<p class="muted">No settlement rooms in this browser session.</p>';return}target.innerHTML=rooms.map(r=>{const turn=r.turn?`<div class="turn"><b>${r.turn.is_fee?'Mediator fee':'Round '+esc(r.turn.round)}:</b> party ${esc(r.turn.sender)} sends <b>${esc(r.turn.amount)} ${esc(r.turn.asset)}</b><br><span class="muted mono-break">destination: ${esc(r.turn.destination)}</span></div>`:'';let primary='';if(r.status==='active'&&r.action==='sent')primary=`<button class="primary" data-sent="${esc(r.room_id)}">${r.turn&&r.turn.is_fee?'I paid the mediator fee':'I sent it'}</button>`;if(r.status==='active'&&r.action==='received')primary=`<button class="primary" data-received="${esc(r.room_id)}">I verified receipt</button>`;if(r.status==='active'&&r.turn&&r.turn.is_fee&&r.action==='none')primary=`<span class="muted">waiting for the offer creator to settle the mediator fee</span>`;const abort=r.status==='active'?`<button class="danger" data-abort="${esc(r.room_id)}">Abort room</button>`:'';const fee=r.fee_amount>0?`<div class="muted mono-break">mediator fee: ${esc(r.fee_amount)} ${esc(r.fee_asset)} &rarr; ${esc(r.fee_address)}</div>`:'';const canRecognize=r.status==='active'&&(r.recognition_status==='none'||r.recognition_status==='failed');const recognize=canRecognize?`<button data-recognize="${esc(r.room_id)}">Recognize counterparty</button>`:'';let recognitionLine='';if(r.recognition_status==='challenge_sent')recognitionLine='<p class="muted">recognition challenge sent - awaiting response</p>';else if(r.recognition_status==='recognized')recognitionLine=`<p class="muted">counterparty proved control of <span class="mono-break">${esc(r.recognized_fingerprint)}</span> - see History panel for prior settlement count with this key</p>`;else if(r.recognition_status==='declined')recognitionLine='<p class="muted">declined to answer counterparty\'s recognition challenge (no keystore unlocked)</p>';else if(r.recognition_status==='failed')recognitionLine='<p class="muted">a recognition response did not verify - not evidence of anything, may retry</p>';const ephemeralLine=r.own_ephemeral_key?`<p class="muted">ephemeral trade key: <span class="mono-break">${esc(short(r.own_ephemeral_key))}</span>${r.counterparty_ephemeral_key?` &middot; counterparty: <span class="mono-break">${esc(short(r.counterparty_ephemeral_key))}</span>`:' &middot; awaiting counterparty announcement'} (unlinkable to any other room by design)</p>`:'';const receiptLine=r.receipt_status==='none'?'':`<p class="muted">receipt: ${esc(r.receipt_status)}${r.receipt_status!=='gate_open'?(r.receipt_chain_verifies?' (chain verifies)':' (chain INVALID)'):''}</p>`;return `<article class="room"><div class="room-head"><div><h3 title="${esc(r.room_id)}">Room ${esc(short(r.room_id))}</h3><div class="muted">party ${esc(r.party)} · peer ${esc(short(r.peer_id))}</div></div><span class="status ${esc(r.status)}">${esc(r.status)}</span></div><p>${esc(r.sell_amount)} ${esc(r.sell_asset)} ↔ ${esc(r.buy_amount)} ${esc(r.buy_asset)} · ${esc(r.rounds)} rounds</p><div class="muted mono-break">party A receives: ${esc(r.receive_address_a)}<br>party B receives: ${esc(r.receive_address_b)}</div>${fee}${turn}${ephemeralLine}${receiptLine}${recognitionLine}${r.detail?`<p class="notice">${esc(r.detail)}</p>`:''}<div class="actions">${primary}${abort}${recognize}</div></article>`}).join('');target.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/sent',b.dataset.sent));target.querySelectorAll('[data-received]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/received',b.dataset.received));target.querySelectorAll('[data-abort]').forEach(b=>b.onclick=()=>roomAction('/api/rooms/abort',b.dataset.abort));target.querySelectorAll('[data-recognize]').forEach(b=>b.onclick=()=>roomAction('/api/recognition/recognize',b.dataset.recognize))}
 async function roomAction(path,room){try{await post(path,{room_id:room});notice('room action queued')}catch(e){notice(e.message,true)}}
 function renderEvents(events){document.getElementById('events').innerHTML=(events.length?events:['No events yet.']).map(e=>`<li>${esc(e)}</li>`).join('')}
 async function refreshClient(){try{const r=await fetch('/api/state',{cache:'no-store'});const s=await r.json();const c=document.getElementById('connection');c.textContent=s.connection_status;c.className='status '+(s.connected?'connected':'disconnected');const fee=s.mediator_fee_amount>0?(' · mediator fee: '+esc(s.mediator_fee_amount)+' '+esc(s.mediator_fee_asset)):'';document.getElementById('identity').textContent=(s.client_id?'anonymous client '+s.client_id:'anonymous client not connected')+fee;renderOffers(s.offers||[]);renderRooms(s.rooms||[]);renderEvents(s.events||[])}catch(e){notice('dashboard refresh failed: '+e.message,true)}}
@@ -180,7 +334,16 @@ function renderServer(s){const t=document.getElementById('server-state');if(!ser
 async function refreshServer(){if(!serverStateEnabled)return;try{const r=await fetch('/api/server-state',{cache:'no-store'});renderServer(await r.json())}catch(e){document.getElementById('server-state').textContent='server snapshot error: '+e.message}}
 document.getElementById('offer-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/offers/create',d);notice('offer request queued')}catch(err){notice(err.message,true)}};
 document.getElementById('refresh-offers').onclick=async()=>{try{await post('/api/offers/refresh');notice('offer refresh queued')}catch(e){notice(e.message,true)}};
-refreshClient();refreshServer();setInterval(refreshClient,1000);setInterval(refreshServer,1500);
+async function refreshIdentity(){try{const r=await fetch('/api/identity/state',{cache:'no-store'});const s=await r.json();const el=document.getElementById('identity-status');if(!s.loaded){el.innerHTML='<span class="muted">No keystore loaded. Create or unlock one above.</span>';return}el.innerHTML=`<div class="server-grid"><div class="metric"><b>Status</b>${s.unlocked?'unlocked':'locked'}</div><div class="metric"><b>Alias</b>${esc(s.alias||'(none)')}</div><div class="metric"><b>Key generation</b>${esc(s.key_generation)}</div><div class="metric"><b>Created</b>${esc(s.created_at)}</div></div><p class="muted mono-break">path: ${esc(s.path)}<br>identity id: ${esc(s.identity_id)}<br>public key: ${esc(s.public_key)}</p>`}catch(e){document.getElementById('identity-status').textContent='identity status error: '+e.message}}
+async function refreshHistory(){try{const r=await fetch('/api/history/list',{cache:'no-store'});const s=await r.json();const tbody=document.getElementById('history-rows');const status=document.getElementById('history-status');if(!s.unlocked){status.textContent='requires an unlocked keystore';tbody.innerHTML='<tr><td colspan="7" class="muted">locked</td></tr>';return}status.textContent=s.entries.length+' record(s) for this session'+"'"+'s mediator';tbody.innerHTML=s.entries.length?s.entries.map(en=>`<tr><td class="mono-break" title="${esc(en.fingerprint)}">${esc(short(en.fingerprint))}</td><td>${esc(en.mediator_id)}</td><td>${esc(en.first_seen)} / ${esc(en.last_seen)}</td><td>${esc(en.encounter_count)}</td><td>${en.locally_blocked?'<b class="error">BLOCKED</b>':esc(en.display_category)}</td><td>${esc(en.notes.length)}</td><td><div class="actions"><button data-block="${esc(en.fingerprint)}" data-blocked="${en.locally_blocked?1:0}">${en.locally_blocked?'Unblock':'Block'}</button></div></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No counterparty records yet.</td></tr>';tbody.querySelectorAll('[data-block]').forEach(b=>b.onclick=async()=>{try{const path=b.dataset.blocked==='1'?'/api/history/unblock':'/api/history/block';await post(path,{fingerprint:b.dataset.block});notice('history updated');refreshHistory()}catch(e){notice(e.message,true)}})}catch(e){document.getElementById('history-status').textContent='history error: '+e.message}}
+document.getElementById('ks-create').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));await post('/api/identity/create',{path:d.ks_path,passphrase:d.ks_passphrase,alias:d.ks_alias||''});notice('keystore created');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
+document.getElementById('ks-unlock').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));await post('/api/identity/unlock',{path:d.ks_path,passphrase:d.ks_passphrase});notice('keystore unlocked');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
+document.getElementById('ks-lock').onclick=async()=>{try{await post('/api/identity/lock');notice('keystore locked');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
+document.getElementById('ks-rotate').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));await post('/api/identity/rotate',{passphrase:d.ks_passphrase});notice('service-scoped key rotated');refreshIdentity()}catch(e){notice(e.message,true)}};
+document.getElementById('ks-destroy').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));if(!confirm('Destroy keystore at '+d.ks_path+'? This cannot be undone.'))return;await post('/api/identity/destroy',{path:d.ks_path});notice('keystore destroyed');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
+document.getElementById('note-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/history/note',{fingerprint:d.note_fp,text:d.note_text});notice('note added');refreshHistory()}catch(err){notice(err.message,true)}};
+document.getElementById('refresh-history').onclick=()=>refreshHistory();
+refreshClient();refreshServer();refreshIdentity();refreshHistory();setInterval(refreshClient,1000);setInterval(refreshServer,1500);setInterval(refreshIdentity,2000);setInterval(refreshHistory,2000);
 </script>
 </body>
 </html>)HTML";
@@ -241,11 +404,17 @@ int main(int argc, char** argv) {
         Endpoint mediator;
         ClientTlsPolicy tls;
         int option_index = 0;
+        // Phase 4 history wiring: the mediator endpoint TEXT (not just the
+        // parsed Endpoint), used as the implicit mediator_id for this
+        // dashboard's counterparty history records - see history.hpp's
+        // fingerprint-scoping decision (per-mediator, not global).
+        std::string mediator_id_text;
 
         if (mode == "client") {
             mediator = parse_endpoint(argv[2]);
             tls = ClientTlsPolicy{argv[3]};
             option_index = 4;
+            mediator_id_text = argv[2];
         } else if (mode == "client-tor") {
             if (argc < 5) {
                 print_usage(argv[0]);
@@ -255,6 +424,7 @@ int main(int argc, char** argv) {
             mediator = parse_endpoint(argv[3]);
             tls = ClientTlsPolicy{argv[4]};
             option_index = 5;
+            mediator_id_text = argv[3];
         } else {
             print_usage(argv[0]);
             return EXIT_FAILURE;
@@ -280,9 +450,49 @@ int main(int argc, char** argv) {
             }
         }
 
-        DashboardClient client(mediator, tls, proxy);
-        client.start();
+        DashboardClient client(mediator, tls, proxy, mediator_id_text);
         const std::string token = random_token();
+
+        IdentityDashboardState identity_state;
+        identity_state.mediator_id = mediator_id_text;
+
+        // Phase 4b wiring: bridges DashboardClient's worker thread (which
+        // knows nothing about keystores) to this process's own
+        // IdentityDashboardState (which owns one) - see dashboard_client.hpp's
+        // RecognitionKeyProvider/RecognitionOutcomeHandler comments for the
+        // lock-ordering discipline this depends on. Must be set before
+        // client.start() so no early RecognitionChallenge/Response frame can
+        // race an unset callback.
+        client.set_recognition_key_provider(
+            [&identity_state]() -> std::optional<tradep2p::dashboard::RecognitionKeyMaterial> {
+                std::scoped_lock lock(identity_state.mutex);
+                if (!identity_state.keystore.has_value() || !identity_state.keystore->is_unlocked()) {
+                    return std::nullopt;
+                }
+                auto keypair = tradep2p::derive_ed25519_keypair(
+                    identity_state.keystore->master_secret(), tradep2p::key_scope::kMediatorPseudonym,
+                    identity_state.mediator_id);
+                tradep2p::dashboard::RecognitionKeyMaterial material;
+                material.private_seed = std::move(keypair.private_seed);
+                material.public_key = keypair.public_key;
+                return material;
+            });
+        client.set_recognition_outcome_handler(
+            [&identity_state](const std::array<std::uint8_t, 32>& fingerprint,
+                              tradep2p::dashboard::RecognitionOutcome outcome) {
+                std::scoped_lock lock(identity_state.mutex);
+                if (!identity_state.keystore.has_value() || !identity_state.keystore->is_unlocked()) {
+                    return;
+                }
+                auto& history = ensure_history_open_locked(identity_state);
+                const tradep2p::CounterpartyFingerprint counterparty_fingerprint = fingerprint;
+                history.record_encounter(
+                    counterparty_fingerprint, identity_state.mediator_id,
+                    outcome == tradep2p::dashboard::RecognitionOutcome::Successful
+                        ? tradep2p::LocalOutcome::Successful
+                        : tradep2p::LocalOutcome::Incomplete);
+            });
+        client.start();
 
         httplib::Server server;
         const auto host_allowed = [&](const httplib::Request& request) {
@@ -397,6 +607,120 @@ int main(int argc, char** argv) {
 
         server.Post("/api/rooms/abort", action([&](const httplib::Request& request) {
                         client.abort_room(required_param(request, "room_id"));
+                    }));
+
+        server.Post("/api/recognition/recognize", action([&](const httplib::Request& request) {
+                        client.recognize(required_param(request, "room_id"));
+                    }));
+
+        server.Get("/api/identity/state",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       if (!host_allowed(request)) {
+                           response.status = 403;
+                           return;
+                       }
+                       response.set_header("Cache-Control", "no-store");
+                       std::scoped_lock lock(identity_state.mutex);
+                       response.set_content(identity_state_json_locked(identity_state),
+                                            "application/json; charset=utf-8");
+                   });
+
+        server.Get("/api/history/list",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       if (!host_allowed(request)) {
+                           response.status = 403;
+                           return;
+                       }
+                       response.set_header("Cache-Control", "no-store");
+                       std::scoped_lock lock(identity_state.mutex);
+                       try {
+                           response.set_content(history_list_json_locked(identity_state),
+                                                "application/json; charset=utf-8");
+                       } catch (const std::exception& error) {
+                           response.set_content(
+                               std::string("{\"ok\":false,\"error\":\"") +
+                                   json_escape(error.what()) + "\"}",
+                               "application/json; charset=utf-8");
+                       }
+                   });
+
+        server.Post("/api/identity/create", action([&](const httplib::Request& request) {
+                        const std::string path = required_param(request, "path");
+                        const std::string passphrase = required_param(request, "passphrase");
+                        const std::string alias =
+                            request.has_param("alias") ? request.get_param_value("alias")
+                                                        : std::string{};
+                        std::scoped_lock lock(identity_state.mutex);
+                        identity_state.keystore =
+                            tradep2p::IdentityKeystore::create(path, passphrase, alias);
+                        identity_state.keystore_path = path;
+                        identity_state.history.reset();
+                    }));
+
+        server.Post("/api/identity/unlock", action([&](const httplib::Request& request) {
+                        const std::string path = required_param(request, "path");
+                        const std::string passphrase = required_param(request, "passphrase");
+                        std::scoped_lock lock(identity_state.mutex);
+                        identity_state.keystore =
+                            tradep2p::IdentityKeystore::unlock(path, passphrase);
+                        identity_state.keystore_path = path;
+                        // A different identity may now be loaded - discard any
+                        // already-open history handle, which belonged to
+                        // whichever keystore was previously active.
+                        identity_state.history.reset();
+                    }));
+
+        server.Post("/api/identity/lock", action([&](const httplib::Request&) {
+                        std::scoped_lock lock(identity_state.mutex);
+                        if (identity_state.keystore.has_value()) {
+                            identity_state.keystore->lock();
+                        }
+                    }));
+
+        server.Post("/api/identity/rotate", action([&](const httplib::Request& request) {
+                        const std::string passphrase = required_param(request, "passphrase");
+                        std::scoped_lock lock(identity_state.mutex);
+                        if (!identity_state.keystore.has_value() ||
+                            !identity_state.keystore->is_unlocked()) {
+                            throw std::invalid_argument("no unlocked keystore");
+                        }
+                        identity_state.keystore->rotate_service_scoped_key(passphrase);
+                    }));
+
+        server.Post("/api/identity/destroy", action([&](const httplib::Request& request) {
+                        const std::string path = required_param(request, "path");
+                        tradep2p::IdentityKeystore::destroy(path);
+                        std::scoped_lock lock(identity_state.mutex);
+                        if (identity_state.keystore_path == path) {
+                            identity_state.keystore.reset();
+                            identity_state.keystore_path.clear();
+                            identity_state.history.reset();
+                        }
+                    }));
+
+        server.Post("/api/history/block", action([&](const httplib::Request& request) {
+                        const std::string fingerprint_text = required_param(request, "fingerprint");
+                        std::scoped_lock lock(identity_state.mutex);
+                        auto& history = ensure_history_open_locked(identity_state);
+                        history.set_blocked(tradep2p::fingerprint_from_hex(fingerprint_text),
+                                            identity_state.mediator_id, true);
+                    }));
+
+        server.Post("/api/history/unblock", action([&](const httplib::Request& request) {
+                        const std::string fingerprint_text = required_param(request, "fingerprint");
+                        std::scoped_lock lock(identity_state.mutex);
+                        auto& history = ensure_history_open_locked(identity_state);
+                        history.set_blocked(tradep2p::fingerprint_from_hex(fingerprint_text),
+                                            identity_state.mediator_id, false);
+                    }));
+
+        server.Post("/api/history/note", action([&](const httplib::Request& request) {
+                        const std::string fingerprint_text = required_param(request, "fingerprint");
+                        const std::string text = required_param(request, "text");
+                        std::scoped_lock lock(identity_state.mutex);
+                        auto& history = ensure_history_open_locked(identity_state);
+                        history.add_note(tradep2p::fingerprint_from_hex(fingerprint_text),
+                                         identity_state.mediator_id, text);
                     }));
 
         std::cout << "TradeP2P interactive dashboard listening on http://"

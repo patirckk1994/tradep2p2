@@ -79,6 +79,10 @@ th{color:var(--muted);font-size:.8rem}
     <div id="metrics" class="metric-grid"></div>
   </section>
   <section class="panel">
+    <h2>// room persistence (phase 3)</h2>
+    <div id="persistence" class="muted">loading snapshot&hellip;</div>
+  </section>
+  <section class="panel">
     <h2>// open offers</h2>
     <table><thead><tr><th>Room</th><th>Sell</th><th>Buy</th><th>Rounds</th></tr></thead>
     <tbody id="offers"><tr><td colspan="4" class="muted">waiting for snapshot</td></tr></tbody></table>
@@ -106,6 +110,16 @@ async function refresh(){
       '<div class="metric"><b>Pending invites</b><span>'+esc(s.pending_invites??0)+'</span></div>'+
       '<div class="metric"><b>Open offers</b><span>'+esc((s.offers||[]).length)+'</span></div>'+
       '<div class="metric"><b>Active rooms</b><span>'+esc((s.rooms||[]).length)+'</span></div>';
+    const persistenceEl=document.getElementById('persistence');
+    if(s.room_persistence_enabled){
+      persistenceEl.innerHTML='<div class="metric-grid">'+
+        '<div class="metric"><b>Persistence</b><span>enabled</span></div>'+
+        '<div class="metric"><b>Rooms restored at startup</b><span>'+esc(s.rooms_restored_at_startup??0)+'</span></div>'+
+        '</div><p class="muted mono-break">TRADEP2P_ROOM_STATE_FILE: '+esc(s.room_persistence_path||'')+'</p>'+
+        '<p class="muted">State machine and progress only - receive addresses are never persisted (see room_persistence.hpp).</p>';
+    } else {
+      persistenceEl.innerHTML='<span class="muted">Disabled. Start the mediator with TRADEP2P_ROOM_STATE_FILE set to enable crash recovery of in-flight room state.</span>';
+    }
     const offers=s.offers||[];
     document.getElementById('offers').innerHTML=offers.length?offers.map(o=>
       `<tr><td title="${esc(o.room_id)}">${esc(short_(o.room_id))}</td><td>${esc(o.total_a)} ${esc(o.asset_a)}</td><td>${esc(o.total_b)} ${esc(o.asset_b)}</td><td>${esc(o.rounds)}</td></tr>`

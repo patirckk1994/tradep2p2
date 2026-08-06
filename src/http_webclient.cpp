@@ -9,6 +9,7 @@
 #include <httplib.h>
 
 #include "tradep2p/dashboard_client.hpp"
+#include "tradep2p/login.hpp"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -16,6 +17,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -211,6 +213,11 @@ std::string to_hex(const std::vector<std::uint8_t>& bytes) {
     return text;
 }
 
+template <std::size_t N>
+std::string to_hex(const std::array<std::uint8_t, N>& bytes) {
+    return to_hex(std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+}
+
 std::vector<std::uint8_t> from_hex(const std::string& text) {
     if (text.size() % 2U != 0U) {
         throw std::runtime_error("corrupt account store");
@@ -228,6 +235,14 @@ struct Account {
     std::vector<std::uint8_t> salt;
     std::vector<std::uint8_t> hash;
     std::string created_at;
+    // Phase 7 (service-scoped challenge-response login, see
+    // include/tradep2p/login.hpp): absent means password-only, exactly the
+    // pre-phase-7 shape - migration requires this, so every existing
+    // account keeps working unmodified with no server-side action needed.
+    // Present means the account has OPTED IN to also (not instead of - see
+    // AccountStore::verify()/login_key(), password auth is never disabled
+    // by enrolling a key) accepting challenge-response login with this key.
+    std::optional<tradep2p::Ed25519PublicKey> login_key;
 };
 
 // A local convenience-account store for this web client only. It has no
@@ -248,7 +263,7 @@ public:
         if (RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1) {
             throw std::runtime_error("RAND_bytes failed while creating an account");
         }
-        Account account{username, salt, derive(password, salt), now_text()};
+        Account account{username, salt, derive(password, salt), now_text(), std::nullopt};
         std::scoped_lock lock(mutex_);
         if (accounts_.find(username) != accounts_.end()) {
             throw std::runtime_error("that username is already registered");
@@ -272,6 +287,36 @@ public:
         return candidate.size() == it->second.hash.size() &&
                CRYPTO_memcmp(candidate.data(), it->second.hash.data(),
                             candidate.size()) == 0;
+    }
+
+    // Phase 7: binds `key` to an EXISTING account, enrolling it for
+    // challenge-response login going forward - the explicit, no-access-lost
+    // migration path (docs/identity-07-login.md). Throws std::runtime_error
+    // if the account does not exist; callers (the /api/account/enroll-key
+    // route) require an already-authenticated session before calling this,
+    // so "does the caller actually own this account" is established before
+    // this function is ever reached, not by this function itself.
+    void set_login_key(const std::string& username, const tradep2p::Ed25519PublicKey& key) {
+        std::scoped_lock lock(mutex_);
+        const auto it = accounts_.find(username);
+        if (it == accounts_.end()) {
+            throw std::runtime_error("unknown account");
+        }
+        it->second.login_key = key;
+        append_locked(it->second);
+    }
+
+    // std::nullopt for an unknown username OR a known one with no enrolled
+    // key - callers must not distinguish the two in any response they send
+    // back to a caller who hasn't already authenticated (account
+    // enumeration - see the /api/login/key/* routes).
+    std::optional<tradep2p::Ed25519PublicKey> login_key(const std::string& username) {
+        std::scoped_lock lock(mutex_);
+        const auto it = accounts_.find(username);
+        if (it == accounts_.end() || !it->second.login_key.has_value()) {
+            return std::nullopt;
+        }
+        return it->second.login_key;
     }
 
 private:
@@ -298,15 +343,34 @@ private:
                 continue;
             }
             std::istringstream stream(line);
-            std::string username, salt_hex, hash_hex, created_at;
+            std::string username, salt_hex, hash_hex, created_at, login_key_hex;
             if (!std::getline(stream, username, '\t') ||
                 !std::getline(stream, salt_hex, '\t') ||
                 !std::getline(stream, hash_hex, '\t') ||
-                !std::getline(stream, created_at)) {
+                !std::getline(stream, created_at, '\t')) {
                 continue;
             }
-            accounts_.emplace(username, Account{username, from_hex(salt_hex),
-                                                from_hex(hash_hex), created_at});
+            // Phase 7's trailing 5th field (login key hex), optional for
+            // backward compatibility: a pre-phase-7 record has no 5th
+            // field at all, so this getline() simply finds nothing left
+            // and leaves login_key_hex empty - treated identically to an
+            // account that exists but never enrolled a key. Every account
+            // record is re-appended in full on every mutation (see
+            // append_locked()/set_login_key()), and this loop lets a LATER
+            // line for the same username overwrite an earlier one, so the
+            // most recent record always wins.
+            std::getline(stream, login_key_hex);
+            Account account{username, from_hex(salt_hex), from_hex(hash_hex), created_at,
+                            std::nullopt};
+            if (!login_key_hex.empty()) {
+                const auto raw = from_hex(login_key_hex);
+                account.login_key = tradep2p::parse_ed25519_public_key(raw);
+                // A malformed trailing field (wrong length, all-zero) is
+                // treated as "no key enrolled" rather than aborting the
+                // whole load - password auth for this and every other
+                // account must keep working regardless.
+            }
+            accounts_[username] = std::move(account);
         }
     }
 
@@ -320,7 +384,9 @@ private:
             throw std::runtime_error("failed to open the account store for writing");
         }
         output << account.username << '\t' << to_hex(account.salt) << '\t'
-               << to_hex(account.hash) << '\t' << account.created_at << '\n';
+               << to_hex(account.hash) << '\t' << account.created_at << '\t'
+               << (account.login_key.has_value() ? to_hex(*account.login_key) : std::string{})
+               << '\n';
         output.close();
         // The file holds password salts and hashes; keep it readable only by
         // whoever runs this process, regardless of the process umask.
@@ -330,6 +396,63 @@ private:
     std::string path_;
     std::mutex mutex_;
     std::unordered_map<std::string, Account> accounts_;
+};
+
+// Phase 7 (docs/identity-07-login.md: "rate-limit authentication
+// attempts"). A simple per-username sliding-window limiter, applied to
+// BOTH the existing password path and the new key-based path - both are
+// "authentication attempts" against the same account. Deliberately
+// per-username, not per-IP: this binary expects to sit behind a reverse
+// proxy (see the file's top comment), and trusting a client-supplied or
+// proxy-supplied source IP at this layer without a verified proxy
+// allowlist would be easy to spoof. This does not stop a distributed
+// attacker trying many DIFFERENT usernames at once - that is a
+// reverse-proxy/WAF concern outside this binary's trust boundary - but it
+// does stop credential stuffing or online guessing against one account,
+// which is the concrete risk this phase's login mechanism exists to
+// reduce. Rate-limiting applies identically whether or not the username
+// is real, so it adds no new account-enumeration signal.
+class AuthRateLimiter {
+public:
+    [[nodiscard]] bool allowed(const std::string& username) {
+        std::scoped_lock lock(mutex_);
+        prune_locked(username);
+        const auto it = failures_.find(username);
+        return it == failures_.end() || it->second.size() < kMaxAttempts;
+    }
+
+    void record_failure(const std::string& username) {
+        std::scoped_lock lock(mutex_);
+        prune_locked(username);
+        failures_[username].push_back(std::chrono::steady_clock::now());
+    }
+
+    void record_success(const std::string& username) {
+        std::scoped_lock lock(mutex_);
+        failures_.erase(username);
+    }
+
+private:
+    void prune_locked(const std::string& username) {
+        const auto it = failures_.find(username);
+        if (it == failures_.end()) {
+            return;
+        }
+        const auto cutoff = std::chrono::steady_clock::now() - kWindow;
+        auto& attempts = it->second;
+        attempts.erase(std::remove_if(attempts.begin(), attempts.end(),
+                                      [cutoff](const auto& when) { return when < cutoff; }),
+                       attempts.end());
+        if (attempts.empty()) {
+            failures_.erase(it);
+        }
+    }
+
+    static constexpr std::size_t kMaxAttempts = 5U;
+    static constexpr std::chrono::seconds kWindow{60};
+
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> failures_;
 };
 
 struct WebSession {
@@ -353,12 +476,13 @@ class SessionManager {
 public:
     SessionManager(Endpoint mediator, ClientTlsPolicy tls,
                   std::optional<Endpoint> proxy, std::size_t max_sessions,
-                  std::chrono::minutes idle_timeout)
+                  std::chrono::minutes idle_timeout, std::string mediator_id)
         : mediator_(std::move(mediator)),
           tls_(std::move(tls)),
           proxy_(std::move(proxy)),
           max_sessions_(max_sessions),
-          idle_timeout_(idle_timeout) {}
+          idle_timeout_(idle_timeout),
+          mediator_id_(std::move(mediator_id)) {}
 
     std::string login(const std::string& username) {
         std::scoped_lock lock(mutex_);
@@ -375,7 +499,17 @@ public:
             throw std::runtime_error(
                 "this web client is at capacity, please try again shortly");
         }
-        auto client = std::make_shared<DashboardClient>(mediator_, tls_, proxy_);
+        // Phase 4b (counterparty recognition) wiring is deliberately NOT
+        // done in this binary yet - tradep2p-webclient has no per-account
+        // keystore/history concept at all (see docs/IDENTITY-PLAN.md phase
+        // 9, still planned), so no RecognitionKeyProvider/
+        // RecognitionOutcomeHandler is set here. Leaving both unset means
+        // this session safely auto-declines any incoming
+        // RecognitionChallenge (see DashboardClient::handle_frame) rather
+        // than silently doing nothing - the same "no key, no proof, not
+        // evidence of anything" default every other unkeyed path in this
+        // architecture already has.
+        auto client = std::make_shared<DashboardClient>(mediator_, tls_, proxy_, mediator_id_);
         client->start();
         const std::string token = random_token();
         sessions_.emplace(
@@ -425,6 +559,7 @@ private:
     std::optional<Endpoint> proxy_;
     std::size_t max_sessions_;
     std::chrono::minutes idle_timeout_;
+    std::string mediator_id_;
 
     std::mutex mutex_;
     std::unordered_map<std::string, WebSession> sessions_;
@@ -553,9 +688,44 @@ std::string landing_html(const std::string& preauth_token) {
         << "<button class=\"primary\" type=\"submit\">Create session</button>\n"
         << "</form>\n</section>\n"
         << "</div>\n"
+        << "<section class=\"panel\">\n<h2>Log in with a key</h2>\n"
+        << "<p class=\"muted\">For an account that has enrolled a login key (see "
+           "&quot;Account&quot; once logged in). This protects against a leaked "
+           "password database or credential stuffing - "
+           "<b>it does not protect against this server's own operator</b>, who "
+           "controls every byte of this page; see the project's identity "
+           "architecture notes (specs.txt SS13.4) before relying on it for more "
+           "than that. Signing happens OUTSIDE this browser page (a native client "
+           "or other external tool you trust) - this page never generates or "
+           "holds your private key.</p>\n"
+        << "<form id=\"key-challenge-form\">\n"
+        << "<label>Username<input name=\"username\" id=\"key-username\" "
+           "maxlength=\"32\" required autocomplete=\"username\"></label>\n"
+        << "<button type=\"submit\">Request login challenge</button>\n"
+        << "</form>\n"
+        << "<div id=\"key-challenge-box\" style=\"display:none\">\n"
+        << "<p class=\"muted\">Sign these exact bytes with your enrolled key's "
+           "private seed, using the same external tool that generated it, then "
+           "paste the resulting signature below. Expires "
+           "<span id=\"key-expires\"></span> (unix seconds).</p>\n"
+        << "<table class=\"mono-break\"><tbody>"
+           "<tr><td>service_id</td><td id=\"key-service\"></td></tr>"
+           "<tr><td>server_identity</td><td id=\"key-server\"></td></tr>"
+           "<tr><td>session_id</td><td id=\"key-session\"></td></tr>"
+           "<tr><td>nonce</td><td id=\"key-nonce\"></td></tr>"
+           "<tr><td>created_at</td><td id=\"key-created\"></td></tr>"
+           "</tbody></table>\n"
+        << "<form id=\"key-verify-form\">\n"
+        << "<label>Signature (128 hex characters)<input name=\"signature\" "
+           "id=\"key-signature\" maxlength=\"128\" required></label>\n"
+        << "<button class=\"primary\" type=\"submit\">Log in</button>\n"
+        << "</form>\n</div>\n"
+        << "</section>\n"
         << "<p class=\"muted\">This account exists only on this server, only to "
            "let you resume a session. It is not a protocol identity and is "
-           "never shown to your trade counterparty or the mediator.</p>\n"
+           "never shown to your trade counterparty or the mediator. A key badge "
+           "or key-based login here means only \"controlled the same enrolled "
+           "key\" - never trusted, verified, or safe (specs.txt SS14).</p>\n"
         << "</div>\n"
         << "<script>\n"
         << "const PREAUTH_TOKEN=\"" << preauth_token << "\";\n"
@@ -575,6 +745,33 @@ std::string landing_html(const std::string& preauth_token) {
         << "document.getElementById('register-form').onsubmit=async(e)=>{e."
            "preventDefault();try{await submitForm(e.target,'/api/"
            "register')}catch(err){notice(err.message,true)}};\n"
+        << "let pendingSessionId=null;\n"
+        << "document.getElementById('key-challenge-form').onsubmit=async(e)=>{e."
+           "preventDefault();try{const username=document.getElementById("
+           "'key-username').value;const r=await fetch('/api/login/key/"
+           "challenge',{method:'POST',headers:{'Content-Type':'application/x-"
+           "www-form-urlencoded','" << kPreAuthHeader << "':PREAUTH_TOKEN},body:"
+           "new URLSearchParams({username})});const body=await r.json();if(!r."
+           "ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));"
+           "pendingSessionId=body.session_id;document.getElementById('key-"
+           "service').textContent=body.service_id;document.getElementById('key-"
+           "server').textContent=body.server_identity;document.getElementById("
+           "'key-session').textContent=body.session_id;document.getElementById("
+           "'key-nonce').textContent=body.nonce;document.getElementById('key-"
+           "created').textContent=body.created_at;document.getElementById('key-"
+           "expires').textContent=body.expires_at;document.getElementById('key-"
+           "challenge-box').style.display='block'}catch(err){notice(err.message,"
+           "true)}};\n"
+        << "document.getElementById('key-verify-form').onsubmit=async(e)=>{e."
+           "preventDefault();try{const username=document.getElementById("
+           "'key-username').value;const signature=document.getElementById("
+           "'key-signature').value;const r=await fetch('/api/login/key/verify',{"
+           "method:'POST',headers:{'Content-Type':'application/x-www-form-"
+           "urlencoded','" << kPreAuthHeader << "':PREAUTH_TOKEN},body:new "
+           "URLSearchParams({username,session_id:pendingSessionId,signature})});"
+           "const body=await r.json();if(!r.ok||!body.ok)throw new Error(body."
+           "error||('HTTP '+r.status));location.reload()}catch(err){notice(err."
+           "message,true)}};\n"
         << "</script>\n</body>\n</html>";
     return out.str();
 }
@@ -631,6 +828,18 @@ std::string app_html(const std::string& username, const std::string& csrf_token)
         << "<section class=\"panel\">\n<h2>My settlement rooms</h2>\n<div "
            "id=\"rooms\"><p class=\"muted\">No active rooms.</p></div>\n</section>"
            "\n"
+        << "<section class=\"panel\">\n<h2>Account: key-based login</h2>\n"
+        << "<p class=\"muted\">Enroll a public key to also allow challenge-"
+           "response login for this account, alongside your password (never "
+           "instead of it - enrolling never disables the password). Generate the "
+           "keypair with a native tool you trust, never in this browser page; see "
+           "the &quot;Log in with a key&quot; panel on the login screen for how "
+           "the resulting login works.</p>\n"
+        << "<form id=\"enroll-key-form\">\n"
+        << "<label>Public key (64 hex characters)<input name=\"public_key\" "
+           "maxlength=\"64\" required></label>\n"
+        << "<button type=\"submit\">Enroll key</button>\n"
+        << "</form>\n</section>\n"
         << "</div>\n</div>\n"
         << "</div>\n<script>\n"
         << "const TOKEN=\"" << csrf_token << "\";\n"
@@ -738,6 +947,11 @@ std::string app_html(const std::string& username, const std::string& csrf_token)
            "queued')}catch(e){notice(e.message,true)}};\n"
         << "document.getElementById('logout').onclick=async()=>{try{await "
            "post('/api/logout')}catch(e){}location.reload()};\n"
+        << "document.getElementById('enroll-key-form').onsubmit=async(e)=>{e."
+           "preventDefault();try{const "
+           "public_key=document.getElementById('enroll-key-form').public_key."
+           "value;await post('/api/account/enroll-key',{public_key});notice('login "
+           "key enrolled')}catch(err){notice(err.message,true)}};\n"
         << "refresh();setInterval(refresh,1000);\n"
         << "</script>\n</body>\n</html>";
     return out.str();
@@ -775,11 +989,13 @@ int main(int argc, char** argv) {
         Endpoint mediator;
         ClientTlsPolicy tls;
         int option_index = 0;
+        std::string mediator_id_text;
 
         if (mode == "client") {
             mediator = parse_endpoint(argv[2]);
             tls = ClientTlsPolicy{argv[3]};
             option_index = 4;
+            mediator_id_text = argv[2];
         } else if (mode == "client-tor") {
             if (argc < 5) {
                 print_usage(argv[0]);
@@ -789,6 +1005,7 @@ int main(int argc, char** argv) {
             mediator = parse_endpoint(argv[3]);
             tls = ClientTlsPolicy{argv[4]};
             option_index = 5;
+            mediator_id_text = argv[3];
         } else {
             print_usage(argv[0]);
             return EXIT_FAILURE;
@@ -799,6 +1016,16 @@ int main(int argc, char** argv) {
         std::string accounts_file = "logs/webclient-accounts.tsv";
         std::size_t max_sessions = 64U;
         std::chrono::minutes idle_timeout{30};
+        // Phase 7: the "server identity or domain" bound into every signed
+        // login challenge (see login.hpp's LoginChallengeFields). Defaults
+        // to this process's own listen address, which is correct for a
+        // direct connection but NOT what a browser actually navigated to
+        // if a reverse proxy terminates TLS in front of this binary (see
+        // this file's top comment) - an operator running behind a proxy
+        // should set this explicitly to the public-facing domain, so a
+        // signed response cannot be replayed against a differently-named
+        // deployment sharing the same account file.
+        std::string server_identity;
 
         for (int index = option_index; index < argc; ++index) {
             const std::string argument = argv[index];
@@ -813,6 +1040,8 @@ int main(int argc, char** argv) {
             } else if (argument == "--idle-minutes" && index + 1 < argc) {
                 idle_timeout = std::chrono::minutes(
                     parse_u32(argv[++index], "idle minute count"));
+            } else if (argument == "--server-identity" && index + 1 < argc) {
+                server_identity = argv[++index];
             } else if (argument == "--help") {
                 print_usage(argv[0]);
                 return EXIT_SUCCESS;
@@ -821,9 +1050,15 @@ int main(int argc, char** argv) {
                     "unknown or incomplete web client option: " + argument);
             }
         }
+        if (server_identity.empty()) {
+            server_identity = listen_host + ":" + std::to_string(http_port);
+        }
+        constexpr const char* kLoginServiceId = "tradep2p-webclient";
 
         AccountStore accounts(accounts_file);
-        SessionManager sessions(mediator, tls, proxy, max_sessions, idle_timeout);
+        SessionManager sessions(mediator, tls, proxy, max_sessions, idle_timeout, mediator_id_text);
+        tradep2p::LoginChallengeTracker login_tracker;
+        AuthRateLimiter auth_limiter;
 
         std::atomic<bool> stop_reaper{false};
         std::thread reaper([&] {
@@ -928,9 +1163,14 @@ int main(int argc, char** argv) {
             try {
                 const std::string username = required_param(request, "username");
                 const std::string password = required_param(request, "password");
+                if (!auth_limiter.allowed(username)) {
+                    throw std::invalid_argument("too many attempts, try again later");
+                }
                 if (!accounts.verify(username, password)) {
+                    auth_limiter.record_failure(username);
                     throw std::invalid_argument("invalid username or password");
                 }
+                auth_limiter.record_success(username);
                 const std::string token = sessions.login(username);
                 response.set_header(
                     "Set-Cookie", std::string(kSessionCookie) + "=" + token +
@@ -941,6 +1181,111 @@ int main(int argc, char** argv) {
                 set_json_result(response, false, error.what(), 400);
             }
         });
+
+        // Phase 7 (service-scoped challenge-response login, see
+        // include/tradep2p/login.hpp): step 1 of key-based login. Always
+        // issues a real, trackable challenge regardless of whether
+        // `username` exists or has an enrolled key - the response shape is
+        // identical either way, so this route alone reveals nothing about
+        // account existence (see /api/login/key/verify for the matching
+        // half of that property).
+        server.Post("/api/login/key/challenge",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       if (!host_allowed(request) || !same_origin(request) ||
+                           !require_preauth(request)) {
+                           set_json_result(response, false, "forbidden", 403);
+                           return;
+                       }
+                       try {
+                           const std::string username = required_param(request, "username");
+                           if (!auth_limiter.allowed(username)) {
+                               throw std::invalid_argument("too many attempts, try again later");
+                           }
+                           const auto challenge =
+                               login_tracker.issue(kLoginServiceId, server_identity, username);
+                           std::ostringstream json;
+                           json << "{\"ok\":true"
+                                << ",\"session_id\":\"" << json_escape(to_hex(challenge.session_id))
+                                << "\",\"nonce\":\"" << json_escape(to_hex(challenge.nonce)) << "\""
+                                << ",\"service_id\":\"" << json_escape(challenge.service_id) << "\""
+                                << ",\"server_identity\":\""
+                                << json_escape(challenge.server_identity) << "\""
+                                << ",\"created_at\":" << challenge.created_at
+                                << ",\"expires_at\":" << challenge.expires_at << "}";
+                           response.status = 200;
+                           response.set_content(json.str(), "application/json; charset=utf-8");
+                       } catch (const std::exception& error) {
+                           set_json_result(response, false, error.what(), 400);
+                       }
+                   });
+
+        // Step 2: verify the signed response and, on success, log in
+        // exactly like the password path (same session/cookie mechanics).
+        // A wrong signature, an unknown username, and a known username
+        // with no enrolled key ALL fail identically ("invalid login") -
+        // the account-enumeration-resistance property the phase spec asks
+        // for. The challenge is consumed unconditionally (success or
+        // failure) so it can never be retried.
+        server.Post("/api/login/key/verify",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       if (!host_allowed(request) || !same_origin(request) ||
+                           !require_preauth(request)) {
+                           set_json_result(response, false, "forbidden", 403);
+                           return;
+                       }
+                       try {
+                           const std::string username = required_param(request, "username");
+                           const std::string session_id_hex = required_param(request, "session_id");
+                           const std::string signature_hex = required_param(request, "signature");
+                           if (!auth_limiter.allowed(username)) {
+                               throw std::invalid_argument("too many attempts, try again later");
+                           }
+
+                           const auto session_id_bytes = from_hex(session_id_hex);
+                           const auto signature_bytes = from_hex(signature_hex);
+                           bool ok = false;
+                           if (session_id_bytes.size() == tradep2p::kLoginSessionIdLength &&
+                               signature_bytes.size() == tradep2p::kEd25519SignatureLength) {
+                               tradep2p::LoginSessionId session_id{};
+                               std::copy(session_id_bytes.begin(), session_id_bytes.end(),
+                                        session_id.begin());
+                               tradep2p::Ed25519Signature signature{};
+                               std::copy(signature_bytes.begin(), signature_bytes.end(),
+                                        signature.begin());
+
+                               const auto challenge = login_tracker.peek(session_id);
+                               login_tracker.consume(session_id); // unconditional - single-use either way
+                               // A key is always fetched (or, for an
+                               // unenrolled/unknown account, a fixed dummy
+                               // key is substituted) so that verification
+                               // always does the same amount of work on the
+                               // same shape of input, regardless of account
+                               // state - part of the same enumeration-
+                               // resistance property AccountStore::verify()
+                               // already applies to the password path.
+                               static const tradep2p::Ed25519PublicKey kDummyKey{};
+                               const auto enrolled = accounts.login_key(username);
+                               const auto& key_to_check = enrolled.has_value() ? *enrolled : kDummyKey;
+                               ok = challenge.has_value() && challenge->username == username &&
+                                    enrolled.has_value() &&
+                                    tradep2p::verify_login_response(key_to_check, *challenge, signature);
+                           }
+
+                           if (!ok) {
+                               auth_limiter.record_failure(username);
+                               throw std::invalid_argument("invalid login");
+                           }
+                           auth_limiter.record_success(username);
+                           const std::string token = sessions.login(username);
+                           response.set_header(
+                               "Set-Cookie", std::string(kSessionCookie) + "=" + token +
+                                                 "; Path=/; HttpOnly; SameSite=Strict" +
+                                                 cookie_suffix(request));
+                           set_json_result(response, true, "logged in");
+                       } catch (const std::exception& error) {
+                           set_json_result(response, false, error.what(), 400);
+                       }
+                   });
 
         const auto require_session = [&](const httplib::Request& request,
                                          httplib::Response& response)
@@ -972,6 +1317,37 @@ int main(int argc, char** argv) {
                                                   "=deleted; Path=/; Max-Age=0");
             set_json_result(response, true, "logged out");
         });
+
+        // Phase 7 migration path: opts an ALREADY-LOGGED-IN account into
+        // key-based login, without ever disabling its existing password -
+        // "how a user opts an existing account into key-based login
+        // without losing access" (docs/identity-07-login.md). Requires an
+        // active session (proven ownership via whichever method the user
+        // already used to log in this time - password or, once enrolled,
+        // an existing key) rather than re-checking the password here, so
+        // this route has no separate credential-guessing surface of its
+        // own. `public_key` is caller-supplied hex (64 chars / 32 bytes) -
+        // see login.hpp's file comment for why this phase does not itself
+        // generate the keypair (that's phase 9's browser-side job).
+        server.Post("/api/account/enroll-key",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       const auto session = require_session(request, response);
+                       if (!session) {
+                           return;
+                       }
+                       try {
+                           const std::string public_key_hex = required_param(request, "public_key");
+                           const auto raw = from_hex(public_key_hex);
+                           const auto parsed = tradep2p::parse_ed25519_public_key(raw);
+                           if (!parsed.has_value()) {
+                               throw std::invalid_argument("invalid public key");
+                           }
+                           accounts.set_login_key(session->username, *parsed);
+                           set_json_result(response, true, "login key enrolled");
+                       } catch (const std::exception& error) {
+                           set_json_result(response, false, error.what(), 400);
+                       }
+                   });
 
         server.Get("/api/state", [&](const httplib::Request& request,
                                      httplib::Response& response) {

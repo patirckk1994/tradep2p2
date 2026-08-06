@@ -271,8 +271,24 @@ void harden_context(SSL_CTX* ctx) {
             ctx, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384") != 1) {
         throw_ssl("failed to set TLS 1.3 cipher suites");
     }
-    if (SSL_CTX_set1_groups_list(ctx, "X25519:P-256") != 1) {
-        throw_ssl("failed to set TLS groups");
+    // Post-quantum hybrid key exchange (specs.txt SS11): harvest-now-
+    // decrypt-later applies to key exchange specifically - a passive
+    // adversary recording today's TLS sessions decrypts them retroactively
+    // once a cryptographically relevant quantum computer exists, and that
+    // is unfixable after the fact (unlike a forged signature, which is
+    // worthless against a handshake that already completed). X25519MLKEM768
+    // is listed FIRST so it is preferred whenever both peers support it;
+    // X25519 and P-256 remain as classical fallback for interop with a peer
+    // that doesn't. SSL_CTX_set1_groups_list() rejects the ENTIRE list if
+    // any single group name is unrecognized by the linked OpenSSL, so this
+    // already satisfies "fail loudly rather than silently negotiating
+    // classical if the linked library lacks it" - there is no separate
+    // opt-in check needed: an OpenSSL genuinely too old to know
+    // "X25519MLKEM768" makes this whole function throw via throw_ssl()
+    // below, rather than silently falling back to a classical-only list.
+    if (SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519:P-256") != 1) {
+        throw_ssl("failed to set TLS groups (requires an OpenSSL build providing the "
+                  "X25519MLKEM768 hybrid group - see specs.txt SS11)");
     }
 }
 

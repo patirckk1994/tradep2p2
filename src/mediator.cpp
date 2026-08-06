@@ -13,6 +13,48 @@ MediatorSession::MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeT
     validate_fee_terms(fee_);
 }
 
+MediatorSession MediatorSession::restore(RoomId room_id,
+                                          TradeTerms terms,
+                                          std::string receive_address_a,
+                                          std::string receive_address_b,
+                                          FeeTerms fee,
+                                          SessionState state,
+                                          std::uint32_t round_index,
+                                          std::uint8_t leg_index,
+                                          std::string abort_reason) {
+    // Everything that is always persisted (never blank, per the phase-3
+    // room-persistence design) is validated exactly like the normal
+    // constructor would. Only the receive addresses get the relaxed,
+    // empty-is-allowed treatment - see the header comment on restore().
+    validate_terms(terms);
+    validate_room_id(room_id);
+    validate_fee_terms(fee);
+    if (!receive_address_a.empty()) {
+        validate_address(receive_address_a);
+    }
+    if (!receive_address_b.empty()) {
+        validate_address(receive_address_b);
+    }
+    if (round_index > terms.rounds) {
+        throw std::invalid_argument("restored round index exceeds configured rounds");
+    }
+    if (leg_index > 1U) {
+        throw std::invalid_argument("restored leg index must be 0 or 1");
+    }
+
+    MediatorSession session;
+    session.creator_.terms = std::move(terms);
+    session.creator_.receive_address_a = std::move(receive_address_a);
+    session.room_id_ = room_id;
+    session.receive_address_b_ = std::move(receive_address_b);
+    session.fee_ = std::move(fee);
+    session.state_ = state;
+    session.round_index_ = round_index;
+    session.leg_index_ = leg_index;
+    session.abort_reason_ = std::move(abort_reason);
+    return session;
+}
+
 void MediatorSession::join(const JoinRoomMessage& message) {
     if (state_ != SessionState::WaitingForPeer) {
         throw std::logic_error("room is not accepting a peer");
@@ -47,7 +89,8 @@ Party MediatorSession::first_sender_for_round() const {
 Party MediatorSession::current_sender() const {
     if (state_ == SessionState::WaitingForPeer ||
         state_ == SessionState::Complete ||
-        state_ == SessionState::Aborted) {
+        state_ == SessionState::Aborted ||
+        state_ == SessionState::WaitingForFinalReceiptAck) {
         throw std::logic_error("session has no active sender");
     }
     if (state_ == SessionState::WaitingForFeeSent) {
@@ -151,17 +194,52 @@ void MediatorSession::receiver_reported_received(
 void MediatorSession::advance_after_receipt() {
     if (leg_index_ == 0U) {
         leg_index_ = 1U;
-        state_ = SessionState::WaitingForSent;
+        // The upcoming leg (this round's second) is the trade's actual
+        // final tranche only if this is the last round AND no fee follows
+        // it - if a fee is configured, the fee leg (handled in the other
+        // branch below) is the true final tranche instead.
+        const bool is_last_round = (round_index_ + 1U == creator_.terms.rounds);
+        const bool this_leg_is_final_tranche = is_last_round && fee_.amount == 0U;
+        if (this_leg_is_final_tranche) {
+            final_receipt_acked_a_ = false;
+            final_receipt_acked_b_ = false;
+            state_ = SessionState::WaitingForFinalReceiptAck;
+        } else {
+            state_ = SessionState::WaitingForSent;
+        }
         return;
     }
 
     leg_index_ = 0U;
     ++round_index_;
     if (round_index_ == creator_.terms.rounds) {
-        state_ = fee_.amount > 0U ? SessionState::WaitingForFeeSent
-                                  : SessionState::Complete;
+        if (fee_.amount > 0U) {
+            final_receipt_acked_a_ = false;
+            final_receipt_acked_b_ = false;
+            state_ = SessionState::WaitingForFinalReceiptAck;
+        } else {
+            state_ = SessionState::Complete;
+        }
     } else {
         state_ = SessionState::WaitingForSent;
+    }
+}
+
+void MediatorSession::acknowledge_final_receipt(Party party) {
+    if (state_ != SessionState::WaitingForFinalReceiptAck) {
+        throw std::logic_error("not waiting for a final receipt acknowledgement");
+    }
+    if (final_receipt_acked(party)) {
+        throw std::logic_error("this party already acknowledged the final receipt");
+    }
+    if (party == Party::A) {
+        final_receipt_acked_a_ = true;
+    } else {
+        final_receipt_acked_b_ = true;
+    }
+    if (final_receipt_acked_a_ && final_receipt_acked_b_) {
+        state_ = final_receipt_gate_is_fee_leg() ? SessionState::WaitingForFeeSent
+                                                 : SessionState::WaitingForSent;
     }
 }
 

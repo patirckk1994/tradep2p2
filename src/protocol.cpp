@@ -344,7 +344,7 @@ void validate_registry_node(const RegistryNode& node, bool require_ttl) {
 void validate_message_type(MessageType type) {
     const auto value = static_cast<std::uint16_t>(type);
     if (value < static_cast<std::uint16_t>(MessageType::Welcome) ||
-        value > static_cast<std::uint16_t>(MessageType::OfferCancelled)) {
+        value > static_cast<std::uint16_t>(MessageType::ReceiptDisclosure)) {
         throw std::invalid_argument("unknown message type");
     }
 }
@@ -938,6 +938,303 @@ RegistryNodesMessage decode_registry_nodes(std::span<const std::uint8_t> bytes) 
     message.nodes.reserve(count);
     for (std::size_t i = 0U; i < count; ++i) {
         message.nodes.push_back(read_registry_node(reader, true));
+    }
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_recovery_state_request(const RecoveryStateRequestMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    return writer.take();
+}
+
+RecoveryStateRequestMessage decode_recovery_state_request(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    RecoveryStateRequestMessage message{reader.fixed_id<32U>()};
+    validate_room_id(message.room_id);
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_recovery_state_response(const RecoveryStateResponseMessage& message) {
+    validate_room_id(message.room_id);
+    if (message.leg_index > 1U) {
+        throw std::invalid_argument("invalid recovery response leg index");
+    }
+    if (!message.reason.empty()) {
+        validate_reason(message.reason);
+    }
+
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.u8(message.found ? 1U : 0U);
+    if (message.found) {
+        append_terms(writer, message.terms);
+        append_fee_terms(writer, message.fee);
+        writer.u8(message.state);
+        writer.u32(message.round_index);
+        writer.u8(message.leg_index);
+        writer.u8(message.party_a_connected ? 1U : 0U);
+        writer.u8(message.party_b_connected ? 1U : 0U);
+    }
+    writer.short_string(message.reason, kMaxReasonLength);
+    return writer.take();
+}
+
+RecoveryStateResponseMessage decode_recovery_state_response(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    RecoveryStateResponseMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+
+    const auto found_flag = reader.u8();
+    if (found_flag > 1U) {
+        throw std::runtime_error("invalid recovery response found flag");
+    }
+    message.found = found_flag == 1U;
+    if (message.found) {
+        message.terms = read_terms(reader);
+        message.fee = read_fee_terms(reader);
+        message.state = reader.u8();
+        message.round_index = reader.u32();
+        message.leg_index = reader.u8();
+        if (message.leg_index > 1U) {
+            throw std::runtime_error("invalid recovery response leg index");
+        }
+        const auto party_a_flag = reader.u8();
+        const auto party_b_flag = reader.u8();
+        if (party_a_flag > 1U || party_b_flag > 1U) {
+            throw std::runtime_error("invalid recovery response connection flag");
+        }
+        message.party_a_connected = party_a_flag == 1U;
+        message.party_b_connected = party_b_flag == 1U;
+    }
+    message.reason = reader.short_string(kMaxReasonLength);
+    if (!message.reason.empty()) {
+        validate_reason(message.reason);
+    }
+    reader.require_finished();
+    return message;
+}
+
+// --- Phase 4b: counterparty recognition relay ---
+//
+// These functions frame and bounds-check the wire bytes only; they do not
+// know what suite_id=1 means cryptographically or whether a signature
+// verifies - that is recognition.hpp's job. All this layer enforces is "the
+// bytes are well-formed and every fixed-size field is exactly the length
+// this protocol version defines", the same posture every other encode/
+// decode pair in this file already has toward its own message type.
+
+std::vector<std::uint8_t> encode_recognition_challenge(const RecognitionChallengeMessage& message) {
+    validate_room_id(message.room_id);
+    if (message.expires_at <= message.created_at) {
+        throw std::invalid_argument("recognition challenge expiry must be after its creation time");
+    }
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.u16(message.suite_id);
+    writer.fixed_id(message.nonce);
+    writer.u64(message.created_at);
+    writer.u64(message.expires_at);
+    return writer.take();
+}
+
+RecognitionChallengeMessage decode_recognition_challenge(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    RecognitionChallengeMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.suite_id = reader.u16();
+    message.nonce = reader.fixed_id<kRecognitionNonceLength>();
+    message.created_at = reader.u64();
+    message.expires_at = reader.u64();
+    reader.require_finished();
+    if (message.expires_at <= message.created_at) {
+        throw std::runtime_error("recognition challenge expiry must be after its creation time");
+    }
+    return message;
+}
+
+std::vector<std::uint8_t> encode_recognition_response(const RecognitionResponseMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.fixed_id(message.nonce);
+    writer.fixed_id(message.prover_public_key);
+    writer.fixed_id(message.signature);
+    return writer.take();
+}
+
+RecognitionResponseMessage decode_recognition_response(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    RecognitionResponseMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.nonce = reader.fixed_id<kRecognitionNonceLength>();
+    message.prover_public_key = reader.fixed_id<kRecognitionPublicKeyLength>();
+    message.signature = reader.fixed_id<kRecognitionSignatureLength>();
+    reader.require_finished();
+    return message;
+}
+
+// --- Phase 5: ephemeral trade identity announcement ---
+
+std::vector<std::uint8_t> encode_trade_ephemeral_key(const TradeEphemeralKeyMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.fixed_id(message.ephemeral_public_key);
+    return writer.take();
+}
+
+TradeEphemeralKeyMessage decode_trade_ephemeral_key(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    TradeEphemeralKeyMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.ephemeral_public_key = reader.fixed_id<kTradeEphemeralPublicKeyLength>();
+    reader.require_finished();
+    return message;
+}
+
+// --- Phase 6: staged receipts ---
+
+std::vector<std::uint8_t> encode_receipt_ack(const ReceiptAckMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.u8(message.stage);
+    writer.u64(message.timestamp);
+    writer.fixed_id(message.signature);
+    return writer.take();
+}
+
+ReceiptAckMessage decode_receipt_ack(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    ReceiptAckMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.stage = reader.u8();
+    message.timestamp = reader.u64();
+    message.signature = reader.fixed_id<kReceiptSignatureLength>();
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_receipt_issued(const ReceiptIssuedMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.short_string(message.mediator_id, kReceiptWireMediatorIdLength);
+    writer.u8(message.stage);
+    writer.u8(message.completed ? 1U : 0U);
+    writer.fixed_id(message.terms_commitment);
+    writer.fixed_id(message.party_a_ephemeral_key);
+    writer.fixed_id(message.party_b_ephemeral_key);
+    writer.fixed_id(message.mediator_public_key);
+    writer.u64(message.timestamp);
+    writer.fixed_id(message.nonce);
+    writer.fixed_id(message.previous_stage_hash);
+    writer.fixed_id(message.mediator_signature);
+    return writer.take();
+}
+
+ReceiptIssuedMessage decode_receipt_issued(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    ReceiptIssuedMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.mediator_id = reader.short_string(kReceiptWireMediatorIdLength);
+    message.stage = reader.u8();
+    const auto completed_flag = reader.u8();
+    if (completed_flag > 1U) {
+        throw std::runtime_error("invalid receipt completed flag");
+    }
+    message.completed = completed_flag == 1U;
+    message.terms_commitment = reader.fixed_id<kReceiptTermsCommitmentLength>();
+    message.party_a_ephemeral_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.party_b_ephemeral_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.mediator_public_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.timestamp = reader.u64();
+    message.nonce = reader.fixed_id<kReceiptWireNonceLength>();
+    message.previous_stage_hash = reader.fixed_id<kReceiptTermsCommitmentLength>();
+    message.mediator_signature = reader.fixed_id<kReceiptSignatureLength>();
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_receipt_ack_required(const ReceiptAckRequiredMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    return writer.take();
+}
+
+ReceiptAckRequiredMessage decode_receipt_ack_required(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    ReceiptAckRequiredMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    reader.require_finished();
+    return message;
+}
+
+// --- Phase 8: selective private receipt disclosure ---
+
+std::vector<std::uint8_t> encode_receipt_disclosure(const ReceiptDisclosureMessage& message) {
+    validate_room_id(message.room_id);
+    if (message.chain.size() > kDisclosureMaxChainEntries) {
+        throw std::invalid_argument("disclosed receipt chain exceeds the maximum allowed length");
+    }
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    writer.fixed_id(message.recipient_ephemeral_key);
+    writer.fixed_id(message.disclosed_chain_hash);
+    writer.u64(message.timestamp);
+    writer.fixed_id(message.nonce);
+    writer.fixed_id(message.signature);
+    if (message.chain.size() > std::numeric_limits<std::uint8_t>::max()) {
+        throw std::invalid_argument("disclosed receipt chain has too many entries to encode");
+    }
+    writer.u8(static_cast<std::uint8_t>(message.chain.size()));
+    for (const auto& entry : message.chain) {
+        const std::vector<std::uint8_t> entry_bytes = encode_receipt_issued(entry);
+        writer.short_string(
+            std::string(reinterpret_cast<const char*>(entry_bytes.data()), entry_bytes.size()),
+            kMaxFramePayload);
+    }
+    auto result = writer.take();
+    if (result.size() > kMaxFramePayload) {
+        throw std::invalid_argument("encoded receipt disclosure exceeds the frame payload limit");
+    }
+    return result;
+}
+
+ReceiptDisclosureMessage decode_receipt_disclosure(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() > kMaxFramePayload) {
+        throw std::runtime_error("receipt disclosure payload exceeds the frame payload limit");
+    }
+    Reader reader(bytes);
+    ReceiptDisclosureMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    message.recipient_ephemeral_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.disclosed_chain_hash = reader.fixed_id<kReceiptTermsCommitmentLength>();
+    message.timestamp = reader.u64();
+    message.nonce = reader.fixed_id<16U>();
+    message.signature = reader.fixed_id<kReceiptSignatureLength>();
+    const auto count = reader.u8();
+    if (count > kDisclosureMaxChainEntries) {
+        throw std::runtime_error("disclosed receipt chain exceeds the maximum allowed length");
+    }
+    message.chain.reserve(count);
+    for (std::uint8_t i = 0U; i < count; ++i) {
+        const std::string entry_bytes = reader.short_string(kMaxFramePayload);
+        message.chain.push_back(decode_receipt_issued(std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(entry_bytes.data()), entry_bytes.size())));
     }
     reader.require_finished();
     return message;

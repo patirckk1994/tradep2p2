@@ -8,6 +8,7 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -75,10 +76,12 @@ const char* party_name(Party party) {
 
 DashboardClient::DashboardClient(Endpoint mediator,
                                  ClientTlsPolicy tls_policy,
-                                 std::optional<Endpoint> socks_proxy)
+                                 std::optional<Endpoint> socks_proxy,
+                                 std::string mediator_id)
     : mediator_(std::move(mediator)),
       tls_policy_(std::move(tls_policy)),
-      socks_proxy_(std::move(socks_proxy)) {}
+      socks_proxy_(std::move(socks_proxy)),
+      mediator_id_(std::move(mediator_id)) {}
 
 DashboardClient::~DashboardClient() {
     stop_.store(true);
@@ -133,6 +136,38 @@ void DashboardClient::abort_room(const std::string& room_text) {
     enqueue(MessageType::Abort,
             tradep2p::encode_abort(AbortMessage{room_id, "dashboard user aborted"}),
             "requested abort of room " + tradep2p::room_id_to_hex(room_id));
+}
+
+void DashboardClient::recognize(const std::string& room_text) {
+    const RoomId room_id = tradep2p::room_id_from_hex(room_text);
+    const std::string canonical = tradep2p::room_id_to_hex(room_id);
+    RecognitionChallengeFields fields;
+    {
+        std::scoped_lock lock(state_mutex_);
+        const auto room_it = rooms_.find(canonical);
+        if (room_it == rooms_.end() || room_it->second.status != "active") {
+            throw std::invalid_argument("room is not currently active");
+        }
+        fields = recognition_tracker_.issue(mediator_id_, room_id);
+        room_it->second.recognition_status = "challenge_sent";
+        room_it->second.recognized_fingerprint_hex.clear();
+    }
+    RecognitionChallengeMessage wire;
+    wire.room_id = fields.room_id;
+    wire.suite_id = fields.suite_id;
+    wire.nonce = fields.nonce;
+    wire.created_at = fields.created_at;
+    wire.expires_at = fields.expires_at;
+    enqueue(MessageType::RecognitionChallenge, tradep2p::encode_recognition_challenge(wire),
+            "sent recognition challenge for room " + canonical);
+}
+
+void DashboardClient::set_recognition_key_provider(RecognitionKeyProvider provider) {
+    recognition_key_provider_ = std::move(provider);
+}
+
+void DashboardClient::set_recognition_outcome_handler(RecognitionOutcomeHandler handler) {
+    recognition_outcome_handler_ = std::move(handler);
 }
 
 std::string DashboardClient::state_json() const {
@@ -194,7 +229,14 @@ std::string DashboardClient::state_json() const {
              << "\",\"fee_amount\":" << room.fee.amount
              << ",\"fee_address\":\"" << json_escape(room.fee.address)
              << "\",\"has_turn\":" << (room.has_turn ? "true" : "false")
-             << ",\"action\":\"" << action << "\"";
+             << ",\"action\":\"" << action << "\""
+             << ",\"recognition_status\":\"" << json_escape(room.recognition_status) << "\""
+             << ",\"recognized_fingerprint\":\"" << json_escape(room.recognized_fingerprint_hex) << "\""
+             << ",\"own_ephemeral_key\":\"" << json_escape(room.own_ephemeral_public_key_hex) << "\""
+             << ",\"counterparty_ephemeral_key\":\""
+             << json_escape(room.counterparty_ephemeral_public_key_hex) << "\""
+             << ",\"receipt_status\":\"" << json_escape(room.receipt_status) << "\""
+             << ",\"receipt_chain_verifies\":" << (room.receipt_chain_verifies ? "true" : "false");
         if (room.has_turn) {
             json << ",\"turn\":{\"round\":" << (room.turn.round_index + 1U)
                  << ",\"is_fee\":" << (is_fee_turn ? "true" : "false")
@@ -355,8 +397,40 @@ void DashboardClient::flush_outgoing(SecureChannel& channel) {
     }
 }
 
+namespace {
+std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const std::uint8_t byte : bytes) {
+        out.push_back(digits[(byte >> 4U) & 0x0fU]);
+        out.push_back(digits[byte & 0x0fU]);
+    }
+    return out;
+}
+} // namespace
+
 void DashboardClient::handle_frame(const Frame& frame) {
     bool refresh_offers_after = false;
+    // Phase 4b: computed under state_mutex_ below but only ACTED ON after
+    // it is released, since answering a challenge (recognition_key_provider_)
+    // and reporting an outcome (recognition_outcome_handler_) both call back
+    // into caller-supplied code that may take a DIFFERENT lock
+    // (IdentityDashboardState::mutex in http_dashboard.cpp) - see this
+    // class's header comment on set_recognition_key_provider() for the
+    // lock-ordering discipline this preserves.
+    std::optional<RecognitionChallengeMessage> challenge_to_answer;
+    std::optional<std::pair<std::array<std::uint8_t, 32>, RecognitionOutcome>> outcome_to_report;
+    // Phase 5: generating the keypair happens under the lock below (cheap,
+    // no external callback involved), but SENDING the announcement must
+    // happen after it releases, same reasoning as every other post-lock
+    // action in this function.
+    std::optional<TradeEphemeralKeyMessage> ephemeral_key_to_announce;
+    // Phase 6: same "compute under lock, send after unlock" reasoning -
+    // signing itself needs no external callback (the ephemeral private key
+    // is already this object's own state), but enqueue() cannot be called
+    // while state_mutex_ is held.
+    std::optional<ReceiptAckMessage> receipt_ack_to_send;
     {
         std::scoped_lock lock(state_mutex_);
         switch (frame.type) {
@@ -397,6 +471,20 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.receive_address_b = message.receive_address_b;
             room.fee = message.fee;
             room.status = "active";
+
+            // Phase 5: every room automatically announces a fresh
+            // ephemeral trade key - see ephemeral.hpp for why this is safe
+            // to do by default (unlike phase 4b's opt-in recognition): a
+            // freshly random, never-derived key reveals nothing linkable.
+            auto ephemeral_keypair = generate_ephemeral_trade_keypair();
+            room.own_ephemeral_public_key_hex = hex_encode_bytes(ephemeral_keypair.public_key);
+            TradeEphemeralKeyMessage announce;
+            announce.room_id = message.room_id;
+            announce.ephemeral_public_key = ephemeral_keypair.public_key;
+            ephemeral_keypairs_.erase(room_id);
+            ephemeral_keypairs_.emplace(room_id, std::move(ephemeral_keypair));
+            ephemeral_key_to_announce = announce;
+
             rooms_[room_id] = std::move(room);
             std::erase_if(offers_, [&](const OfferView& offer) { return offer.room_id == room_id; });
             add_event_locked("room ready: " + room_id + " as party " +
@@ -438,6 +526,9 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.status = "complete";
             room.detail = "all rounds completed";
             room.has_turn = false;
+            if (room.has_recognized_fingerprint) {
+                outcome_to_report = {room.recognized_fingerprint, RecognitionOutcome::Successful};
+            }
             add_event_locked("room complete: " + room_id);
             break;
         }
@@ -449,12 +540,138 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.status = "aborted";
             room.detail = message.reason;
             room.has_turn = false;
+            if (room.has_recognized_fingerprint) {
+                outcome_to_report = {room.recognized_fingerprint, RecognitionOutcome::Incomplete};
+            }
             add_event_locked("room aborted: " + room_id + " - " + message.reason);
             break;
         }
         case MessageType::Error: {
             const auto message = tradep2p::decode_error(frame.payload);
             add_event_locked("server rejected request: " + message.reason);
+            break;
+        }
+        case MessageType::RecognitionChallenge: {
+            // Signing and sending the response both need to happen OUTSIDE
+            // this lock (see the header comment above) - just decode and
+            // defer here.
+            challenge_to_answer = tradep2p::decode_recognition_challenge(frame.payload);
+            add_event_locked("room " + tradep2p::room_id_to_hex(challenge_to_answer->room_id) +
+                             ": counterparty requested recognition proof");
+            break;
+        }
+        case MessageType::TradeEphemeralKey: {
+            const auto message = tradep2p::decode_trade_ephemeral_key(frame.payload);
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            const auto parsed = tradep2p::parse_ed25519_public_key(message.ephemeral_public_key);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            if (!parsed.has_value()) {
+                add_event_locked("room " + room_id + ": counterparty announced a malformed ephemeral key");
+                break;
+            }
+            room.counterparty_ephemeral_public_key_hex = hex_encode_bytes(*parsed);
+            add_event_locked("room " + room_id + ": counterparty announced ephemeral trade key " +
+                             room.counterparty_ephemeral_public_key_hex);
+            break;
+        }
+        case MessageType::ReceiptAckRequired: {
+            const auto message = tradep2p::decode_receipt_ack_required(frame.payload);
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            room.receipt_status = "gate_open";
+            const auto keypair_it = ephemeral_keypairs_.find(room_id);
+            if (keypair_it == ephemeral_keypairs_.end()) {
+                add_event_locked("room " + room_id +
+                                 ": cannot acknowledge final-receipt gate - no ephemeral key for "
+                                 "this room");
+                break;
+            }
+            ReceiptAckFields fields;
+            fields.mediator_id = mediator_id_;
+            fields.room_id = message.room_id;
+            fields.stage = ReceiptStage::PenultimateObligationsComplete;
+            fields.terms_commitment = trade_payload_hash(encode_terms(room.terms));
+            fields.timestamp = static_cast<std::uint64_t>(std::time(nullptr));
+
+            ReceiptAckMessage ack;
+            ack.room_id = message.room_id;
+            ack.stage = static_cast<std::uint8_t>(ReceiptStage::PenultimateObligationsComplete);
+            ack.timestamp = fields.timestamp;
+            ack.signature = sign_receipt_ack(keypair_it->second.private_seed, fields);
+            receipt_ack_to_send = ack;
+            add_event_locked("room " + room_id + ": final-receipt gate opened, acknowledged");
+            break;
+        }
+        case MessageType::ReceiptIssued: {
+            const auto message = tradep2p::decode_receipt_issued(frame.payload);
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            const auto stage = static_cast<ReceiptStage>(message.stage);
+
+            IssuedReceipt issued;
+            issued.fields.mediator_id = message.mediator_id;
+            issued.fields.room_id = message.room_id;
+            issued.fields.terms_commitment = message.terms_commitment;
+            issued.fields.party_a_ephemeral_key = message.party_a_ephemeral_key;
+            issued.fields.party_b_ephemeral_key = message.party_b_ephemeral_key;
+            issued.fields.mediator_public_key = message.mediator_public_key;
+            issued.fields.stage = stage;
+            issued.fields.completed = message.completed;
+            issued.fields.timestamp = message.timestamp;
+            issued.fields.nonce = message.nonce;
+            issued.fields.previous_stage_hash = message.previous_stage_hash;
+            issued.mediator_signature = message.mediator_signature;
+
+            room.receipt_status = stage == ReceiptStage::SettlementCompleted ? "stage4" : "stage3";
+
+            if (!mediator_receipt_key_.has_value()) {
+                mediator_receipt_key_ = message.mediator_public_key;
+            }
+            if (*mediator_receipt_key_ != message.mediator_public_key ||
+                !verify_receipt(*mediator_receipt_key_, issued.fields, issued.mediator_signature)) {
+                room.receipt_chain_verifies = false;
+                add_event_locked("room " + room_id +
+                                 ": WARNING - receipt did not verify against the pinned mediator "
+                                 "key, discarding");
+                break;
+            }
+
+            auto& chain = room_receipts_[room_id];
+            chain.push_back(issued);
+            try {
+                verify_receipt_chain(chain, *mediator_receipt_key_);
+                room.receipt_chain_verifies = true;
+            } catch (const ReceiptChainError&) {
+                room.receipt_chain_verifies = false;
+            }
+            add_event_locked("room " + room_id + ": receipt issued - stage " +
+                             receipt_stage_name(stage) +
+                             (room.receipt_chain_verifies ? " (chain verifies)" : " (chain INVALID)"));
+            break;
+        }
+        case MessageType::RecognitionResponse: {
+            const auto message = tradep2p::decode_recognition_response(frame.payload);
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            const auto fingerprint = recognition_tracker_.consume(mediator_id_, message);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            if (!fingerprint.has_value()) {
+                room.recognition_status = "failed";
+                add_event_locked(
+                    "room " + room_id +
+                    ": recognition response did not verify - treated as no proof, not evidence "
+                    "of anything");
+                break;
+            }
+            room.recognition_status = "recognized";
+            room.recognized_fingerprint = *fingerprint;
+            room.has_recognized_fingerprint = true;
+            room.recognized_fingerprint_hex = hex_encode_bytes(*fingerprint);
+            add_event_locked("room " + room_id + ": counterparty proved control of " +
+                             room.recognized_fingerprint_hex);
             break;
         }
         default:
@@ -469,6 +686,57 @@ void DashboardClient::handle_frame(const Frame& frame) {
         outgoing_.push_back(OutgoingFrame{MessageType::ListOffers,
                                           tradep2p::encode_list_offers(ListOffersMessage{}),
                                           "refreshed open offers"});
+    }
+
+    // Phase 4b post-lock actions - see the comment above the locked block
+    // for why these cannot run while state_mutex_ is held.
+    if (challenge_to_answer.has_value()) {
+        const auto key = recognition_key_provider_ ? recognition_key_provider_() : std::nullopt;
+        const std::string room_id = tradep2p::room_id_to_hex(challenge_to_answer->room_id);
+        if (!key.has_value()) {
+            // Declining is not evidence of anything (specs.txt SS8.2) - no
+            // keystore unlocked means nothing to prove control with.
+            std::scoped_lock lock(state_mutex_);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            room.recognition_status = "declined";
+            add_event_locked("room " + room_id +
+                             ": no keystore unlocked, declined to answer recognition challenge");
+        } else {
+            RecognitionChallengeFields fields;
+            fields.suite_id = challenge_to_answer->suite_id;
+            fields.protocol_version = tradep2p::kProtocolVersion;
+            fields.mediator_id = mediator_id_;
+            fields.room_id = challenge_to_answer->room_id;
+            fields.nonce = challenge_to_answer->nonce;
+            fields.created_at = challenge_to_answer->created_at;
+            fields.expires_at = challenge_to_answer->expires_at;
+
+            RecognitionResponseMessage response;
+            response.room_id = challenge_to_answer->room_id;
+            response.nonce = challenge_to_answer->nonce;
+            response.prover_public_key = key->public_key;
+            response.signature = tradep2p::sign_recognition_response(key->private_seed, fields);
+            enqueue(MessageType::RecognitionResponse, tradep2p::encode_recognition_response(response),
+                    "answered recognition challenge for room " + room_id);
+        }
+    }
+
+    if (outcome_to_report.has_value() && recognition_outcome_handler_) {
+        recognition_outcome_handler_(outcome_to_report->first, outcome_to_report->second);
+    }
+
+    if (ephemeral_key_to_announce.has_value()) {
+        enqueue(MessageType::TradeEphemeralKey,
+                tradep2p::encode_trade_ephemeral_key(*ephemeral_key_to_announce),
+                "announced ephemeral trade key for room " +
+                    tradep2p::room_id_to_hex(ephemeral_key_to_announce->room_id));
+    }
+
+    if (receipt_ack_to_send.has_value()) {
+        enqueue(MessageType::ReceiptAck, tradep2p::encode_receipt_ack(*receipt_ack_to_send),
+                "acknowledged final-receipt gate for room " +
+                    tradep2p::room_id_to_hex(receipt_ack_to_send->room_id));
     }
 }
 

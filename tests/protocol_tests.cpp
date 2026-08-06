@@ -95,6 +95,20 @@ void test_registry_serialization() {
 }
 
 void acknowledge_current_turn(tradep2p::MediatorSession& session) {
+    // Phase 6 (docs/identity-06-receipts.md, "the withholding fix"): the
+    // leg immediately before the trade's actual final tranche is gated
+    // behind SessionState::WaitingForFinalReceiptAck - see mediator.hpp.
+    // Callers of this helper drive a room by repeatedly calling it until a
+    // target state is reached; transparently passing both parties'
+    // acknowledgement through the gate here keeps every existing call site
+    // below black-box correct without needing to know about the gate
+    // itself - see tests/receipt_tests.cpp for tests that exercise the gate
+    // directly (including what happens when only one party acks).
+    if (session.state() == tradep2p::SessionState::WaitingForFinalReceiptAck) {
+        session.acknowledge_final_receipt(tradep2p::Party::A);
+        session.acknowledge_final_receipt(tradep2p::Party::B);
+        return;
+    }
     const auto turn = session.current_turn();
     const tradep2p::RoundSignalMessage signal{
         turn.room_id, turn.round_index, turn.sender};

@@ -1,11 +1,17 @@
 #pragma once
 
+#include "tradep2p/ephemeral.hpp"
+#include "tradep2p/identity.hpp"
 #include "tradep2p/protocol.hpp"
+#include "tradep2p/receipt.hpp"
+#include "tradep2p/recognition.hpp"
 #include "tradep2p/secure_channel.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -14,6 +20,32 @@
 #include <vector>
 
 namespace tradep2p::dashboard {
+
+// Phase 4b (personal counterparty recognition): whether a completed/aborted
+// room's recognized counterparty should be recorded as a settled or an
+// incomplete encounter - see RecognitionOutcomeHandler below.
+enum class RecognitionOutcome : std::uint8_t { Successful, Incomplete };
+
+// This dashboard operator's own per-mediator pseudonym keypair, supplied by
+// http_dashboard.cpp (which owns the IdentityKeystore) on demand rather than
+// held inside DashboardClient - this module has no keystore/passphrase
+// concept of its own and must not grow one just for this. Returning
+// std::nullopt means "no keystore is currently unlocked", the same "declining
+// is not evidence of anything" case main.cpp's CLI handles identically.
+struct RecognitionKeyMaterial {
+    Ed25519PrivateSeed private_seed;
+    Ed25519PublicKey public_key{};
+};
+using RecognitionKeyProvider = std::function<std::optional<RecognitionKeyMaterial>()>;
+
+// Invoked (from the worker thread - see the class comment on
+// set_recognition_outcome_handler()) exactly once per room, the moment a
+// room with a recognized counterparty fingerprint reaches Complete or
+// Abort, so the caller can feed it into a LocalCounterpartyHistory. Never
+// invoked for a room where no fingerprint was ever recognized - "no key
+// presented" must not manufacture a history entry (specs.txt SS8.4).
+using RecognitionOutcomeHandler =
+    std::function<void(const std::array<std::uint8_t, 32>& fingerprint, RecognitionOutcome outcome)>;
 
 std::string json_escape(const std::string& text);
 std::string now_text();
@@ -37,6 +69,34 @@ struct RoomView {
     std::string detail;
     bool has_turn{false};
     TurnMessage turn;
+
+    // Phase 4b: this room's counterparty-recognition state, purely local to
+    // this dashboard session (never transmitted - see recognition.hpp).
+    // "none" -> no challenge issued or received yet; "challenge_sent" -> an
+    // outstanding /api/recognition/challenge is awaiting a response;
+    // "recognized" -> a RecognitionResponse verified and
+    // recognized_fingerprint_hex is populated; "declined" -> an incoming
+    // challenge could not be auto-answered because no keystore is unlocked;
+    // "failed" -> a response arrived but did not verify (expired/replayed/
+    // bad signature - treated as no proof, never displayed as a warning).
+    std::string recognition_status{"none"};
+    std::string recognized_fingerprint_hex;
+    std::array<std::uint8_t, 32> recognized_fingerprint{};
+    bool has_recognized_fingerprint{false};
+
+    // Phase 5 (per-trade ephemeral identities): this room's own ephemeral
+    // trade key (announced automatically, unlike phase 4b's opt-in
+    // recognition - see ephemeral.hpp for why there's no privacy cost to
+    // making this the default) and the counterparty's, once announced.
+    std::string own_ephemeral_public_key_hex;
+    std::string counterparty_ephemeral_public_key_hex;
+
+    // Phase 6 (staged receipts): "none" -> nothing yet; "gate_open" -> a
+    // ReceiptAckRequired arrived and was auto-acknowledged; "stage3" /
+    // "stage4" -> the corresponding IssuedReceipt was received and its
+    // chain verified so far (see DashboardClient::room_receipts_).
+    std::string receipt_status{"none"};
+    bool receipt_chain_verifies{false};
 };
 
 struct OutgoingFrame {
@@ -50,9 +110,16 @@ struct OutgoingFrame {
 // SecureChannel so concurrent HTTP handler threads never touch TLS directly.
 class DashboardClient {
 public:
+    // `mediator_id` is the mediator's identity-layer label (e.g.
+    // "host:port" exactly as the operator typed it on the command line) -
+    // used as the recognition-challenge mediator identifier (recognition.hpp)
+    // and must be the SAME string http_dashboard.cpp passes as this
+    // process's history mediator_id, or a recognized fingerprint would be
+    // recorded under one label and looked up under another.
     DashboardClient(Endpoint mediator,
                     ClientTlsPolicy tls_policy,
-                    std::optional<Endpoint> socks_proxy);
+                    std::optional<Endpoint> socks_proxy,
+                    std::string mediator_id);
     ~DashboardClient();
 
     DashboardClient(const DashboardClient&) = delete;
@@ -67,6 +134,26 @@ public:
     void mark_sent(const std::string& room_text);
     void mark_received(const std::string& room_text);
     void abort_room(const std::string& room_text);
+
+    // Phase 4b: issues a live recognition challenge to the counterparty in
+    // `room_text`. Throws std::invalid_argument if that room is not
+    // currently known/active. Does not itself require a key - only
+    // ANSWERING a challenge does (see set_recognition_key_provider()); the
+    // verifier side only needs to generate and send a nonce.
+    void recognize(const std::string& room_text);
+
+    // These two callbacks bridge into http_dashboard.cpp's
+    // IdentityDashboardState (keystore/history), which this module
+    // deliberately has no direct knowledge of - see their type comments
+    // above. Must be set (if at all) before start(), and must never call
+    // back into any DashboardClient method that takes state_mutex_/
+    // queue_mutex_ (recognize()/mark_sent()/etc.) - both are invoked from
+    // the worker thread while state_mutex_ is NOT held (see the .cpp), but
+    // establishing a two-way lock dependency between this class's mutexes
+    // and the caller's own would risk a deadlock the moment both are held
+    // in opposite orders from two threads.
+    void set_recognition_key_provider(RecognitionKeyProvider provider);
+    void set_recognition_outcome_handler(RecognitionOutcomeHandler handler);
 
     [[nodiscard]] std::string state_json() const;
 
@@ -85,6 +172,7 @@ private:
     Endpoint mediator_;
     ClientTlsPolicy tls_policy_;
     std::optional<Endpoint> socks_proxy_;
+    std::string mediator_id_;
     std::atomic<bool> stop_{false};
     std::thread worker_;
 
@@ -97,6 +185,26 @@ private:
     std::map<std::string, RoomView> rooms_;
     std::deque<std::string> events_;
     std::uint64_t revision_{0U};
+
+    // Phase 4b state - guarded by state_mutex_ alongside rooms_ above, since
+    // recognition status is per-room presentation state exactly like
+    // RoomView's other fields.
+    RecognitionChallengeTracker recognition_tracker_;
+    RecognitionKeyProvider recognition_key_provider_;
+    RecognitionOutcomeHandler recognition_outcome_handler_;
+    void handle_recognition_challenge(const RecognitionChallengeMessage& message);
+    void handle_recognition_response(const RecognitionResponseMessage& message);
+
+    // Phase 5 - guarded by state_mutex_ alongside rooms_/recognition_
+    // tracker_ above. Keyed by room id (hex), same as rooms_.
+    std::map<std::string, Ed25519KeyPair> ephemeral_keypairs_;
+
+    // Phase 6 - guarded by state_mutex_. mediator_receipt_key_ is this
+    // session's trust-on-first-use pin (see main.cpp's identical
+    // ClientState::mediator_receipt_key for the same caveat, stated once
+    // there rather than duplicated here).
+    std::optional<Ed25519PublicKey> mediator_receipt_key_;
+    std::map<std::string, std::vector<IssuedReceipt>> room_receipts_;
 
     std::mutex queue_mutex_;
     std::deque<OutgoingFrame> outgoing_;

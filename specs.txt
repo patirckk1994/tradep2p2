@@ -1,0 +1,979 @@
+# TradeP2P: Topology, Fractional Settlement, and Scoped-Continuity Reputation
+
+**Draft — TradeP2P**
+
+---
+
+## Abstract
+
+TradeP2P is an anonymous peer-to-peer trading mediator: a coordination layer
+that helps two parties execute a trade across whatever chains their assets
+live on, without ever holding, inspecting, or verifying the value that
+moves. This document describes the system in three layers, in the order a
+new engineer or auditor should read them:
+
+1. **Topology** — what processes exist, how they connect, and what the
+   transport actually protects (§1).
+2. **Fractional settlement** — how a trade is coordinated round by round so
+   that a defector's maximum theft is bounded (§2).
+3. **Reputation** — an optional, scoped-continuity identity architecture
+   layered on top, addressing the fact that fractional settlement caps
+   damage per trade but does nothing to deter an attacker who simply
+   re-identifies and repeats it (§3 onward).
+
+The governing principle for the reputation layer, and the reason it looks
+different from most systems with that name:
+
+> **Continuity must be scoped to the smallest context that actually requires
+> continuity.**
+
+The result provides login continuity with one service, trade continuity
+inside one room, private history continuity on the user's own machine, and
+optional evidence disclosure to a chosen counterparty — without producing a
+public transaction graph, a lifelong identifier, or a scalar trust score. It
+does not produce Sybil resistance, and says so plainly rather than
+implying otherwise.
+
+This document also tracks **implementation status**. Sections describing
+already-shipped mechanisms name the actual files, classes, and message
+types; sections describing planned work are marked as such. See §10 for the
+consolidated status table.
+
+---
+
+## 1. System topology
+
+### 1.1 Roles
+
+| Process | Binary | Role |
+|---|---|---|
+| Mediator | `tradep2p_cli mediator` / `mediator-registered` | Coordinates rooms: accepts offers, pairs counterparties, relays round-by-round settlement signals. Never holds, inspects, or verifies value. |
+| Registry | `tradep2p_cli registry` | A directory of mediator endpoints (host, port, certificate pin), so clients can discover a mediator without a hardcoded address. |
+| CLI client | `tradep2p_cli client` / `client-tor` | Interactive, single-user, single anonymous mediator connection. The operator *is* the end user; no HTTP surface. |
+| Loopback dashboard | `tradep2p-dashboard` | One process, one anonymous mediator connection, one operator, loopback-only HTTP UI. Not for public exposure. |
+| Hosted web client | `tradep2p-webclient` | Many browser sessions behind username/password accounts, each with its own anonymous mediator connection. Designed to sit behind a public-facing reverse proxy. This is the one binary where the operator authors and serves all browser-side code, and can observe account activity, session timing, and source IP even though the trade protocol itself stays anonymous to the mediator. |
+| Admin dashboards | `tradep2p-mediator-dashboard`, `tradep2p-registry-dashboard` | Read-only viewers over a JSON snapshot file. No protocol connection, no concept of a user identity. |
+
+### 1.2 Transport
+
+TLS 1.3 only, two ciphersuites (`TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_
+GCM_SHA384`), groups `X25519MLKEM768:X25519:P-256` — the post-quantum
+hybrid group preferred first, classical groups retained as fallback for a
+peer that doesn't offer it (see §11 for the full rationale and posture).
+Session tickets are explicitly disabled on both sides
+(`SSL_OP_NO_TICKET`, `SSL_CTX_set_num_tickets(ctx, 0)`) — a deliberate
+anti-correlation choice, so that TLS session resumption cannot link two
+connections from the same client across time. Neither side authenticates
+the other through a CA chain; trust is established out-of-band via exact
+SHA-256 certificate pinning. No client certificates are requested. Optional
+SOCKS5 transport supports onion (Tor) endpoints for both mediator and
+client.
+
+Framing is a fixed 20-byte header (magic, protocol version, message type,
+per-connection sequence number, payload length) followed by up to 4096
+bytes of payload — a hard cap enforced on both send and receive. Sequence
+numbers are per-connection and reset on every new TLS connection, so they
+cannot serve as a cross-session nonce for anything outside that one
+connection.
+
+Connection admission is bounded, not unbounded thread-per-connection as it
+might first appear: in-flight TLS handshakes are capped
+(`kMaxPendingHandshakes = 64`) before a thread is even spawned, each
+handshake is bounded to 10 seconds, and the mediator separately caps
+established clients (`kMaxClients = 128`). Worst case is a few hundred live
+threads, not an unbounded surface.
+
+### 1.3 Registry and discovery
+
+The registry is an unauthenticated directory today: a `RegistryRegister`
+message names a `host:port` and a certificate pin, and it is accepted and
+listed to every `RegistryList` caller as long as that endpoint isn't
+already registered under a *different* pin. This prevents an unauthenticated
+refresh from silently hijacking a live entry's pin, but does **not** prove
+the registrant controls the endpoint it's claiming, and does not prevent
+initial squatting on an unclaimed address. This is a known, open gap — see
+§10.
+
+### 1.4 Offer book and room lifecycle
+
+A published offer records only the asset/amount pair on each side, a number
+of fractional settlement rounds, and an opaque receive address — nothing
+identity-shaped. A second party takes the offer by room ID (direct join) or
+via a targeted invite; either path produces a room with two assigned
+parties and one settlement session. A room ends in exactly one of three
+ways: `Complete` (both legs of the last round acknowledged), `Abort`
+(explicit action, disconnect, or a peer-vanished detection), or process
+exit (state is lost unless mediator-side persistence is enabled — see
+§10's phase 3 entry).
+
+Room state lives entirely in-process by default: an in-memory map guarded
+by a hub-wide mutex, plus a per-room mutex for that room's own settlement
+session. There is no reconnect/rejoin path in the base design — a
+disconnect always aborts any in-progress room for that client, and a fresh
+connection gets a fresh, unrelated client identifier with no memory of the
+old one. (Phase 3, §10, adds an opt-in exception to this.)
+
+---
+
+## 2. Fractional settlement
+
+### 2.1 Mechanics
+
+A trade's terms specify two assets, two integer amounts, a round count *N*,
+and which party sends first. Settlement proceeds in rounds; each round has
+two legs (one party's tranche, then the other's), alternating which party
+leads each round. The mediator's state machine per room is:
+
+```
+WaitingForPeer
+  -> WaitingForSent -> WaitingForReceived      (repeat per leg, per round)
+  -> WaitingForFeeSent                          (only if an operator fee is configured)
+  -> Complete
+```
+
+with `Aborted` reachable from any non-terminal state. The mediator computes
+each leg's expected transfer amount for display/instruction purposes only
+(`tranche_amount(total, rounds, round_index)`) — it never inspects a chain,
+never validates an address format, and never confirms that value actually
+moved. Transfers happen entirely externally, on whatever chains the two
+assets live on.
+
+An operator may configure a mediator-wide fee (asset, amount, address),
+settled as an ordinary additional final transfer, acknowledged the same way
+any other round is — the fee is never held or verified by the mediator
+either.
+
+### 2.2 What this achieves, and what it doesn't
+
+**Acknowledgements are claims, not proofs.** When a party signals `sent`,
+the mediator learns that a message arrived — nothing about whether value
+actually moved. A completed room means two parties clicked through a state
+machine together, not that value changed hands.
+
+**Splitting into N tranches caps damage; it does not deter.** A defector who
+abandons at the final leg steals at most `total/N`. This is real protection
+against catastrophic loss in a single trade. It is not deterrence, because
+acquiring a fresh identity and finding another counterparty costs
+approximately nothing — an attacker can farm `total/N` from many victims
+indefinitely, which is precisely the gap the reputation layer (§3 onward)
+exists to address, and precisely the gap it admits it cannot fully close
+(§9).
+
+---
+
+## 3. Reputation: design constraints
+
+The reputation layer is optional, additive, and must not weaken anything
+§1-2 already established. Six constraints govern every mechanism described
+below:
+
+1. **No public lifelong identifier.** Nothing introduced may become a
+   stable handle visible across trades to the offer book, other clients, or
+   a mediator the user did not choose.
+2. **No scalar score.** Reputation collapses information; structured
+   evidence preserves the reader's ability to judge.
+3. **No claim of Sybil resistance.** Key continuity proves continuity, not
+   unique personhood — never implied otherwise in code, docs, or interface.
+4. **No gossip.** Personal judgements about counterparties never leave the
+   user's machine unless explicitly exported.
+5. **Optional in practice, not just in principle.** A design where opting in
+   costs unlinkability is not optional; it is compulsory with extra steps
+   (§9.3).
+6. **Honest layering.** Evidence a user generated about themselves,
+   evidence they verified live from a counterparty, and evidence a third
+   party attested to are three different objects with three different
+   weights, and must never be represented as interchangeable.
+
+**Non-goals:** identity verification, dispute arbitration, custody or
+escrow, transaction verification, global blocklists, any mechanism
+requiring the mediator to be trusted with value or with truth about the
+chains.
+
+---
+
+## 4. Threat model
+
+**The mediator is not trusted.** It may be adversarial, may be run by a
+counterparty, may collude, may forge, and — because registry registration is
+currently unauthenticated (§1.3) — may be cheap to become at scale. Every
+claim a mediator makes must be independently checkable or explicitly marked
+as mediator-asserted.
+
+**Counterparties are not trusted.** They may defect at the final leg,
+withhold receipts to deny an honest counterparty credit, farm reputation
+against themselves through self-trades, or attempt to correlate a user's
+activity across trades.
+
+**Observers of the offer book are not trusted.** Anything published is
+published to an adversary building a correlation graph.
+
+**The user's machine is trusted, conditionally.** Local storage is assumed
+private but not durable — crash, corruption, rollback, and loss are
+expected and must fail loudly rather than silently.
+
+**Explicitly outside the model:** chain analysis of settled transactions
+(§9.1), traffic-timing correlation by a mediator observing both connections
+(§9.2), and endpoint compromise.
+
+---
+
+## 5. Key architecture
+
+*Implemented — `include/tradep2p/identity.hpp`, `src/identity.cpp`.*
+
+A single master secret, held only in the encrypted local keystore (§6) and
+never transmitted, from which scoped keys are derived:
+
+```
+master identity secret
+├── service-scoped login key         one per service        (key_scope::kLogin — implemented, §10 phase 7)
+├── local-history authentication key  one, never leaves the machine  (key_scope::kLocalHistory — implemented)
+├── per-mediator pseudonym key       one per mediator        (key_scope::kMediatorPseudonym — implemented)
+└── per-trade ephemeral key          one per room, random    (implemented, §10 phase 5 — `ephemeral.hpp`)
+```
+
+**Phase 7 honesty note:** `key_scope::kLogin` (identity.hpp) exists and is the
+*recommended* derivation for a web-client login key, but
+`tradep2p-webclient`'s enrollment route (`/api/account/enroll-key`) accepts
+any caller-supplied Ed25519 public key as opaque bytes — it does not itself
+call `derive_ed25519_keypair(master_secret, key_scope::kLogin, service_id)`
+or otherwise enforce that the enrolled key came from that derivation path.
+This is deliberate, not an oversight: phase 7's own scope explicitly defers
+in-browser key generation to phase 9 (which, per its own status note, defers
+it further, preferring WebAuthn/an external signer/native client over raw
+browser custody), so the server has no way to verify how a submitted key was
+produced. A CLI user who runs `tradep2p_cli` against the same keystore
+architecture could derive a proper `kLogin`-scoped key and enroll that
+instead of an unrelated one — this is documented as the *recommended*
+practice, not currently a structurally enforced one.
+
+Long-term scoped keys are derived deterministically via HKDF-SHA256, with
+the master secret as input keying material and a **length-prefixed,
+domain-labelled context structure** as the `info` parameter
+(`encode_derivation_info()`): a one-byte label length, the label, a
+two-byte identifier length, and the identifier. Naive concatenation is
+prohibited — `"login" ‖ "x"` and `"logi" ‖ "nx"` would otherwise produce
+identical bytes, and an ambiguity in derivation is as dangerous as an
+ambiguity in a signed message. Derived 32-byte outputs seed Ed25519 keys
+directly via the EVP one-shot `EVP_DigestSign`/`EVP_DigestVerify` API (no
+streaming `Update`/`Final` path exists for Ed25519 in OpenSSL).
+
+The per-trade key is the exception: freshly generated at random
+(`generate_ed25519_keypair()`), never derived. Derivation from the master
+secret would make trade keys mutually linkable to anyone who later learned
+the derivation path, defeating the purpose. Operational consequence,
+confirmed still true as shipped: a randomly generated key cannot be
+regenerated after a crash, and `ephemeral.hpp`'s implementation does NOT yet
+persist it alongside journal state — a documented, named limitation (see
+`ephemeral.hpp`'s file comment), not a silent gap. A process restart mid-room
+loses that room's ephemeral key and, with it, the ability to sign further
+statements about it or later disclose (§9.2) it convincingly, even though
+the room's settlement state itself survives via phase 3's mediator-side
+persistence. Receipts already issued before the restart remain valid and
+disclosable regardless, since verifying them needs only the PUBLIC key
+(already embedded in the receipt), not the lost private one.
+
+### Why per-mediator pseudonyms
+
+A user who returns to the same mediator repeatedly presents the same
+pseudonym there and can accumulate standing. That mediator learns nothing
+about the user's activity elsewhere, because a different mediator sees an
+unrelated key. An adversary running many mediators to correlate a user gets
+many unlinkable pseudonyms — the attack does not scale.
+
+The mediator identifier used in derivation should be a durable identity
+rather than a certificate fingerprint, or key rotation silently destroys
+accumulated standing.
+
+---
+
+## 6. Encrypted local keystore
+
+*Implemented — `include/tradep2p/keystore.hpp`, `src/keystore.cpp`,
+`tests/keystore_tests.cpp`. CLI: `tradep2p_cli`'s
+`keystore create/unlock/lock/rotate/destroy/show-identity`. Dashboard:
+`tradep2p-dashboard`'s keystore panel.*
+
+Private key material is encrypted at rest with ChaCha20-Poly1305 (IETF,
+96-bit nonce, 128-bit tag), keyed from the user's passphrase via Argon2id
+through OpenSSL's `EVP_KDF` (RFC 9106 "second recommended option": 64 MiB
+memory, 3 iterations, 4 lanes), with PBKDF2 wired in only as a
+runtime-detected fallback if the linked OpenSSL genuinely lacks Argon2id.
+Writes are atomic (`O_CREAT|O_EXCL` for creation so an existing keystore is
+never silently overwritten; temp-file-write, `fsync`, rename, `chmod 0600`
+for updates). A malformed or tampered file produces a distinct, typed
+exception (`KeystoreFormatError` / `KeystoreAuthenticationError`) rather
+than a silently regenerated or downgraded identity.
+
+---
+
+## 7. Local journal, crash recovery, and mediator persistence
+
+*Implemented — `include/tradep2p/journal.hpp` / `src/journal.cpp` (client),
+`include/tradep2p/room_persistence.hpp` / `src/room_persistence.cpp`
+(mediator), `include/tradep2p/recovery.hpp` / `src/recovery.cpp`
+(reconciliation classification). Wire messages: `RecoveryStateRequest` /
+`RecoveryStateResponse` (`MessageType` 29/30). CLI: `journal status`,
+`recovery request <room-id>`.*
+
+### 7.1 The client-side journal
+
+An encrypted, hash-chained, append-only record of each client's own
+activity, authenticated under the local-history key (§5). Each entry
+commits to room and trade identifiers, mediator identity, counterparty
+pseudonym fingerprint, a terms commitment, round number, message direction
+and type, a message hash, acknowledgement state, local settlement state,
+timestamp, and the previous entry's hash:
+
+```
+entry_hash[n] = H( canonical_entry[n] ‖ entry_hash[n-1] )
+```
+
+The chain detects modification, deletion of interior entries, reordering,
+rollback to an earlier checkpoint, and malformed state transitions.
+
+**What it is for:** crash and reconnect recovery, duplicate-action
+prevention, corruption detection, and — as of §8 — feeding the local
+counterparty record with a *verified* completion count.
+
+**What it is not:** evidence to anyone else. The journal proves what the
+local client recorded. A user can write anything into their own journal. It
+has no value to a counterparty and must never be presented as though it
+does. This is the most important boundary in the whole architecture and the
+easiest to erode by accident.
+
+The journal never publishes anything automatically.
+
+### 7.2 The mediator persistence trade-off
+
+A client journal alone cannot resurrect a half-settled room, because the
+authoritative multi-party state — whose turn it is, what both sides have
+acknowledged — lives on the mediator, which by default keeps nothing on
+disk (an *accidental* privacy property: a seized or compromised mediator
+today has nothing on disk about past rooms).
+
+Making room state durable for recovery is a genuine privacy cost, not a
+free improvement, because durable room state would naively include the pair
+of receive addresses that links two counterparties — exactly the linkage
+this architecture otherwise exists to avoid creating. The implemented
+answer: **persist the room's state machine (parties, terms, round/leg
+progress) but never the receive addresses**; a restored room carries blank
+addresses that must be re-established before settlement can resume, and any
+code path that tries to use a blank address for real settlement traffic
+fails closed (`encode_turn`'s existing non-empty validation rejects it)
+rather than silently transmitting a garbage destination. Rooms are pruned
+from the persisted file the instant they reach `Complete`/`Aborted`, since a
+finished room has no recovery value left. Persistence is opt-in via
+`TRADEP2P_ROOM_STATE_FILE` — unset by default, zero behavior change unless
+an operator turns it on. `tradep2p-mediator-dashboard` surfaces whether it's
+enabled and how many rooms were restored at last startup.
+
+**Named limitation:** a restart correctly answers "here's exactly where
+this room was" via `RecoveryStateRequest`, but does not automatically
+re-bind a live connection to resume coordinating turns — a fresh connection
+always gets a fresh, unrelated client identifier, and safely re-authenticating
+which party is which after both identifiers reset is a larger concurrency
+problem deliberately deferred. Today, recovery means both sides learn the
+truthful last state and reconcile from there, not seamless auto-resume.
+
+---
+
+## 8. Personal counterparty recognition
+
+*Implemented — `include/tradep2p/recognition.hpp`, `src/recognition.cpp`
+(canonical signed challenge/response, single-use/expiring verifier-side
+tracker), `MessageType::RecognitionChallenge`/`RecognitionResponse`
+(`protocol.hpp`/`protocol.cpp`), mediator relay in
+`LobbyServer::Impl::handle_recognition_relay` (`src/lobby.cpp`). CLI:
+`tradep2p_cli`'s `/recognize ROOM_ID` (issues) plus automatic answer of an
+incoming challenge when a keystore is unlocked. Dashboard: a per-room
+"Recognize counterparty" action in `tradep2p-dashboard`
+(`DashboardClient::recognize()`, `src/dashboard_client.cpp`,
+`/api/recognition/recognize`, `src/http_dashboard.cpp`), bridged to the
+operator's keystore/history via `RecognitionKeyProvider`/
+`RecognitionOutcomeHandler` callbacks so `DashboardClient` itself stays free
+of any keystore dependency. `history.hpp`'s `settlement_count()`/
+`incomplete_count()` give the phase's "(n times)" presentation counts
+without a stored-format change. See `docs/identity-04b-counterparty-
+recognition.md` for the full task specification this satisfies. Extends
+§9's local history record.*
+
+This answers one narrow question — *have I traded with this counterparty
+before?* — using only data the local client already holds, and it is the
+mechanism behind the plain-language guarantee this project keeps coming
+back to:
+
+> **"I have traded N times with this public key before."**
+
+Nothing more than that. Not "this counterparty is reliable." Not a score.
+Just a locally-verified count.
+
+### 8.1 Why it needs no third party, and why Sybil attacks don't touch it
+
+An attacker minting a thousand identities produces a thousand keys the
+local client **has never seen**, so every counter reads zero. There is
+nothing to forge, because the client is reading its own journal rather than
+accepting a claim. This is why the guarantee is small and true rather than
+large and false, and it must not be extended beyond that anywhere in code,
+logs, or interface.
+
+### 8.2 Which key, and proof of control
+
+The recognition key is the **per-mediator pseudonym key** (§5) — not the
+per-trade ephemeral key, which is fresh per room by design and recognizes
+nothing. Recognition is scoped per-mediator by default: a counterparty is
+recognizable on the mediator where you met them, and presents an unrelated
+key elsewhere. A global cross-mediator recognition key is deliberately not
+offered by default, since it would reintroduce a permanent cross-mediator
+identifier — the exact linkability outcome this architecture exists to
+avoid.
+
+Recognizing a key requires proving control of it **now**, via a live,
+mediator-relayed challenge-response — a fresh CSPRNG nonce (verifier-chosen,
+never prover-chosen), single-use, expiring, with the signed response
+binding domain-separation label, protocol version, a `suite_id` (for the
+post-quantum migration path, §11), mediator identifier, room/negotiation
+identifier, the nonce, and creation/expiry times, ideally bound to the TLS
+session's exporter value. A stored signature from a prior session is
+replayable and therefore worthless as proof; only a freshly produced one
+counts. Recognition is mutual — either party may challenge the other, and
+declining to answer is not evidence of anything.
+
+### 8.3 The counting rule that matters most
+
+**Only completed settlements increment the counter**, sourced from the
+client's own journal (§7), never from a counterparty's claim. A room that
+was entered and abandoned is not a prior trade — counting it would let a
+counterparty inflate their standing with you by repeatedly starting and
+abandoning rooms at zero cost, reintroducing the Sybil problem locally,
+exactly where it would be easiest to miss. Incomplete encounters are
+recorded in a separate counter and surfaced, since an abandonment history is
+as informative as a completion one.
+
+### 8.4 Presentation
+
+Display only what is known, with no aggregation into a single figure:
+
+```
+previously settled with this key  (n times, on this mediator)
+previously encountered, never completed  (n times)
+locally blocked
+unknown key
+no key presented
+```
+
+"Unknown key" and "no key presented" are the *normal* case — most
+counterparties will be strangers, permanently, since this mechanism
+provides no bootstrap. They must never be styled as warnings; doing so
+builds the ranking system §12 forbids, by accident.
+
+### 8.5 What this deliberately does not attempt
+
+It says nothing about whether *anyone else* has dealt with a given key —
+that question belongs to the attestation layer (§9), which is a different,
+heavier mechanism (third-party mediator signatures) answering a different
+question (what a party other than you has verified). Blind-signed aggregate
+disclosure (§9's unlinkable layer) is explicitly **future work, not
+implemented** — it solves the problem of proving a count to a counterparty
+who wasn't there to witness any of the underlying trades, which this local
+mechanism cannot and does not attempt. The two are intentionally decoupled:
+this phase ships without waiting on blind signatures, and blind signatures
+remain a documented direction rather than a dependency.
+
+---
+
+## 9. Attested reputation: receipts and disclosure
+
+*Layers two and three (§9.1, §9.2) are implemented —
+`include/tradep2p/receipt.hpp`/`src/receipt.cpp`,
+`include/tradep2p/disclosure.hpp`/`src/disclosure.cpp`. Layer four (§9.3)
+remains explicitly future work, unscheduled.*
+
+### 9.1 Layer two — mediator-signed staged receipts
+
+*Implemented.*
+
+A receipt is an attestation signed by a party other than its holder —
+unlike the journal (§7) or a recognition proof (§8), it carries weight to a
+third party who wasn't present for the trade.
+
+A receipt binds: version, room identifier, terms commitment, the parties'
+ephemeral public keys (§10 phase 5's per-room keys — the "scoped
+pseudonyms" alternative this section originally left open was not needed;
+phase 5 landed first and receipts bind directly to its keys), mediator
+public key, stage, completion state, timestamp, unique nonce, and the hash
+of the previous stage's receipt. A bare assertion of the form *"key X
+traded successfully"* is prohibited — replayable into any context,
+attesting to nothing checkable.
+
+**Staging, as actually shipped:** stage 3 ("all obligations except final
+settlement completed") and stage 4 ("settlement completed") are issued
+live by the mediator; stages 1-2 ("terms accepted" / "round N
+acknowledged") are fully implemented and tested at the receipt-chain level
+(`ReceiptStage`, `verify_receipt_chain()`) but not yet triggered by the
+live wire protocol — stage 3 is what the withholding fix actually needs,
+and stage 4 is what "the trade completed" needs; issuing 1-2 live is a
+natural, smaller follow-on, not a gap in the mechanism itself. Each stage
+commits to the hash of the previous (`receipt_chain_link_hash()`), so a
+later receipt without a valid predecessor is rejected. Stage 3 uses
+two-party acknowledgement plus mediator countersignature
+(`MessageType::ReceiptAck`/`ReceiptIssued`) rather than a mediator-only
+assertion, so a hostile mediator cannot unilaterally fabricate an
+attestation neither party made; stage 4 is mediator-only-signed, since by
+then the mediator has already independently observed both legs' completion
+through the ordinary Sent/Received flow — the actual completion condition,
+structurally enforced by which code path in `lobby.cpp` is even allowed to
+construct a stage-4 `ReceiptFields` (see `receipt.hpp`'s file comment).
+
+**The withholding problem, and its fix — implemented as designed.** If
+receipts are issued *after* a round completes, a defector simply declines
+to participate in the final receipt exchange — the honest party is left
+with nothing recorded for a trade they completed in good faith, and
+griefing costs the withholder nothing. The fix is timing, not structure:
+**the stage-3 receipt is a required settlement step that occurs before the
+final tranche is sent**, via a new mediator session state
+(`SessionState::WaitingForFinalReceiptAck`, `mediator.hpp`) that gates
+entry into the trade's actual final leg (the last leg of the last round, or
+the mediator fee leg if one is configured) behind both parties'
+acknowledgement. Withholding the acknowledgement therefore also withholds
+the withholder's own last leg, making the cost of griefing equal to the
+cost of ordinary defection — no longer free. Verified two ways: a unit
+test (`tests/receipt_tests.cpp`) that submits only one party's
+acknowledgement and confirms no `Turn` becomes issuable, and a live,
+two-process test over a real mediator connection confirming the full
+two-stage receipt chain is issued and independently verified by both
+sides.
+
+### 9.2 Layer three — selective disclosure
+
+*Implemented.*
+
+Receipts are private by default: no publication path, no aggregation, no
+directory. A holder may disclose specific receipts to a specific
+counterparty during a specific negotiation
+(`MessageType::ReceiptDisclosure`, relayed by the mediator without
+interpretation, same as the other identity-layer messages), bound to the
+intended recipient and not broadcastable — a receipt shown to one party
+cannot be replayed by an interceptor, or by that party to someone else, as
+their own. The binding is carried by the SIGNING key, not a fresh one: the
+disclosure envelope is signed with the ORIGINAL per-room ephemeral key that
+appears inside the disclosed receipts (proving the discloser really was a
+party to that trade), while the envelope's own fields bind the CURRENT
+negotiation's room id and the intended recipient's CURRENT ephemeral key
+(so the same signed bytes cannot be replayed into a different room or
+shown to a different party). Confirmed live: a receipt chain earned in one
+completed room was disclosed, over the wire, inside a wholly separate
+negotiation, and independently verified by the recipient using only what
+arrived on the connection.
+
+### 9.3 Layer four — unlinkable aggregate credentials (future work)
+
+Selective disclosure has a residual leak: the receipts a holder shows are
+individually identifiable, so a counterparty who is also a mediator (or who
+compares notes with one) can correlate them. The mitigation is **blind
+signatures**: the mediator signs a completion token per room without seeing
+which token it signed, and the holder later proves possession of N tokens
+without revealing which rooms produced them.
+
+**This is explicitly not implemented, and is not scheduled ahead of the
+mechanisms in §7-9.2.** It remains a documented future direction:
+
+- Naive blind Schnorr over Ed25519 is unsafe under concurrent signing
+  sessions (the ROS attack). RSA blind signatures (RFC 9474) are the sound,
+  practically available choice with the existing OpenSSL dependency, at the
+  cost of larger tokens.
+- BBS+ would additionally permit disclosing attributes (volume/age bands)
+  without revealing underlying receipts, but requires pairing-friendly
+  curve support this dependency set does not contain — genuinely future
+  work, not merely unscheduled.
+- Receipt serialization (§9.1) is versioned specifically so this layer can
+  be added later as an additive version rather than a reissue of every
+  artifact in existence.
+- Blind tokens address linkability only. They contribute nothing to Sybil
+  resistance (§12) and must never be presented as though they do.
+- **No standardized post-quantum blind signature scheme exists** — see
+  §11.5 for why, and the mitigation (epoch scoping) that applies regardless
+  of whether this layer is ever built.
+
+---
+
+## 10. Implementation status
+
+| # | Layer | Status | Files |
+|---|---|---|---|
+| 1 | Crypto primitives (§5) | **Implemented** | `identity.hpp/cpp` |
+| 2 | Encrypted local keystore (§6) | **Implemented** | `keystore.hpp/cpp` |
+| 3 | Journal, recovery, mediator persistence (§7) | **Implemented** | `journal.hpp/cpp`, `recovery.hpp/cpp`, `room_persistence.hpp/cpp` |
+| 4 | Local counterparty history/blocklist (§8, storage half) | **Implemented** | `history.hpp/cpp` |
+| 4b | Counterparty recognition (§8, live proof-of-control half) | **Implemented** | `recognition.hpp/cpp` |
+| 5 | Per-trade ephemeral identities | **Implemented** | `ephemeral.hpp/cpp` |
+| 6 | Mediator-signed staged receipts (§9.1) | **Implemented** | `receipt.hpp/cpp` |
+| 7 | Service-scoped login | **Implemented** | `login.hpp/cpp`, `http_webclient.cpp` |
+| 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
+| 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
+| 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
+| — | Post-quantum migration (§11) | **Partially implemented** — TLS hybrid key exchange done; receipt-signing hybrid Ed25519+ML-DSA is now unblocked (phase 6 has landed) but still not implemented | `secure_channel.cpp` |
+
+Eleven ctest binaries currently pass end-to-end against phases 1-9:
+`tradep2p_unit_tests`, `tradep2p_identity_tests`, `tradep2p_keystore_tests`,
+`tradep2p_journal_tests`, `tradep2p_recovery_tests`,
+`tradep2p_history_tests`, `tradep2p_recognition_tests`,
+`tradep2p_ephemeral_tests`, `tradep2p_receipt_tests`,
+`tradep2p_login_tests`, `tradep2p_disclosure_tests`. CLI (`tradep2p_cli`)
+and dashboard (`tradep2p-dashboard`, `tradep2p-mediator-dashboard`) wiring
+for phases 2-6 has been exercised live over real TLS connections through an
+actual mediator process, not only unit-tested — including: phase 5's
+ephemeral trade keys (confirmed structurally unique per room over the wire);
+phase 6's full withholding-fix gate (`SessionState::WaitingForFinalReceiptAck`
+in `mediator.hpp`) forcing both parties through a signed receipt
+acknowledgement before the final tranche is issuable, with the resulting
+two-stage receipt chain independently verified by both clients; and phase
+8's selective disclosure, where a receipt chain earned in one completed
+room was shown, live, inside a completely separate negotiation and
+verified end-to-end by the recipient using only the bytes on the wire.
+Phase 7's service-scoped login (`tradep2p-webclient`) was exercised live via
+its actual HTTP routes: registration, key enrollment on an existing
+password account, enumeration-resistant password AND key-based login,
+single-use replay rejection, and confirmation that the original password
+keeps working after a key is enrolled (the migration requirement).
+Phase 9 wired that same login flow into the actual served browser HTML
+(`landing_html()`/`app_html()` in `http_webclient.cpp`) and confirmed it
+renders and parses correctly; phase 9's remaining scope (surfacing local
+history/receipts/disclosure per-account in the browser itself) is
+explicitly deferred — see its own status-table note above and this
+section's closing paragraph for why. See `docs/IDENTITY-PLAN.md` for the
+phase-ordering rationale and the two out-of-scope risks (§1.3's registry
+gap, and the accept-loop bound already confirmed adequate in §1.2).
+
+**Phase 9's honest remaining scope.** `tradep2p-webclient` is multi-tenant —
+one process serves many browser accounts concurrently — which is why
+phases 1-6's identity state (keystore, journal, history, receipts) was
+deliberately built assuming a SINGLE operator per process
+(`tradep2p_cli`/`tradep2p-dashboard`). Surfacing a per-account keystore,
+history, and receipt store inside the shared web-client process is a
+materially different engineering problem (concurrent, per-user encrypted
+key custody held in one process's memory, with unlock/lock semantics
+scoped per browser session rather than per process) than anything phases
+1-8 needed, not a smaller version of it. Building it under this session's
+remaining time budget would have meant exactly the kind of shortcut
+phase 9's own spec warns against taking ("do not weaken the native/CLI
+threat model to make the browser easier"). What phase 9 actually delivers
+today: phase 7's full login mechanism wired into real, served, verified
+browser HTML, honest UI copy about what a key does and doesn't prove
+(specs.txt SS14), and no default exclusion of unkeyed users. What it does
+not yet do: let a browser session view its own local counterparty history,
+receipt chains, or invoke `/disclose` from the browser UI — those remain
+CLI/dashboard-only capabilities, exactly where phases 4-8 left them, until
+a per-account server-side identity store is built as its own reviewed
+piece of work.
+
+---
+
+## 11. Post-quantum posture
+
+*The urgent, key-exchange half is implemented (`secure_channel.cpp`'s
+`harden_context()`). The receipt-signing hybrid (Ed25519+ML-DSA) is no
+longer gated on anything unbuilt - receipts (§9.1) shipped - but remains
+itself unimplemented; §9.3's blind signatures remain structurally future
+work regardless of scheduling (see below). This section states the posture
+so it isn't lost.*
+
+Migration splits into three groups with very different urgency:
+
+**Harvest-now-decrypt-later applies only to key exchange** (§1.2's TLS
+groups). An adversary recording TLS sessions today decrypts them once a
+cryptographically relevant quantum computer exists — retroactive and
+unfixable after the fact. This was the one urgent item, and it is now
+implemented: OpenSSL 3.5.5 is linked (natively providing `X25519MLKEM768`,
+`ML-DSA-44/65/87`, and `ML-KEM-512/768/1024`, confirmed against this
+environment, no new dependency required), and `harden_context()` sets the
+TLS group list to `X25519MLKEM768:X25519:P-256` — the hybrid group ordered
+first, classical groups retained as fallback for a peer that doesn't offer
+it. Confirmed with a live handshake in this environment
+(`openssl s_client`/`s_server -groups X25519MLKEM768:...` negotiates
+`X25519MLKEM768`) and exercised through the full mediator/client stack via
+the phase 4b smoke tests (§10). "Fail loudly rather than silently
+negotiating classical if the linked library lacks it" needed no separate
+check: `SSL_CTX_set1_groups_list()` already rejects its entire argument if
+any single group name is unrecognized, so an OpenSSL genuinely too old to
+know `X25519MLKEM768` makes `harden_context()` throw outright rather than
+silently falling back to a classical-only list.
+
+**Signatures do not have that property.** Forging a signature after the
+fact is worthless against a handshake that already completed — but
+**mediator-signed receipts (§9.1) are the one exception**, because they are
+designed to stay verifiable for years. When a cryptographically relevant
+quantum computer arrives, an Ed25519-only receipt corpus becomes forgeable
+wholesale, retroactively. Mediator receipt-signing keys should be hybrid
+Ed25519+ML-DSA from their first shipped version, not migrated later — this
+remains unimplemented; receipts (§9.1, phase 6) now exist and issue real
+mediator signatures (`receipt.hpp`'s `generate_mediator_receipt_keypair()`
+is Ed25519-only today), so this is no longer blocked on anything, it is
+simply not yet done - the honest next post-quantum item. Identity/
+login/ephemeral keys carry low urgency by comparison — ML-DSA keygen takes
+a 32-byte seed, so the existing HKDF-derived key hierarchy (§5) does not
+need to change shape to support a hybrid pair later. Phase 4b's recognition
+challenge already carries a `suite_id` field (`recognition.hpp`,
+`kRecognitionSuiteEd25519V1 = 0x0001`) for exactly this reason — a future
+hybrid suite is an additive `suite_id`, not a reissue of the verifier.
+
+**Symmetric and hash primitives need nothing.** AES-256-GCM,
+ChaCha20-Poly1305, SHA-256, Argon2id, HMAC/checkpoint authentication all
+face only Grover's quadratic speedup — do not touch them.
+
+**§9.3's blind signatures have no post-quantum answer, and this is
+structural, not a gap awaiting research.** ML-DSA's rejection-sampling
+abort-and-retry structure is precisely what makes it fast, and precisely
+what destroys the algebraic structure blinding requires — it cannot be
+blinded. No standardized post-quantum blind signature scheme exists.
+Signing the mediator's classical blind-signature key with ML-DSA does
+**not** harden the scheme; it authenticates which key is the mediator's,
+which does nothing to stop a quantum adversary from breaking that key's
+underlying (classical) hardness assumption directly. The asymmetry that
+lowers this risk's urgency: a broken blind-signature scheme lets an
+attacker mint fake tokens, but does not retroactively deanonymize anyone —
+a token blinded today does not later reveal which room produced it. The
+failure is Sybil-flavored, and §12 already concedes this system has no
+Sybil resistance. The recommended mitigation if/when §9.3 is built: rotate
+the blind-signing key per epoch and expire tokens with their epoch, so a
+future break only forges tokens for an epoch already closed.
+
+**One field to add now, cheaply, regardless of scheduling:** a `suite_id`
+inside every signed object's payload (receipts, journal entries, login
+challenges, trade messages, and §8's recognition challenges) from their
+first shipped version, with verifiers rejecting unknown suite IDs rather
+than ignoring the field. Two bytes now is the difference between adding
+post-quantum support as an additive version later versus reissuing every
+artifact in existence. `docs/identity-04b-counterparty-recognition.md`
+already includes this field for exactly this reason.
+
+**Outside this project's control:** the settlement chains themselves.
+Bitcoin's ECDSA/Schnorr and Monero's Ed25519 are Shor-vulnerable; bond
+anchoring (§12) inherits this. One honest sentence in documentation, not an
+engineering task.
+
+---
+
+## 12. Sybil resistance, and why this architecture does not achieve it
+
+Keys are free. Two identities created in a second can complete a hundred
+rooms with each other, moving no value, and mint a spotless mutual history.
+Because acknowledgements are unverified claims (§2.2), a reputation built
+on completed rooms is a reputation about **claim-making**, not behavior —
+and claim-making costs nothing.
+
+No cryptographic mechanism fixes this. Unforgeable, unlinkable, perfectly
+staged receipts attesting to a hundred fake trades are unforgeable,
+unlinkable, perfectly staged garbage. **The signature is sound; the
+referent is fiction.**
+
+Approaches considered and rejected: proof of work (a one-time amortizable
+tax an attacker pays once and farms indefinitely), social vouching (imports
+a social graph, itself a deanonymization surface), mediator attestation of
+value movement (the mediator cannot see the chains — the founding
+constraint, not an implementation gap).
+
+### Bond anchoring: a bounded, honest partial measure
+
+A reputation key may publish a bond address. Reputation weight is a
+function of value visibly at risk in that address multiplied by the age of
+the bond. Verification is a balance check performed by the client, keeping
+the mediator out of the trust computation and the design chain-agnostic.
+
+What this achieves: a fresh keypair cannot fake accumulated sunk cost, and
+cost scales linearly with the number of identities, so farming stops being
+free. What it does not achieve: without smart contracts there is no
+slashing — a bond demonstrates stake, not a forfeitable deposit. It raises
+the cost of Sybil attacks; it does not prevent them. It also introduces a
+chain-visible artifact, a linkability cost that must be weighed against the
+Sybil benefit, and for many users that trade will not be worth making. Not
+scheduled as a phase; offered here as an option with its costs stated, not
+a solution.
+
+---
+
+## 13. What this architecture does not do
+
+### 13.1 It does not make trading anonymous
+
+The cryptography does what it claims — blind signatures (if built) are
+unlinkable, scoped keys do not correlate across mediators — but those
+guarantees cover the contents of protocol messages, and little else about
+the situation. Trades settle on public chains; the addresses exchanged at
+room formation are the linkage, and chain analysis is indifferent to how
+elegantly they were exchanged. The accurate claim is narrow: *this removes
+identity from the protocol's reputation mechanism.* It does not remove
+identity from the act of trading. The reason the work is still worth doing
+is defensive: a naive public reputation key would manufacture a new,
+permanent, cross-trade identifier that an observer did not previously have.
+Declining to create that is a real gain. It is not anonymity.
+
+### 13.2 It does not hide anything from the mediator
+
+Ephemeral trade keys (§10 phase 5) prevent correlation by other
+clients and observers of the offer book. The mediator sees which connection
+joined which room in real time regardless of what key signs messages
+inside it. Onion routing hides network location, not session timing.
+Round-by-round acknowledgement produces a distinctive traffic rhythm on a
+channel with fixed framing and a small payload cap. Any documentation
+implying ephemeral keys conceal activity from the mediator is overselling,
+and the wording is the bug.
+
+### 13.3 "Optional" is unstable
+
+Once some offers carry reputation signals, unkeyed offers are
+deprioritized in practice, and the anonymity set collapses toward
+"participants with something to hide." Optionality that is nominal rather
+than real is worse than no optionality, because it produces a stigmatized
+minority while claiming neutrality. The blind-credential route (§9.3, once
+built) is the only variant where opting in does not cost unlinkability, and
+is therefore the only one where the two populations plausibly stay mixed.
+Any implementation that ends up requiring a persistent, always-visible
+identifier to participate in reputation at all is a regression against this
+framing and should be treated as a defect.
+
+### 13.4 It does not survive a hostile hosted client
+
+A browser page cannot protect a private key from an operator who controls
+the JavaScript it serves. Key-based login in `tradep2p-webclient` (§10
+phase 7/9) protects against stored-credential compromise — leaked account
+databases, credential stuffing — and against nothing else. Native clients,
+external signers, or WebAuthn are the only paths where browser-context key
+handling means more than that.
+
+### 13.5 Key loss is total
+
+There is no recovery authority, by construction. A lost keystore is a lost
+identity and a reset to zero standing. This is not a flaw to be engineered
+around; it is the Sybil cost surfacing honestly. Encrypted backup and
+export paths (§6) are required; a recovery service is not possible without
+reintroducing a trusted party.
+
+---
+
+## 14. Presentation: structured evidence, not a score
+
+Clients present, separately and without aggregation:
+
+```
+key age
+settlement count with this specific key (§8) / receipt count (§9)
+distinct mediator count
+economic cost / bond age / bond value band (§12, if ever built)
+prior interaction with this specific client
+locally blocked status
+```
+
+These must not collapse into a single number. A scalar invites the reader
+to stop thinking; separate axes let them weigh what matters for the trade
+in front of them. A counterparty you've personally settled with five times
+is not comparable to one you've never met regardless of what either
+presents, and no weighting function should be permitted to decide that on
+the user's behalf.
+
+A key confers no status. In any interface, possession of a key means
+exactly:
+
+> This participant has demonstrated control of the same scoped key.
+
+It does not mean trusted, verified, human, safe, or economically
+reputable. A key badge presented as a trust indicator is a design failure,
+because it communicates a Sybil-resistance property the system does not
+have. Correspondingly, keyed participants are never ranked above unkeyed
+ones by default — client-side policy, unenforceable at the protocol level
+(a forked client may ignore it), documented as an intention rather than a
+guarantee.
+
+---
+
+## 15. Deployment sequence
+
+Ordered by value delivered and hard dependency, not by conceptual layering
+— see `docs/IDENTITY-PLAN.md` for the full per-phase rationale.
+
+| Stage | Content | Status |
+|---|---|---|
+| 1 | Crypto primitives | Implemented |
+| 2 | Encrypted local keystore | Implemented |
+| 3 | Journal, recovery, mediator persistence | Implemented |
+| 4 | Local counterparty history | Implemented |
+| 4b | Counterparty recognition | Implemented |
+| 5 | Per-trade ephemeral identities | Implemented |
+| 6 | Staged receipts | Implemented |
+| 7 | Service-scoped login | Implemented |
+| 8 | Selective disclosure | Implemented |
+| 8b | Unlinkable aggregate credentials (blind signatures) | Future work, unscheduled |
+| 9 | Hosted client integration | Partially implemented (login UI; per-account history/receipts/disclosure UI deferred) |
+| — | Post-quantum migration | Partially implemented (TLS hybrid key exchange; receipt-signing hybrid remains unimplemented, no longer blocked on stage 6) |
+
+**The registry gap was NOT closed, and stage 6 shipped anyway — stated
+plainly, not glossed over.** This plan's own text warned that registry
+registration's lack of authentication (§1.3) should be fixed "before or
+alongside stage 6, since receipts are the first artifact a hostile mediator
+gains from forging." That fix was out of scope for this identity-phase work
+(it is a registry-protocol change, not an identity-layer one) and was not
+made. The practical consequence, stated honestly: nothing in this codebase
+stops an attacker from squatting an unclaimed `host:port` in the registry
+and running a mediator that issues syntactically perfect, correctly-chained,
+genuinely-signed receipts for rooms that never involved real value — the
+mediator's own signature is real, but nothing forced that mediator to BE
+the one a victim thought they were dealing with. Every trust-on-first-use
+mediator-key pin this session's phases 6/8 code introduces (see `main.cpp`'s
+`ClientState::mediator_receipt_key` and `dashboard_client.hpp`'s identical
+field) is the direct, honestly-documented consequence of this still-open
+gap: TOFU is what's available without registry authentication, not a
+substitute for it. This remains the single most important piece of
+unfinished work this session did not attempt, named here so it isn't lost.
+
+The post-quantum `suite_id` field (§11) landed with stage 4b's recognition
+challenge/response (`recognition.hpp`'s `suite_id`) and was carried forward
+into every signed object type built afterward: `ephemeral.hpp`'s
+`TradeMessageContext`, `receipt.hpp`'s `ReceiptAckFields`/`ReceiptFields`,
+`login.hpp`'s `LoginChallengeFields`, and `disclosure.hpp`'s
+`DisclosureFields` all carry their own `suite_id`, each independently
+versionable without reissuing any other type - the "add this cheaply now"
+payoff §11 described materialized in practice, not just in principle.
+
+---
+
+## 16. Summary
+
+The architecture provides:
+
+- login continuity with one service (§10 phase 7, key-based challenge-
+  response alongside password login, never replacing it)
+- trade continuity inside one room, bound to a fresh per-room ephemeral
+  key that shares nothing linkable with any other room (§10 phase 5)
+- private history continuity on the user's own machine, including a
+  locally-verified "I have traded with this key N times before" count
+- mediator-signed staged receipts with a structural withholding fix, so
+  declining to help produce evidence of a trade costs exactly what
+  declining to complete the trade already costs (§10 phase 6)
+- evidence disclosure to a chosen counterparty, for a chosen negotiation,
+  not broadcastable and not replayable elsewhere (§10 phase 8)
+
+It deliberately does not provide:
+
+- one public lifelong identifier
+- a public transaction graph
+- a Sybil-resistant reputation score
+- automatic global blocklists
+- a mandatory reputation class system
+- unlinkable aggregate disclosure — blind signatures remain future work,
+  explicitly not a dependency of anything shipped (§9.3)
+- authenticated registry registration — a hostile mediator can still be
+  cheap to stand up, and every TOFU mediator-key pin phases 6/8 introduce
+  is the direct, named consequence of that still-open gap (§15)
+- a browser-hosted client that itself surfaces local history, receipts, or
+  disclosure per account — `tradep2p-webclient` wires phase 7's login into
+  real served HTML, but that per-account server-side identity surface is
+  deferred, honestly, as its own future piece of work (§10 phase 9)
+
+The central claim is modest and, stated plainly, defensible: reputation can
+be made to exist without a public graph, and evidence can be made to carry
+weight without becoming a permanent handle. The central limitation is
+equally plain: in a system where settlement is unverified and identity is
+free, no reputation mechanism distinguishes an honest participant from a
+patient one. Fractional settlement caps the damage. Nothing here removes
+it. Designs that claim otherwise are describing a system that verifies
+value movement. This one does not, and says so.

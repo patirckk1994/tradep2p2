@@ -61,6 +61,73 @@ enum class MessageType : std::uint16_t {
     JoinOffer = 26,
     CancelOffer = 27,
     OfferCancelled = 28,
+    // Phase 3 (local journal + crash recovery, see
+    // docs/identity-03-journal-recovery.md): a client that remembers a room
+    // id from its own signed journal asks the mediator what it currently
+    // has on file for that room, e.g. after a reconnect or after the
+    // mediator itself restarted. Authorized purely by knowledge of the
+    // 32-byte random room id - the same bearer-credential trust level every
+    // other room operation already relies on (a room id is never listed
+    // anywhere once an offer becomes a room) - deliberately NOT gated by
+    // the stricter "current TLS connection's ClientId must match a stored
+    // party" check that Sent/Received/Abort use via find_room_for(), since
+    // that check is exactly what a mediator restart or client reconnect
+    // invalidates: a fresh connection always gets a fresh, unrelated
+    // ClientId, so the original parties could never satisfy it again.
+    RecoveryStateRequest = 29,
+    RecoveryStateResponse = 30,
+    // Phase 4b (personal counterparty recognition, see
+    // docs/identity-04b-counterparty-recognition.md): a live,
+    // mediator-relayed challenge/response so a client can prove control of
+    // its per-mediator pseudonym key to the OTHER party in the same room,
+    // right now, over the room's own live connection. Relayed the same way
+    // Sent/Received already are - one party sends, the mediator forwards it
+    // to the other party in the room via Client::enqueue() - the mediator
+    // never signs, verifies, or interprets the contents beyond relaying
+    // them; verification happens only on each client. See recognition.hpp
+    // for the canonical signed-payload structure and the verifier-side
+    // single-use/expiry tracking that actually enforces "fresh, not
+    // replayed".
+    RecognitionChallenge = 31,
+    RecognitionResponse = 32,
+    // Phase 5 (per-trade ephemeral identities, see
+    // docs/identity-05-ephemeral-trade-identity.md): announces a room's
+    // freshly-generated, never-derived ephemeral signing key to the OTHER
+    // party in the room. Relayed by the mediator exactly like Sent/Received/
+    // RecognitionChallenge - see lobby.cpp's handle_room_relay(). Carries no
+    // signature of its own (there is nothing to sign yet - the key was just
+    // generated); ephemeral.hpp's signed TradeMessageContext envelope is
+    // what later statements sign, once both parties hold each other's
+    // announced key.
+    TradeEphemeralKey = 33,
+    // Phase 6 (mediator-signed staged receipts, see
+    // docs/identity-06-receipts.md): a party's signed acknowledgement of
+    // the "penultimate obligations complete" stage, sent to the mediator
+    // (NOT relayed - unlike RecognitionChallenge/TradeEphemeralKey, the
+    // mediator itself is a required participant here, since it must
+    // collect both parties' acks before countersigning). ReceiptIssued is
+    // the mediator's countersigned result, sent to BOTH parties once ready
+    // (stage 3), or automatically once a room reaches Complete (stage 4,
+    // mediator-only-signed - see receipt.hpp's file comment for why that
+    // one needs no separate ack round trip).
+    ReceiptAck = 34,
+    ReceiptIssued = 35,
+    // Sent by the mediator to BOTH parties the moment
+    // SessionState::WaitingForFinalReceiptAck is entered (mediator.hpp) -
+    // the explicit signal that no Turn is coming next and a ReceiptAck is
+    // required from both sides before the trade's final tranche becomes
+    // sendable. Without this, a client would have no way to distinguish
+    // "the gate just opened" from "the mediator has gone silent" - see
+    // lobby.cpp's handle_sent()/handle_received().
+    ReceiptAckRequired = 36,
+    // Phase 8 (selective private receipt disclosure, see
+    // docs/identity-08-selective-disclosure.md): a holder showing a
+    // specific prior receipt chain to the OTHER party in the CURRENT room,
+    // relayed exactly like RecognitionChallenge/TradeEphemeralKey (see
+    // lobby.cpp's handle_room_relay()) - the mediator never inspects or
+    // interprets it beyond relaying. All verification (disclosure.hpp)
+    // happens only on the recipient client.
+    ReceiptDisclosure = 37,
 };
 
 struct Frame {
@@ -238,6 +305,174 @@ struct RegistryNodesMessage {
     std::vector<RegistryNode> nodes;
 };
 
+// --- Phase 3: recovery protocol (see docs/identity-03-journal-recovery.md) ---
+
+// Sent by a client that wants to know what the mediator currently has on
+// file for `room_id` - typically after that client's own signed local
+// journal shows a room that may still be in flight (e.g. after the
+// client's own process restarted, or after reconnecting following a
+// disconnect). Carries nothing beyond the room id: knowledge of the id is
+// the only "credential" this protocol has ever required for a room.
+struct RecoveryStateRequestMessage {
+    RoomId room_id{};
+};
+
+// The mediator's truthful answer. `found` is the headline field: false
+// means the mediator has no persisted or in-memory record of this room at
+// all (either it never existed, or it ran to completion/abort and was
+// pruned - see room_persistence.hpp for why completed rooms are pruned
+// rather than kept forever). When `found` is true, `state`/`round_index`/
+// `leg_index` describe the mediator's last confirmed progress.
+//
+// `state` mirrors tradep2p::SessionState (mediator.hpp) numerically, but is
+// carried here as a raw byte rather than that enum type: protocol.hpp must
+// not depend on mediator.hpp (mediator.hpp already depends on
+// protocol.hpp), so this struct cannot name SessionState directly. Callers
+// on both sides cast explicitly.
+//
+// `party_a_connected`/`party_b_connected` reflect whether a live connection
+// is *currently* bound to that room slot's original ClientId - for a room
+// reconstructed from disk after a mediator restart, both are always false,
+// truthfully, since a fresh TLS connection is never assigned the same
+// random ClientId as a pre-restart one. This phase does not implement
+// re-binding a new connection to a recovered room's party slot (see the
+// phase report for why); RecoveryStateResponse is a read-only status
+// query, not a resume/rejoin operation.
+struct RecoveryStateResponseMessage {
+    RoomId room_id{};
+    bool found{false};
+    TradeTerms terms;
+    FeeTerms fee;
+    std::uint8_t state{0};
+    std::uint32_t round_index{0};
+    std::uint8_t leg_index{0};
+    bool party_a_connected{false};
+    bool party_b_connected{false};
+    std::string reason;
+};
+
+// --- Phase 4b: counterparty recognition relay (see
+// docs/identity-04b-counterparty-recognition.md) ---
+//
+// Wire shapes only. protocol.hpp deliberately does not depend on
+// identity.hpp (the reverse dependency already exists - identity.hpp is a
+// lower layer), so the public key / signature fields here are raw
+// fixed-size byte arrays, matching how every other identity-shaped field in
+// this file (ClientId, CertificatePin, ...) is already represented rather
+// than pulling in identity.hpp's Ed25519PublicKey/Ed25519Signature types.
+// recognition.hpp is the module that gives these bytes cryptographic
+// meaning (canonical signed-payload construction, sign/verify, single-use
+// nonce tracking); this file only frames and bounds-checks them.
+constexpr std::size_t kRecognitionNonceLength = 32;
+constexpr std::size_t kRecognitionPublicKeyLength = 32;  // Ed25519
+constexpr std::size_t kRecognitionSignatureLength = 64;  // Ed25519
+
+using RecognitionNonce = std::array<std::uint8_t, kRecognitionNonceLength>;
+
+// Sent by the verifier (the party who wants proof of key control) to the
+// mediator, which relays it unmodified to the OTHER party in `room_id`. The
+// mediator identifier and protocol version are deliberately NOT carried on
+// the wire here: both parties are already connected to the same mediator
+// (they learned its identity out of band, via certificate pinning, before
+// this room existed), so both sides supply the same mediator identifier
+// string independently when building the canonical signed payload - see
+// recognition.hpp's RecognitionChallengeFields. Putting it on the wire
+// would add nothing a malicious mediator couldn't already fake by relaying
+// whatever string it likes.
+struct RecognitionChallengeMessage {
+    RoomId room_id{};
+    std::uint16_t suite_id{1};
+    RecognitionNonce nonce{};
+    std::uint64_t created_at{0};
+    std::uint64_t expires_at{0};
+};
+
+// The prover's answer, relayed back to whichever party issued the
+// challenge. `nonce` echoes the challenge being answered, since the
+// mediator relays many rooms and the verifier may have more than one
+// outstanding challenge; the verifier's own RecognitionChallengeTracker (see
+// recognition.hpp) is the sole authority on whether this nonce is still
+// outstanding, unexpired, and being answered in the right room - a
+// mismatch on any of those is rejected identically, without revealing which
+// check failed first.
+struct RecognitionResponseMessage {
+    RoomId room_id{};
+    RecognitionNonce nonce{};
+    std::array<std::uint8_t, kRecognitionPublicKeyLength> prover_public_key{};
+    std::array<std::uint8_t, kRecognitionSignatureLength> signature{};
+};
+
+// --- Phase 5: ephemeral trade identity announcement (see
+// docs/identity-05-ephemeral-trade-identity.md) ---
+constexpr std::size_t kTradeEphemeralPublicKeyLength = 32; // Ed25519
+
+struct TradeEphemeralKeyMessage {
+    RoomId room_id{};
+    std::array<std::uint8_t, kTradeEphemeralPublicKeyLength> ephemeral_public_key{};
+};
+
+// --- Phase 6: staged receipts (see docs/identity-06-receipts.md) ---
+//
+// Raw fixed-size byte arrays for the same reason RecognitionChallengeMessage
+// uses them rather than identity.hpp's Ed25519PublicKey/Ed25519Signature
+// types - protocol.hpp does not depend on identity.hpp. receipt.hpp is the
+// module that gives these bytes cryptographic meaning.
+constexpr std::size_t kReceiptPublicKeyLength = 32;   // Ed25519
+constexpr std::size_t kReceiptSignatureLength = 64;   // Ed25519
+constexpr std::size_t kReceiptTermsCommitmentLength = 32; // SHA-256
+constexpr std::size_t kReceiptWireNonceLength = 16;
+constexpr std::size_t kReceiptWireMediatorIdLength = 256; // matches receipt.hpp's kReceiptMaxMediatorIdLength
+
+struct ReceiptAckMessage {
+    RoomId room_id{};
+    std::uint8_t stage{0};
+    std::uint64_t timestamp{0};
+    std::array<std::uint8_t, kReceiptSignatureLength> signature{};
+};
+
+struct ReceiptAckRequiredMessage {
+    RoomId room_id{};
+};
+
+struct ReceiptIssuedMessage {
+    RoomId room_id{};
+    // The mediator identifier this receipt was actually signed under (the
+    // client-supplied "host:port"-shaped label - see receipt.hpp). Carried
+    // explicitly, unlike every other phase's identity-layer messages,
+    // because a receipt can legitimately be shown OUTSIDE the room/
+    // connection it was issued on (phase 8's selective disclosure) - the
+    // recipient in that case was never connected to the ORIGINAL mediator
+    // and has no other way to learn what string it was signed under, so
+    // omitting it (as e.g. RecognitionChallengeMessage does, relying on
+    // both sides already sharing one live mediator connection) would make
+    // a disclosed receipt's signature permanently unverifiable.
+    std::string mediator_id;
+    std::uint8_t stage{0};
+    bool completed{false};
+    std::array<std::uint8_t, kReceiptTermsCommitmentLength> terms_commitment{};
+    std::array<std::uint8_t, kReceiptPublicKeyLength> party_a_ephemeral_key{};
+    std::array<std::uint8_t, kReceiptPublicKeyLength> party_b_ephemeral_key{};
+    std::array<std::uint8_t, kReceiptPublicKeyLength> mediator_public_key{};
+    std::uint64_t timestamp{0};
+    std::array<std::uint8_t, kReceiptWireNonceLength> nonce{};
+    std::array<std::uint8_t, kReceiptTermsCommitmentLength> previous_stage_hash{};
+    std::array<std::uint8_t, kReceiptSignatureLength> mediator_signature{};
+};
+
+// --- Phase 8: selective private receipt disclosure (see
+// docs/identity-08-selective-disclosure.md) ---
+constexpr std::size_t kDisclosureMaxChainEntries = 8; // matches disclosure.hpp's kDisclosureMaxChainLength
+
+struct ReceiptDisclosureMessage {
+    RoomId room_id{}; // current negotiation
+    std::array<std::uint8_t, kReceiptPublicKeyLength> recipient_ephemeral_key{};
+    std::array<std::uint8_t, kReceiptTermsCommitmentLength> disclosed_chain_hash{};
+    std::uint64_t timestamp{0};
+    std::array<std::uint8_t, 16> nonce{};
+    std::array<std::uint8_t, kReceiptSignatureLength> signature{};
+    std::vector<ReceiptIssuedMessage> chain;
+};
+
 void validate_terms(const TradeTerms& terms);
 void validate_fee_terms(const FeeTerms& fee);
 void validate_address(std::string_view address);
@@ -338,5 +573,32 @@ void validate_message_type(MessageType type);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_registry_nodes(const RegistryNodesMessage& message);
 [[nodiscard]] RegistryNodesMessage decode_registry_nodes(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_recovery_state_request(const RecoveryStateRequestMessage& message);
+[[nodiscard]] RecoveryStateRequestMessage decode_recovery_state_request(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_recovery_state_response(const RecoveryStateResponseMessage& message);
+[[nodiscard]] RecoveryStateResponseMessage decode_recovery_state_response(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_recognition_challenge(const RecognitionChallengeMessage& message);
+[[nodiscard]] RecognitionChallengeMessage decode_recognition_challenge(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_recognition_response(const RecognitionResponseMessage& message);
+[[nodiscard]] RecognitionResponseMessage decode_recognition_response(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_trade_ephemeral_key(const TradeEphemeralKeyMessage& message);
+[[nodiscard]] TradeEphemeralKeyMessage decode_trade_ephemeral_key(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_receipt_ack(const ReceiptAckMessage& message);
+[[nodiscard]] ReceiptAckMessage decode_receipt_ack(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_receipt_issued(const ReceiptIssuedMessage& message);
+[[nodiscard]] ReceiptIssuedMessage decode_receipt_issued(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_receipt_ack_required(const ReceiptAckRequiredMessage& message);
+[[nodiscard]] ReceiptAckRequiredMessage decode_receipt_ack_required(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_receipt_disclosure(const ReceiptDisclosureMessage& message);
+[[nodiscard]] ReceiptDisclosureMessage decode_receipt_disclosure(std::span<const std::uint8_t> bytes);
 
 } // namespace tradep2p

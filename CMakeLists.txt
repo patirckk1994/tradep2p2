@@ -15,6 +15,17 @@ add_library(tradep2p
     src/lobby.cpp
     src/registry.cpp
     src/dashboard_client.cpp
+    src/identity.cpp
+    src/keystore.cpp
+    src/journal.cpp
+    src/room_persistence.cpp
+    src/recovery.cpp
+    src/history.cpp
+    src/recognition.cpp
+    src/ephemeral.cpp
+    src/receipt.cpp
+    src/login.cpp
+    src/disclosure.cpp
 )
 target_include_directories(tradep2p PUBLIC include)
 target_link_libraries(tradep2p PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
@@ -75,3 +86,73 @@ target_compile_options(tradep2p_unit_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 add_test(NAME tradep2p_unit_tests COMMAND tradep2p_unit_tests)
+
+add_executable(tradep2p_identity_tests tests/identity_tests.cpp)
+target_link_libraries(tradep2p_identity_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_identity_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_identity_tests COMMAND tradep2p_identity_tests)
+
+add_executable(tradep2p_keystore_tests tests/keystore_tests.cpp)
+target_link_libraries(tradep2p_keystore_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_keystore_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_keystore_tests COMMAND tradep2p_keystore_tests)
+
+add_executable(tradep2p_journal_tests tests/journal_tests.cpp)
+target_link_libraries(tradep2p_journal_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_journal_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_journal_tests COMMAND tradep2p_journal_tests)
+
+add_executable(tradep2p_recovery_tests tests/recovery_tests.cpp)
+target_link_libraries(tradep2p_recovery_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_recovery_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_recovery_tests COMMAND tradep2p_recovery_tests)
+
+add_executable(tradep2p_history_tests tests/history_tests.cpp)
+target_link_libraries(tradep2p_history_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_history_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_history_tests COMMAND tradep2p_history_tests)
+
+add_executable(tradep2p_recognition_tests tests/recognition_tests.cpp)
+target_link_libraries(tradep2p_recognition_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_recognition_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_recognition_tests COMMAND tradep2p_recognition_tests)
+
+add_executable(tradep2p_ephemeral_tests tests/ephemeral_tests.cpp)
+target_link_libraries(tradep2p_ephemeral_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_ephemeral_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_ephemeral_tests COMMAND tradep2p_ephemeral_tests)
+
+add_executable(tradep2p_receipt_tests tests/receipt_tests.cpp)
+target_link_libraries(tradep2p_receipt_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_receipt_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_receipt_tests COMMAND tradep2p_receipt_tests)
+
+add_executable(tradep2p_login_tests tests/login_tests.cpp)
+target_link_libraries(tradep2p_login_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_login_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_login_tests COMMAND tradep2p_login_tests)
+
+add_executable(tradep2p_disclosure_tests tests/disclosure_tests.cpp)
+target_link_libraries(tradep2p_disclosure_tests PRIVATE tradep2p)
+target_compile_options(tradep2p_disclosure_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_disclosure_tests COMMAND tradep2p_disclosure_tests)
