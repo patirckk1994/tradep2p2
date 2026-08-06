@@ -29,7 +29,7 @@ CERT="$OUT_DIR/mediator.cert.pem"
 KEY="$OUT_DIR/mediator.key.pem"
 STATE="$OUT_DIR/lobby-state.json"
 
-openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+openssl req -x509 -newkey ML-DSA-65 -nodes -days 1 \
     -subj "/CN=TradeP2P Dashboard Demo" \
     -keyout "$KEY" -out "$CERT" \
     >"$OUT_DIR/openssl.stdout.log" 2>"$OUT_DIR/openssl.stderr.log"

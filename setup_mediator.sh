@@ -125,7 +125,13 @@ fi
 mkdir -p "$(dirname "$MEDIATOR_CERT")" "$(dirname "$MEDIATOR_STATE_FILE")"
 if [[ ! -f "$MEDIATOR_CERT" || ! -f "$MEDIATOR_KEY" ]]; then
     echo "generating a TLS identity at $MEDIATOR_CERT / $MEDIATOR_KEY ..."
-    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
+    # ML-DSA-65 (FIPS 204): a post-quantum signature, not just a post-quantum
+    # key exchange. This cert is pinned by SHA-256 fingerprint rather than
+    # validated through a CA chain, so an RSA/ECDSA cert here would leave the
+    # *authentication* half of the handshake breakable by Shor's algorithm
+    # even though the key exchange is already hybrid post-quantum. Requires
+    # OpenSSL 3.5+ (same floor already required for the X25519MLKEM768 group).
+    openssl req -x509 -newkey ML-DSA-65 -nodes -days 365 \
         -subj "/CN=TradeP2P Mediator" \
         -keyout "$MEDIATOR_KEY" -out "$MEDIATOR_CERT"
     chmod 600 "$MEDIATOR_KEY"

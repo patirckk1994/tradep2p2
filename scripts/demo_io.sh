@@ -88,7 +88,7 @@ send_b() {
     printf '%s\n' "$*" >&4
 }
 
-openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+openssl req -x509 -newkey ML-DSA-65 -nodes -days 1 \
     -subj "/CN=TradeP2P IO Test" \
     -keyout "$KEY" -out "$CERT" \
     >"$OUT_DIR/openssl.stdout.log" 2>"$OUT_DIR/openssl.stderr.log"

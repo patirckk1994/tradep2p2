@@ -612,7 +612,7 @@ mechanisms in §7-9.2.** It remains a documented future direction:
 | 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
 | 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
 | 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
-| — | Post-quantum migration (§11) | **Partially implemented** — TLS hybrid key exchange done; receipt-signing hybrid Ed25519+ML-DSA is now unblocked (phase 6 has landed) but still not implemented | `secure_channel.cpp` |
+| — | Post-quantum migration (§11) | **Partially implemented** — TLS hybrid key exchange done, TLS server-certificate signatures now ML-DSA-65 (setup scripts); receipt-signing hybrid Ed25519+ML-DSA is now unblocked (phase 6 has landed) but still not implemented | `secure_channel.cpp`, `setup_mediator.sh`, `setup_registry.sh` |
 
 Eleven ctest binaries currently pass end-to-end against phases 1-9:
 `tradep2p_unit_tests`, `tradep2p_identity_tests`, `tradep2p_keystore_tests`,
@@ -699,9 +699,26 @@ any single group name is unrecognized, so an OpenSSL genuinely too old to
 know `X25519MLKEM768` makes `harden_context()` throw outright rather than
 silently falling back to a classical-only list.
 
-**Signatures do not have that property.** Forging a signature after the
-fact is worthless against a handshake that already completed — but
-**mediator-signed receipts (§9.1) are the one exception**, because they are
+**Signatures do not have that property, with two exceptions.** Forging a
+signature after the fact is worthless against a handshake that already
+completed — that's why key exchange, not signatures, was the urgent item
+above. But "the handshake already completed" is exactly what does *not*
+hold for a server certificate's signature, since it is re-verified on every
+new connection: a future active attacker who breaks it can impersonate the
+pinned identity going forward, even though they gain nothing against
+sessions already recorded. **TLS server certificates (§1.2) are the first
+exception**, and this is now implemented: `setup_mediator.sh`,
+`setup_registry.sh`, `tools/generate_server_identity.sh`, and
+`start_dashboard.sh` all generate `ML-DSA-65` (FIPS 204) certificates
+instead of RSA/ECDSA. No code change was needed in `secure_channel.cpp` —
+`SSL_CTX_use_certificate_file()`/`SSL_CTX_use_PrivateKey_file()` detect the
+key type from the PEM, neither context constructor restricts the TLS 1.3
+signature-algorithm list, and pinning (`X509_digest()` over the whole DER
+certificate) is already algorithm-agnostic. Confirmed with a live handshake
+in this environment (`openssl s_server`/`s_client -groups
+X25519MLKEM768:...` against an ML-DSA-65 cert reports `Peer signature type:
+mldsa65`) and exercised through the real mediator/client binaries. **Mediator-
+signed receipts (§9.1) are the second exception**, because they are
 designed to stay verifiable for years. When a cryptographically relevant
 quantum computer arrives, an Ed25519-only receipt corpus becomes forgeable
 wholesale, retroactively. Mediator receipt-signing keys should be hybrid

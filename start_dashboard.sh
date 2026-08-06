@@ -31,10 +31,11 @@ if [[ ! -f "$CERT_FILE" || ! -f "$KEY_FILE" ]]; then
 
     rm -f "$CERT_FILE" "$KEY_FILE"
 
+    # ML-DSA-65 (FIPS 204) post-quantum signature - see setup_mediator.sh for
+    # why RSA/ECDSA here would leave authentication non-PQ. Requires OpenSSL 3.5+.
     openssl req \
         -x509 \
-        -newkey rsa:3072 \
-        -sha256 \
+        -newkey ML-DSA-65 \
         -nodes \
         -days 3650 \
         -keyout "$KEY_FILE" \

@@ -86,7 +86,10 @@ fi
 mkdir -p "$(dirname "$REGISTRY_CERT")" "$(dirname "$REGISTRY_STATE_FILE")"
 if [[ ! -f "$REGISTRY_CERT" || ! -f "$REGISTRY_KEY" ]]; then
     echo "generating a TLS identity at $REGISTRY_CERT / $REGISTRY_KEY ..."
-    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
+    # ML-DSA-65 (FIPS 204) post-quantum signature - see setup_mediator.sh for
+    # why RSA/ECDSA here would leave cert authentication non-PQ even with a
+    # hybrid PQ key exchange. Requires OpenSSL 3.5+.
+    openssl req -x509 -newkey ML-DSA-65 -nodes -days 365 \
         -subj "/CN=TradeP2P Registry" \
         -keyout "$REGISTRY_KEY" -out "$REGISTRY_CERT"
     chmod 600 "$REGISTRY_KEY"
