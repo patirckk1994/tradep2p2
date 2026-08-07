@@ -55,11 +55,37 @@ Conformant implementations of Suite `0x0001` **MUST** implement:
 | Transport channel | TLS 1.3, no session resumption (session tickets disabled) |
 | Transport key exchange | `X25519MLKEM768` **MUST** be offered and preferred; classical `X25519` and `P-256` **MUST** be retained as fallback for a peer that does not offer the hybrid group |
 | Transport symmetric cipher | `TLS_CHACHA20_POLY1305_SHA256` and/or `TLS_AES_256_GCM_SHA384` |
+| Transport server certificate signature | `ML-DSA-65` (FIPS 204) **MUST** be used for the facilitator's TLS server certificate in preference to RSA or ECDSA |
 | Local-storage AEAD | ChaCha20-Poly1305, IETF construction (96-bit nonce, 128-bit tag) |
 | Signatures | Ed25519 (32-byte public key, 64-byte signature, one-shot sign/verify — no streaming API assumed) |
 | Key derivation | HKDF-SHA256 |
 | Passphrase-based key derivation | Argon2id, RFC 9106 §4 "second recommended option" (64 MiB memory, 3 iterations, 4 lanes); PBKDF2-HMAC-SHA256 at ≥600,000 iterations **MAY** be used only as a runtime fallback when Argon2id is unavailable, and the choice actually used **MUST** be recorded alongside the derived material so a verifier never has to guess which was used |
 | Content hashing | SHA-256 |
+
+**2.1 Certificate trust model.** A conformant client **MUST NOT** rely on
+normal CA-chain validation for the facilitator's TLS server certificate.
+Instead, the client **MUST** be configured with the exact SHA-256 digest
+of the facilitator's certificate (the "pin") and **MUST** reject the
+connection if the presented certificate's digest does not match it
+byte-for-byte. This is what makes `ML-DSA-65` usable here well ahead of
+general CA, browser, and OS trust-store support for post-quantum
+certificate signatures: pin verification only ever inspects the
+certificate's raw bytes, never its signature chain, so nothing about this
+model depends on any party recognizing `ML-DSA-65` as a signature
+algorithm except the client and facilitator's own TLS stacks.
+
+Key exchange and certificate signature cover two different guarantees,
+and a conformant implementation's documentation **SHOULD** state them
+separately rather than as one undifferentiated "post-quantum" claim: the
+hybrid key exchange protects *confidentiality* against a future passive
+adversary who recorded today's traffic ("harvest now, decrypt later");
+the `ML-DSA-65` certificate protects *authentication* against a future
+*active* adversary who would otherwise be able to forge the pinned
+identity by breaking a classical certificate's signing key. The
+application-level signed objects in §9 (recognition, receipts, disclosure,
+login) are `suite_id 0x0001` — Ed25519, classical — and are covered by
+neither guarantee; see the `suite_id` mechanism below for how a future
+suite adds post-quantum coverage there without reissuing this section.
 
 A `suite_id` field (`u16`) **MUST** be carried inside every signed object
 type defined in §9, populated with `0x0001` for this suite. A verifier
