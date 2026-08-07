@@ -18,6 +18,17 @@ namespace tradep2p::dashboard {
 namespace {
 constexpr std::size_t kMaxEvents = 160U;
 constexpr int kDashboardPollMilliseconds = 250;
+
+std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const std::uint8_t byte : bytes) {
+        out.push_back(digits[(byte >> 4U) & 0x0fU]);
+        out.push_back(digits[byte & 0x0fU]);
+    }
+    return out;
+}
 } // namespace
 
 std::string json_escape(const std::string& text) {
@@ -151,6 +162,11 @@ void DashboardClient::recognize(const std::string& room_text) {
         fields = recognition_tracker_.issue(mediator_id_, room_id);
         room_it->second.recognition_status = "challenge_sent";
         room_it->second.recognized_fingerprint_hex.clear();
+        room_it->second.has_recognition_challenge = true;
+        room_it->second.recognition_challenge_nonce_hex = hex_encode_bytes(fields.nonce);
+        room_it->second.recognition_challenge_created_at = fields.created_at;
+        room_it->second.recognition_challenge_expires_at = fields.expires_at;
+        room_it->second.recognition_challenge_suite_id = fields.suite_id;
     }
     RecognitionChallengeMessage wire;
     wire.room_id = fields.room_id;
@@ -180,6 +196,15 @@ std::string DashboardClient::state_json() const {
          << ",\"mediator_fee_asset\":\"" << json_escape(mediator_fee_.asset)
          << "\",\"mediator_fee_amount\":" << mediator_fee_.amount
          << ",\"mediator_fee_address\":\"" << json_escape(mediator_fee_.address)
+         << "\",\"tls\":{\"protocol_version\":\"" << json_escape(tls_session_.protocol_version)
+         << "\",\"cipher_suite\":\"" << json_escape(tls_session_.cipher_suite)
+         << "\",\"negotiated_group\":\"" << json_escape(tls_session_.negotiated_group)
+         << "\",\"peer_certificate_sha256\":\""
+         << json_escape(tls_session_.peer_certificate_sha256_hex)
+         << "\",\"peer_certificate_signature_algorithm\":\""
+         << json_escape(tls_session_.peer_certificate_signature_algorithm) << "\"}"
+         << ",\"mediator_receipt_key\":\""
+         << (mediator_receipt_key_.has_value() ? hex_encode_bytes(*mediator_receipt_key_) : "")
          << "\",\"offers\":[";
 
     for (std::size_t index = 0; index < offers_.size(); ++index) {
@@ -209,8 +234,16 @@ std::string DashboardClient::state_json() const {
         if (room.status == "active" && room.has_turn) {
             if (is_fee_turn) {
                 action = room.party == room.turn.sender ? "sent" : "none";
+            } else if (room.party == room.turn.sender) {
+                action = "sent";
+            } else if (room.peer_sent_this_turn) {
+                action = "received";
             } else {
-                action = room.party == room.turn.sender ? "sent" : "received";
+                // The round has started but the sender hasn't reported Sent
+                // yet - nothing to confirm, so this must not read as
+                // "received" (that would make the confirm button live
+                // before there's anything to confirm).
+                action = "awaiting_peer_send";
             }
         }
         json << "{\"room_id\":\"" << json_escape(room.room_id)
@@ -237,6 +270,63 @@ std::string DashboardClient::state_json() const {
              << json_escape(room.counterparty_ephemeral_public_key_hex) << "\""
              << ",\"receipt_status\":\"" << json_escape(room.receipt_status) << "\""
              << ",\"receipt_chain_verifies\":" << (room.receipt_chain_verifies ? "true" : "false");
+
+        // Crypto telemetry - display only, mirrors the trust decisions
+        // already reflected in recognition_status/receipt_chain_verifies
+        // above rather than making any of its own.
+        json << ",\"recognition_challenge\":";
+        if (room.has_recognition_challenge) {
+            json << "{\"nonce\":\"" << json_escape(room.recognition_challenge_nonce_hex)
+                 << "\",\"suite_id\":" << room.recognition_challenge_suite_id
+                 << ",\"created_at\":" << room.recognition_challenge_created_at
+                 << ",\"expires_at\":" << room.recognition_challenge_expires_at << "}";
+        } else {
+            json << "null";
+        }
+        json << ",\"recognition_response\":";
+        if (room.has_recognition_response) {
+            json << "{\"public_key\":\"" << json_escape(room.recognition_response_public_key_hex)
+                 << "\",\"signature\":\"" << json_escape(room.recognition_response_signature_hex)
+                 << "\"}";
+        } else {
+            json << "null";
+        }
+        json << ",\"own_recognition_response_signature\":\""
+             << json_escape(room.own_recognition_response_signature_hex) << "\"";
+
+        json << ",\"receipts\":[";
+        if (const auto receipts_it = room_receipts_.find(room.room_id);
+            receipts_it != room_receipts_.end()) {
+            bool first_receipt = true;
+            for (const auto& issued : receipts_it->second) {
+                if (!first_receipt) {
+                    json << ',';
+                }
+                first_receipt = false;
+                const auto link_hash =
+                    receipt_chain_link_hash(issued.fields, issued.mediator_signature);
+                json << "{\"stage\":\"" << receipt_stage_name(issued.fields.stage) << "\""
+                     << ",\"completed\":" << (issued.fields.completed ? "true" : "false")
+                     << ",\"suite_id\":" << issued.fields.suite_id
+                     << ",\"timestamp\":" << issued.fields.timestamp
+                     << ",\"nonce\":\"" << hex_encode_bytes(issued.fields.nonce) << "\""
+                     << ",\"terms_commitment\":\""
+                     << hex_encode_bytes(issued.fields.terms_commitment) << "\""
+                     << ",\"party_a_ephemeral_key\":\""
+                     << hex_encode_bytes(issued.fields.party_a_ephemeral_key) << "\""
+                     << ",\"party_b_ephemeral_key\":\""
+                     << hex_encode_bytes(issued.fields.party_b_ephemeral_key) << "\""
+                     << ",\"mediator_public_key\":\""
+                     << hex_encode_bytes(issued.fields.mediator_public_key) << "\""
+                     << ",\"previous_stage_hash\":\""
+                     << hex_encode_bytes(issued.fields.previous_stage_hash) << "\""
+                     << ",\"mediator_signature\":\""
+                     << hex_encode_bytes(issued.mediator_signature) << "\""
+                     << ",\"chain_link_hash\":\"" << hex_encode_bytes(link_hash) << "\"}";
+            }
+        }
+        json << "]";
+
         if (room.has_turn) {
             json << ",\"turn\":{\"round\":" << (room.turn.round_index + 1U)
                  << ",\"is_fee\":" << (is_fee_turn ? "true" : "false")
@@ -339,6 +429,7 @@ void DashboardClient::worker_loop() {
                 connection_status_ = "connected";
                 client_id_ = tradep2p::client_id_to_hex(welcome.client_id);
                 mediator_fee_ = welcome.fee;
+                tls_session_ = channel.session_info();
                 offers_.clear();
                 rooms_.clear();
                 add_event_locked("connected as anonymous client " + client_id_);
@@ -396,19 +487,6 @@ void DashboardClient::flush_outgoing(SecureChannel& channel) {
         add_event_locked(frame.description);
     }
 }
-
-namespace {
-std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
-    static constexpr char digits[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(bytes.size() * 2U);
-    for (const std::uint8_t byte : bytes) {
-        out.push_back(digits[(byte >> 4U) & 0x0fU]);
-        out.push_back(digits[byte & 0x0fU]);
-    }
-    return out;
-}
-} // namespace
 
 void DashboardClient::handle_frame(const Frame& frame) {
     bool refresh_offers_after = false;
@@ -499,6 +577,7 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.room_id = room_id;
             room.turn = message;
             room.has_turn = true;
+            room.peer_sent_this_turn = false;
             room.status = "active";
             add_event_locked("room " + room_id + " round " +
                              std::to_string(message.round_index + 1U) + " turn: party " +
@@ -508,8 +587,9 @@ void DashboardClient::handle_frame(const Frame& frame) {
         }
         case MessageType::Sent: {
             const auto message = tradep2p::decode_round_signal(frame.payload);
-            add_event_locked("peer reported sent in room " +
-                             tradep2p::room_id_to_hex(message.room_id));
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            rooms_[room_id].peer_sent_this_turn = true;
+            add_event_locked("peer reported sent in room " + room_id);
             break;
         }
         case MessageType::Received: {
@@ -658,6 +738,12 @@ void DashboardClient::handle_frame(const Frame& frame) {
             const auto fingerprint = recognition_tracker_.consume(mediator_id_, message);
             auto& room = rooms_[room_id];
             room.room_id = room_id;
+            // Telemetry only, captured regardless of whether it verified -
+            // recognition_status (set below) remains the sole trust-relevant
+            // signal, exactly as consume() already decided it.
+            room.has_recognition_response = true;
+            room.recognition_response_public_key_hex = hex_encode_bytes(message.prover_public_key);
+            room.recognition_response_signature_hex = hex_encode_bytes(message.signature);
             if (!fingerprint.has_value()) {
                 room.recognition_status = "failed";
                 add_event_locked(
@@ -717,6 +803,12 @@ void DashboardClient::handle_frame(const Frame& frame) {
             response.nonce = challenge_to_answer->nonce;
             response.prover_public_key = key->public_key;
             response.signature = tradep2p::sign_recognition_response(key->private_seed, fields);
+            {
+                std::scoped_lock lock(state_mutex_);
+                auto& room = rooms_[room_id];
+                room.room_id = room_id;
+                room.own_recognition_response_signature_hex = hex_encode_bytes(response.signature);
+            }
             enqueue(MessageType::RecognitionResponse, tradep2p::encode_recognition_response(response),
                     "answered recognition challenge for room " + room_id);
         }

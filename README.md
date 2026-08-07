@@ -617,6 +617,22 @@ For a manual two-browser dashboard session:
 That starts one local mediator and two browser clients, normally at
 `http://127.0.0.1:8081` and `http://127.0.0.1:8082`.
 
+To explore rooms, recognition, and receipt-chain crypto telemetry across
+more than two parties, or with your own client count/ports:
+
+```sh
+./scripts/spawn_throwaway_clients.sh --count 3
+```
+
+Starts its own throwaway one-day mediator plus that many dashboard clients,
+each with a disposable keystore already unlocked so recognition challenges
+have someone to answer them. Prints one URL per client. Pass
+`--mediator HOST:PORT --pin HEX` to attach to an already-running mediator
+instead — but don't also drive that same mediator's dashboard by hand while
+the script is running against it, since two actors racing the same room's
+state (a script and a live click) can cause an occasional receipt
+acknowledgement to be rejected. `--help` for the full flag list.
+
 The old `tests/*.sh` entry points remain as wrappers around the `scripts/`
 directory.
 

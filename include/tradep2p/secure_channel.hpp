@@ -29,6 +29,21 @@ struct ClientTlsPolicy {
     std::string expected_server_sha256;
 };
 
+// Read-only summary of the live TLS session, for display (dashboard crypto
+// telemetry) rather than any security decision - verify_server_pin() already
+// made the actual trust decision before a SecureChannel is ever handed back
+// to a caller. peer_certificate_* fields are empty on a server-side channel,
+// since clients present no certificate here.
+struct TlsSessionInfo {
+    std::string protocol_version;                  // e.g. "TLSv1.3"
+    std::string cipher_suite;                       // e.g. "TLS_AES_256_GCM_SHA384"
+    std::string negotiated_group;                    // e.g. "X25519MLKEM768", or "" if the
+                                                       // linked OpenSSL can't report it
+    std::string peer_certificate_sha256_hex;
+    std::string peer_certificate_signature_algorithm; // e.g. "ML-DSA-65", or
+                                                       // "rsaEncryption + SHA256"
+};
+
 class SecureChannel {
 public:
     SecureChannel() = default;
@@ -50,6 +65,7 @@ public:
     void set_timeout(std::uint32_t timeout_seconds);
     [[nodiscard]] int native_handle() const noexcept { return socket_fd_; }
     [[nodiscard]] bool has_pending_input() const noexcept;
+    [[nodiscard]] TlsSessionInfo session_info() const;
     void close();
 
 private:

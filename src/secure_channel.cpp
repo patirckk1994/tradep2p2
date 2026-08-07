@@ -664,6 +664,63 @@ bool SecureChannel::has_pending_input() const noexcept {
     return ssl_ != nullptr && SSL_pending(ssl_) > 0;
 }
 
+TlsSessionInfo SecureChannel::session_info() const {
+    TlsSessionInfo info;
+    if (ssl_ == nullptr) {
+        return info;
+    }
+
+    if (const char* version = SSL_get_version(ssl_); version != nullptr) {
+        info.protocol_version = version;
+    }
+    if (const SSL_CIPHER* cipher = SSL_get_current_cipher(ssl_); cipher != nullptr) {
+        if (const char* name = SSL_CIPHER_get_name(cipher); name != nullptr) {
+            info.cipher_suite = name;
+        }
+    }
+    // Requires OpenSSL 3.2+ (this project already requires 3.5+ for the
+    // X25519MLKEM768 group itself - see harden_context()); reports the
+    // classical fallback name just as accurately as the hybrid PQ one, so
+    // this is exactly how an operator would notice a peer that didn't
+    // support the hybrid group and silently fell back.
+    if (const char* group = SSL_get0_group_name(ssl_); group != nullptr) {
+        info.negotiated_group = group;
+    }
+
+    X509* certificate = SSL_get1_peer_certificate(ssl_);
+    if (certificate != nullptr) {
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int length = 0;
+        if (X509_digest(certificate, EVP_sha256(), digest.data(), &length) == 1) {
+            std::ostringstream stream;
+            stream << std::hex << std::setfill('0');
+            for (unsigned int i = 0; i < length; ++i) {
+                stream << std::setw(2) << static_cast<unsigned int>(digest[i]);
+            }
+            info.peer_certificate_sha256_hex = stream.str();
+        }
+
+        int digest_nid = 0;
+        int signature_nid = 0;
+        int security_bits = 0;
+        std::uint32_t signature_flags = 0;
+        if (X509_get_signature_info(certificate, &digest_nid, &signature_nid,
+                                    &security_bits, &signature_flags) == 1) {
+            info.peer_certificate_signature_algorithm = OBJ_nid2ln(signature_nid);
+            // A pure post-quantum signature (ML-DSA, SLH-DSA) has no
+            // separate digest step, unlike RSA/ECDSA's hash-then-sign - this
+            // is itself informative, not just a formatting detail.
+            if (digest_nid != NID_undef) {
+                info.peer_certificate_signature_algorithm +=
+                    std::string(" + ") + OBJ_nid2sn(digest_nid);
+            }
+        }
+        X509_free(certificate);
+    }
+
+    return info;
+}
+
 void SecureChannel::close() {
     if (ssl_ != nullptr) {
         (void)SSL_shutdown(ssl_);

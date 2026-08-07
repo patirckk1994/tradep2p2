@@ -69,6 +69,13 @@ struct RoomView {
     std::string detail;
     bool has_turn{false};
     TurnMessage turn;
+    // True once the CURRENT turn's sender has actually reported Sent (a
+    // MessageType::Sent frame arrived for this room since the last Turn).
+    // Reset to false on every new Turn. Without this, the receiving party's
+    // "action" in state_json() would read as "received" (button live and
+    // clickable) from the moment the round starts, not from the moment
+    // there is actually anything to confirm - the sender hasn't sent yet.
+    bool peer_sent_this_turn{false};
 
     // Phase 4b: this room's counterparty-recognition state, purely local to
     // this dashboard session (never transmitted - see recognition.hpp).
@@ -97,6 +104,24 @@ struct RoomView {
     // chain verified so far (see DashboardClient::room_receipts_).
     std::string receipt_status{"none"};
     bool receipt_chain_verifies{false};
+
+    // Crypto telemetry only (dashboard display) - never used for any trust
+    // decision, which is already made by recognition.hpp's verifier before
+    // any of this is recorded. Populated at issue() time (the challenge WE
+    // sent) and/or on a RecognitionResponse (the counterparty's answer, kept
+    // regardless of whether it verified, alongside recognition_status above
+    // which is the actual trust-relevant outcome).
+    bool has_recognition_challenge{false};
+    std::string recognition_challenge_nonce_hex;
+    std::uint64_t recognition_challenge_created_at{0};
+    std::uint64_t recognition_challenge_expires_at{0};
+    std::uint16_t recognition_challenge_suite_id{0};
+    bool has_recognition_response{false};
+    std::string recognition_response_public_key_hex;
+    std::string recognition_response_signature_hex;
+    // Set when THIS dashboard answered an incoming challenge (proving
+    // control of its own recognition key to the counterparty).
+    std::string own_recognition_response_signature_hex;
 };
 
 struct OutgoingFrame {
@@ -180,6 +205,10 @@ private:
     bool connected_{false};
     std::string connection_status_{"connecting"};
     std::string client_id_;
+    // Crypto telemetry: this connection's live TLS session summary (§ note
+    // on TlsSessionInfo - display only, the trust decision already happened
+    // inside SecureChannel::make_client() before this session even exists).
+    TlsSessionInfo tls_session_;
     FeeTerms mediator_fee_;
     std::vector<OfferView> offers_;
     std::map<std::string, RoomView> rooms_;
