@@ -31,4 +31,9 @@ void register_node_once(const Endpoint& registry,
     const Endpoint& registry,
     const ClientTlsPolicy& registry_tls);
 
+[[nodiscard]] RegistryNodesMessage list_registered_nodes_via_socks5(
+    const Endpoint& proxy,
+    const Endpoint& registry,
+    const ClientTlsPolicy& registry_tls);
+
 } // namespace tradep2p

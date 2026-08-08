@@ -1420,6 +1420,15 @@ void run_registry_heartbeat(Endpoint registry,
     }
 }
 
+void print_registered_nodes(const tradep2p::RegistryNodesMessage& nodes) {
+    std::cout << "registered mediator nodes: " << nodes.nodes.size() << '\n';
+    for (const auto& node : nodes.nodes) {
+        std::cout << "  " << node.host << ':' << node.port
+                  << " pin=" << tradep2p::certificate_pin_to_hex(node.certificate_pin)
+                  << " ttl=" << node.remaining_ttl_seconds << "s\n";
+    }
+}
+
 void print_usage(const char* program) {
     std::cerr
         << "Usage:\n"
@@ -1427,6 +1436,8 @@ void print_usage(const char* program) {
         << " registry <bind:port> <registry-cert.pem> <registry-key.pem>\n"
         << "  " << program
         << " nodes <registry:port> <registry-cert-sha256>\n"
+        << "  " << program
+        << " nodes-tor <proxy:port> <registry-onion:port> <registry-cert-sha256>\n"
         << "  " << program
         << " register-node <registry:port> <registry-cert-sha256> <node:port> <node-cert-sha256>\n"
         << "  " << program
@@ -1469,14 +1480,14 @@ int main(int argc, char** argv) {
             if (argc != 4) {
                 throw std::invalid_argument("wrong nodes argument count");
             }
-            const auto nodes = tradep2p::list_registered_nodes(
-                parse_endpoint(argv[2]), ClientTlsPolicy{argv[3]});
-            std::cout << "registered mediator nodes: " << nodes.nodes.size() << '\n';
-            for (const auto& node : nodes.nodes) {
-                std::cout << "  " << node.host << ':' << node.port
-                          << " pin=" << tradep2p::certificate_pin_to_hex(node.certificate_pin)
-                          << " ttl=" << node.remaining_ttl_seconds << "s\n";
+            print_registered_nodes(tradep2p::list_registered_nodes(
+                parse_endpoint(argv[2]), ClientTlsPolicy{argv[3]}));
+        } else if (mode == "nodes-tor") {
+            if (argc != 5) {
+                throw std::invalid_argument("wrong nodes-tor argument count");
             }
+            print_registered_nodes(tradep2p::list_registered_nodes_via_socks5(
+                parse_endpoint(argv[2]), parse_endpoint(argv[3]), ClientTlsPolicy{argv[4]}));
         } else if (mode == "register-node") {
             if (argc != 6) {
                 throw std::invalid_argument("wrong register-node argument count");

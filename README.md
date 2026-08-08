@@ -567,6 +567,59 @@ export TRADEP2P_REGISTRY_STATE_FILE="$PWD/logs/registry-state.json"
 ./build/tradep2p-registry-dashboard "$PWD/logs/registry-state.json" --port 8092
 ```
 
+### Tutorial: finding a mediator through someone else's registry
+
+Everything above is written from an operator's point of view — running your
+own registry, running your own mediator. This is the other side: you have
+nothing running yet, someone gave you a registry's `.onion` address and its
+certificate pin, and you want to find a mediator to trade on.
+
+**1. Start Tor and get a SOCKS proxy.** Any local Tor daemon works —
+`tor` from your package manager, listening on `127.0.0.1:9050` by default.
+As a plain client this is all you need from Tor — no hidden service of your
+own, no torrc changes; the registry and mediator operators are the ones who
+run a `HiddenServiceDir`/`HiddenServicePort` pair for their own `.onion`.
+
+**2. Ask the registry who's currently listed.** `nodes-tor` is the Tor
+equivalent of `nodes` above — same output, routed through the SOCKS proxy
+instead of a direct connection:
+
+```sh
+./build/tradep2p_cli nodes-tor \
+  127.0.0.1:9050 registryhiddenservice.onion:7555 REGISTRY_CERT_PIN
+```
+
+```
+registered mediator nodes: 2
+  mediatorone.onion:7443 pin=3f9a...b21c ttl=214s
+  mediatortwo.onion:7443 pin=8c02...44de ttl=87s
+```
+
+Each line is one currently-live mediator: its own `.onion:port` and its own
+certificate pin — not the registry's. `ttl` counts down from 300 seconds and
+resets whenever that mediator re-registers, so a low number just means it
+hasn't refreshed recently, not that it's about to disappear.
+
+**3. Connect to one of them, over Tor, straight from that output.** No
+separate lookup step — copy the host:port and pin directly from `nodes-tor`
+into `client-tor`:
+
+```sh
+./build/tradep2p_cli client-tor \
+  127.0.0.1:9050 mediatorone.onion:7443 3f9a...b21c
+```
+
+That's it — you're in the same interactive terminal client
+[described below](#terminal-client), talking to a mediator you found without
+ever knowing its address in advance. The registry only ever handed you a
+`host:port` and a pin; it never sees the trade itself, and — same caveat as
+[above](#semi-centralized-node-registry) — it also never confirmed that pin
+actually belongs to whoever controls that endpoint. Trust-on-first-use still
+does the real work: the very first connection is the one that matters, so if
+you have a pin from a channel you trust (the operator told you directly, a
+site you already trust lists it), use that instead of taking the registry's
+word for it.
+
 ## Quick setup scripts
 
 `setup_mediator.sh` and `setup_registry.sh` wrap the steps above: they

@@ -362,10 +362,9 @@ void register_node_once(const Endpoint& registry,
     (void)decode_registry_registered(reply.payload);
 }
 
-RegistryNodesMessage list_registered_nodes(
-    const Endpoint& registry,
-    const ClientTlsPolicy& registry_tls) {
-    auto channel = SecureChannel::connect_direct(registry, registry_tls);
+namespace {
+
+RegistryNodesMessage list_registered_nodes_over(SecureChannel channel) {
     channel.set_timeout(15U);
     channel.send_frame(MessageType::RegistryList, {});
     const Frame reply = channel.receive_frame();
@@ -376,6 +375,22 @@ RegistryNodesMessage list_registered_nodes(
         throw std::runtime_error("registry returned unexpected response");
     }
     return decode_registry_nodes(reply.payload);
+}
+
+} // namespace
+
+RegistryNodesMessage list_registered_nodes(
+    const Endpoint& registry,
+    const ClientTlsPolicy& registry_tls) {
+    return list_registered_nodes_over(SecureChannel::connect_direct(registry, registry_tls));
+}
+
+RegistryNodesMessage list_registered_nodes_via_socks5(
+    const Endpoint& proxy,
+    const Endpoint& registry,
+    const ClientTlsPolicy& registry_tls) {
+    return list_registered_nodes_over(
+        SecureChannel::connect_via_socks5(proxy, registry, registry_tls));
 }
 
 } // namespace tradep2p
