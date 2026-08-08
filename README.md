@@ -1,15 +1,20 @@
 <p align="center"><img src="docs/assets/header.svg" alt="A closed eye at the center of a peer-to-peer cryptographic network" width="100%"></p>
 
-# TradeP2P
+# UMBRA
 
-An anonymous peer-to-peer trading mediator: a coordination layer that helps
-two parties settle a trade across whatever chains their assets live on,
-without ever holding, inspecting, or verifying the value that moves. Includes
-an optional, additive identity and reputation layer (keystores, a local
+**U**ntraceable **M**ediated **B**ilateral **R**outing for **A**ssets — an
+anonymous peer-to-peer trading mediator: a coordination layer that helps two
+parties settle a trade across whatever chains their assets live on, without
+ever holding, inspecting, or verifying the value that moves. Includes an
+optional, additive identity and reputation layer (keystores, a local
 counterparty history, live key-recognition, per-trade ephemeral keys,
 mediator-signed receipts with a griefing-resistant withholding fix, and
 selective private disclosure) that never produces a public transaction graph
 or a mandatory identity.
+
+UMBRA is the project's name; the wire protocol, binaries and source tree
+underneath all keep the existing `tradep2p` naming — this is a branding
+change, not a protocol rename.
 
 For the full design rationale — threat model, the six constraints the
 reputation layer must satisfy, what it deliberately does *not* claim to
@@ -682,3 +687,7 @@ directory.
 
 This is protocol-test source code, not audited production financial
 software. Pre-audit, not for production use.
+
+## License
+
+[MIT](LICENSE) © 2026 Patrick Kelava.
