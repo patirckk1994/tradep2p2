@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/header.svg" alt="A closed eye at the center of a peer-to-peer cryptographic network" width="100%"></p>
+
 # TradeP2P
 
 An anonymous peer-to-peer trading mediator: a coordination layer that helps
@@ -13,6 +15,11 @@ For the full design rationale — threat model, the six constraints the
 reputation layer must satisfy, what it deliberately does *not* claim to
 solve (Sybil resistance chief among them) — see [`specs.txt`](specs.txt).
 This README is the practical how-to-run-it manual.
+
+> <img src="docs/assets/qrl-badge.svg" alt="QRL" width="18" height="18" align="absmiddle"> Buy me a coffee or more at the QRL address, so we can fight the all-seeing eye :P
+> ```
+> Q010500097f39b37e7040f334ec16c7f1bac4b53212cafffade09293f0d8c8b79ff5b0ee6da1ea1
+> ```
 
 ## Quick start
 
