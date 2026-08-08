@@ -63,7 +63,7 @@ add_executable(tradep2p-mediator-dashboard src/http_mediator_dashboard.cpp)
 target_include_directories(tradep2p-mediator-dashboard PRIVATE
     ${CMAKE_SOURCE_DIR}/cpp-httplib-master
 )
-target_link_libraries(tradep2p-mediator-dashboard PRIVATE Threads::Threads)
+target_link_libraries(tradep2p-mediator-dashboard PRIVATE OpenSSL::Crypto Threads::Threads)
 target_compile_features(tradep2p-mediator-dashboard PRIVATE cxx_std_20)
 target_compile_options(tradep2p-mediator-dashboard PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow

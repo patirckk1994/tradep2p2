@@ -184,7 +184,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
-    "$DASHBOARD_BIN" "$MEDIATOR_STATE_FILE" --port "$DASHBOARD_PORT" &
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        "$DASHBOARD_BIN" "$MEDIATOR_STATE_FILE" --port "$DASHBOARD_PORT" \
+            --admin-token "$ADMIN_TOKEN" --admin-port "$ADMIN_PORT" &
+    else
+        "$DASHBOARD_BIN" "$MEDIATOR_STATE_FILE" --port "$DASHBOARD_PORT" &
+    fi
     DASHBOARD_PID=$!
 fi
 
@@ -208,7 +213,11 @@ if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
 fi
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
-    echo "  operator dashboard: http://127.0.0.1:$DASHBOARD_PORT (loopback only; proxy it yourself to expose remotely)"
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        echo "  operator dashboard: http://127.0.0.1:$DASHBOARD_PORT (loopback only; admin actions enabled - can confirm fees)"
+    else
+        echo "  operator dashboard: http://127.0.0.1:$DASHBOARD_PORT (loopback only, read-only; proxy it yourself to expose remotely)"
+    fi
 fi
 echo "============================================================"
 
