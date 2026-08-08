@@ -273,6 +273,81 @@ FeeTerms configured_fee() {
     return fee;
 }
 
+// Optional: if TRADEP2P_FEE_CONFIG_FILE is set, a live SETFEE (via the
+// admin channel) also rewrites that file's FEE_ASSET/FEE_AMOUNT/
+// FEE_ADDRESS lines in place, so the change survives a restart instead of
+// silently reverting to whatever the file said before - the original gap
+// this closes: SETFEE always took effect immediately, but a later
+// restart (deploy, crash, manual) would reload the OLD value from
+// mediator.conf with no warning, undoing a change the operator believed
+// was already saved. Off by default - see set_fee() below for how this
+// stays all-or-nothing (persist failure rolls back the in-memory change
+// too, rather than leaving a state the operator can't see is
+// non-durable). setup_mediator.sh wires this to the resolved
+// mediator.conf path automatically.
+std::string configured_fee_persist_file() { return env_or_empty("TRADEP2P_FEE_CONFIG_FILE"); }
+
+// Rewrites exactly the FEE_ASSET/FEE_AMOUNT/FEE_ADDRESS lines in `path`,
+// leaving every other line (including comments and unrelated settings
+// sharing the same file, e.g. ADMIN_TOKEN) untouched. Throws on any
+// failure - a caller that can't confirm this succeeded must not report
+// the fee change as durable. Rejects '"' outright: this file is sourced
+// as a shell script by setup_mediator.sh, and while validate_fee_terms()
+// already constrains what reaches here, that validation is enforced by
+// callers (e.g. the admin page), not by the admin channel itself - a
+// direct admin-channel connection must not be able to inject shell syntax
+// into mediator.conf via a crafted fee address.
+void persist_fee_to_file(const std::string& path, const FeeTerms& fee) {
+    if (fee.asset.find('"') != std::string::npos ||
+        fee.address.find('"') != std::string::npos) {
+        throw std::runtime_error("fee asset/address must not contain '\"' to be persisted");
+    }
+
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        throw std::runtime_error("cannot open fee config file '" + path + "' for reading");
+    }
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        lines.push_back(line);
+    }
+    input.close();
+
+    const std::string asset_line = "FEE_ASSET=\"" + fee.asset + "\"";
+    const std::string amount_line =
+        "FEE_AMOUNT=\"" + (fee.amount == 0U ? std::string{} : std::to_string(fee.amount)) + "\"";
+    const std::string address_line = "FEE_ADDRESS=\"" + fee.address + "\"";
+
+    bool found_asset = false;
+    bool found_amount = false;
+    bool found_address = false;
+    for (auto& existing : lines) {
+        if (existing.rfind("FEE_ASSET=", 0) == 0) {
+            existing = asset_line;
+            found_asset = true;
+        } else if (existing.rfind("FEE_AMOUNT=", 0) == 0) {
+            existing = amount_line;
+            found_amount = true;
+        } else if (existing.rfind("FEE_ADDRESS=", 0) == 0) {
+            existing = address_line;
+            found_address = true;
+        }
+    }
+    if (!found_asset || !found_amount || !found_address) {
+        throw std::runtime_error("fee config file '" + path +
+                                  "' is missing FEE_ASSET/FEE_AMOUNT/FEE_ADDRESS lines");
+    }
+
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        throw std::runtime_error("cannot open fee config file '" + path + "' for writing");
+    }
+    for (const auto& out_line : lines) {
+        output << out_line << '\n';
+    }
+}
+
 // Gates the live admin control channel (see Impl::admin_control_loop()
 // below). Unset (the default) disables the channel entirely - no listening
 // socket is even opened - rather than opening on a fixed port with a
@@ -341,7 +416,8 @@ public:
               load_or_create_mediator_receipt_key(configured_mediator_receipt_key_file())),
           admin_token_(configured_admin_token()),
           admin_port_(configured_admin_port()),
-          require_fee_confirmation_(configured_require_fee_confirmation()) {}
+          require_fee_confirmation_(configured_require_fee_confirmation()),
+          fee_persist_file_(configured_fee_persist_file()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -363,8 +439,15 @@ public:
         return fee_;
     }
 
+    // Throws (leaving fee_ unchanged) if persistence is configured and
+    // fails - see persist_fee_to_file()'s comment for why this is
+    // deliberately all-or-nothing rather than applying the live change
+    // and merely warning that it won't survive a restart.
     void set_fee(FeeTerms fee) {
         std::scoped_lock lock(fee_mutex_);
+        if (!fee_persist_file_.empty()) {
+            persist_fee_to_file(fee_persist_file_, fee);
+        }
         fee_ = std::move(fee);
     }
 
@@ -2197,6 +2280,10 @@ private:
     // amount/asset/address), so a mediator's whole runtime behaves
     // consistently for this one setting.
     bool require_fee_confirmation_;
+    // See configured_fee_persist_file()'s comment. Empty disables
+    // persistence entirely - SETFEE stays exactly as live-only as before
+    // this existed, matching prior behavior for anyone not opting in.
+    std::string fee_persist_file_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
     std::atomic<std::size_t> pending_handshakes_{0U};

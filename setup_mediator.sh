@@ -230,6 +230,16 @@ if [[ -n "$FEE_ASSET" ]]; then
     export TRADEP2P_FEE_AMOUNT="$FEE_AMOUNT"
     export TRADEP2P_FEE_ADDRESS="$FEE_ADDRESS"
 fi
+# A live SETFEE over the admin channel (e.g. from admin-df7bffc8.php) is
+# otherwise memory-only - the next restart silently reloads whatever this
+# file still says, undoing a change the operator believed was already
+# saved. Only wired when the config file actually exists (an unwritten
+# default has nothing to rewrite) and resolved to an absolute path, since
+# the mediator's own working directory when it later opens this path may
+# not match wherever this script happened to be invoked from.
+if [[ -f "$CONFIG_FILE" ]]; then
+    export TRADEP2P_FEE_CONFIG_FILE="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")"
+fi
 if [[ "$FEE_REQUIRE_CONFIRMATION" == "1" ]]; then
     export TRADEP2P_FEE_REQUIRE_CONFIRMATION="1"
 fi
