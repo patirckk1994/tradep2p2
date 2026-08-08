@@ -165,6 +165,9 @@ void test_message_type_bounds() {
     // Phase 8 added ReceiptDisclosure(37) - see tests/disclosure_tests.cpp
     // for its own coverage.
     tradep2p::validate_message_type(tradep2p::MessageType::ReceiptDisclosure);
+    // Optional fee-confirmation gate added FeeConfirmationPending(38) - see
+    // mediator.hpp's SessionState::WaitingForFeeConfirmation.
+    tradep2p::validate_message_type(tradep2p::MessageType::FeeConfirmationPending);
 
     // Anything past the new upper bound must still be rejected - this is
     // the mechanism that lets an OLDER build (or, symmetrically, a build
@@ -174,7 +177,7 @@ void test_message_type_bounds() {
     // never wrapped or reinterpreted.
     bool threw = false;
     try {
-        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(38));
+        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(39));
     } catch (const std::invalid_argument&) {
         threw = true;
     }

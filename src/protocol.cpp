@@ -344,7 +344,7 @@ void validate_registry_node(const RegistryNode& node, bool require_ttl) {
 void validate_message_type(MessageType type) {
     const auto value = static_cast<std::uint16_t>(type);
     if (value < static_cast<std::uint16_t>(MessageType::Welcome) ||
-        value > static_cast<std::uint16_t>(MessageType::ReceiptDisclosure)) {
+        value > static_cast<std::uint16_t>(MessageType::FeeConfirmationPending)) {
         throw std::invalid_argument("unknown message type");
     }
 }
@@ -1176,6 +1176,22 @@ std::vector<std::uint8_t> encode_receipt_ack_required(const ReceiptAckRequiredMe
 ReceiptAckRequiredMessage decode_receipt_ack_required(std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
     ReceiptAckRequiredMessage message;
+    message.room_id = reader.fixed_id<32U>();
+    validate_room_id(message.room_id);
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_fee_confirmation_pending(const FeeConfirmationPendingMessage& message) {
+    validate_room_id(message.room_id);
+    Writer writer;
+    writer.fixed_id(message.room_id);
+    return writer.take();
+}
+
+FeeConfirmationPendingMessage decode_fee_confirmation_pending(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    FeeConfirmationPendingMessage message;
     message.room_id = reader.fixed_id<32U>();
     validate_room_id(message.room_id);
     reader.require_finished();

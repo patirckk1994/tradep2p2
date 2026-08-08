@@ -5,8 +5,10 @@
 
 namespace tradep2p {
 
-MediatorSession::MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee)
-    : creator_(std::move(creator)), room_id_(room_id), fee_(std::move(fee)) {
+MediatorSession::MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee,
+                                 bool require_fee_confirmation)
+    : creator_(std::move(creator)), room_id_(room_id), fee_(std::move(fee)),
+      require_fee_confirmation_(require_fee_confirmation) {
     validate_terms(creator_.terms);
     validate_address(creator_.receive_address_a);
     validate_room_id(room_id_);
@@ -21,7 +23,8 @@ MediatorSession MediatorSession::restore(RoomId room_id,
                                           SessionState state,
                                           std::uint32_t round_index,
                                           std::uint8_t leg_index,
-                                          std::string abort_reason) {
+                                          std::string abort_reason,
+                                          bool require_fee_confirmation) {
     // Everything that is always persisted (never blank, per the phase-3
     // room-persistence design) is validated exactly like the normal
     // constructor would. Only the receive addresses get the relaxed,
@@ -52,6 +55,7 @@ MediatorSession MediatorSession::restore(RoomId room_id,
     session.round_index_ = round_index;
     session.leg_index_ = leg_index;
     session.abort_reason_ = std::move(abort_reason);
+    session.require_fee_confirmation_ = require_fee_confirmation;
     return session;
 }
 
@@ -90,7 +94,8 @@ Party MediatorSession::current_sender() const {
     if (state_ == SessionState::WaitingForPeer ||
         state_ == SessionState::Complete ||
         state_ == SessionState::Aborted ||
-        state_ == SessionState::WaitingForFinalReceiptAck) {
+        state_ == SessionState::WaitingForFinalReceiptAck ||
+        state_ == SessionState::WaitingForFeeConfirmation) {
         throw std::logic_error("session has no active sender");
     }
     if (state_ == SessionState::WaitingForFeeSent) {
@@ -165,7 +170,8 @@ void MediatorSession::sender_reported_sent(
             throw std::invalid_argument(
                 "only the offer creator settles the mediator fee");
         }
-        state_ = SessionState::Complete;
+        state_ = require_fee_confirmation_ ? SessionState::WaitingForFeeConfirmation
+                                            : SessionState::Complete;
         return;
     }
     if (state_ != SessionState::WaitingForSent) {
@@ -189,6 +195,13 @@ void MediatorSession::receiver_reported_received(
         throw std::invalid_argument("wrong party reported received");
     }
     advance_after_receipt();
+}
+
+void MediatorSession::confirm_fee_received() {
+    if (state_ != SessionState::WaitingForFeeConfirmation) {
+        throw std::logic_error("session is not waiting for fee confirmation");
+    }
+    state_ = SessionState::Complete;
 }
 
 void MediatorSession::advance_after_receipt() {

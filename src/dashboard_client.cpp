@@ -231,7 +231,7 @@ std::string DashboardClient::state_json() const {
         const bool is_fee_turn =
             room.has_turn && room.turn.round_index >= room.terms.rounds;
         std::string action = "none";
-        if (room.status == "active" && room.has_turn) {
+        if (room.status == "active" && room.has_turn && !room.fee_confirmation_pending) {
             if (is_fee_turn) {
                 action = room.party == room.turn.sender ? "sent" : "none";
             } else if (room.party == room.turn.sender) {
@@ -269,7 +269,8 @@ std::string DashboardClient::state_json() const {
              << ",\"counterparty_ephemeral_key\":\""
              << json_escape(room.counterparty_ephemeral_public_key_hex) << "\""
              << ",\"receipt_status\":\"" << json_escape(room.receipt_status) << "\""
-             << ",\"receipt_chain_verifies\":" << (room.receipt_chain_verifies ? "true" : "false");
+             << ",\"receipt_chain_verifies\":" << (room.receipt_chain_verifies ? "true" : "false")
+             << ",\"fee_confirmation_pending\":" << (room.fee_confirmation_pending ? "true" : "false");
 
         // Crypto telemetry - display only, mirrors the trust decisions
         // already reflected in recognition_status/receipt_chain_verifies
@@ -606,6 +607,7 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.status = "complete";
             room.detail = "all rounds completed";
             room.has_turn = false;
+            room.fee_confirmation_pending = false;
             if (room.has_recognized_fingerprint) {
                 outcome_to_report = {room.recognized_fingerprint, RecognitionOutcome::Successful};
             }
@@ -620,6 +622,7 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.status = "aborted";
             room.detail = message.reason;
             room.has_turn = false;
+            room.fee_confirmation_pending = false;
             if (room.has_recognized_fingerprint) {
                 outcome_to_report = {room.recognized_fingerprint, RecognitionOutcome::Incomplete};
             }
@@ -682,6 +685,16 @@ void DashboardClient::handle_frame(const Frame& frame) {
             ack.signature = sign_receipt_ack(keypair_it->second.private_seed, fields);
             receipt_ack_to_send = ack;
             add_event_locked("room " + room_id + ": final-receipt gate opened, acknowledged");
+            break;
+        }
+        case MessageType::FeeConfirmationPending: {
+            const auto message = tradep2p::decode_fee_confirmation_pending(frame.payload);
+            const std::string room_id = tradep2p::room_id_to_hex(message.room_id);
+            auto& room = rooms_[room_id];
+            room.room_id = room_id;
+            room.fee_confirmation_pending = true;
+            add_event_locked("room " + room_id +
+                             ": fee reported sent, awaiting mediator operator confirmation");
             break;
         }
         case MessageType::ReceiptIssued: {

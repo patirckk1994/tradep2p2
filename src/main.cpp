@@ -367,6 +367,7 @@ const char* session_state_name(SessionState state) {
         case SessionState::WaitingForReceived: return "waiting_for_received";
         case SessionState::WaitingForFeeSent: return "waiting_for_fee_sent";
         case SessionState::WaitingForFinalReceiptAck: return "waiting_for_final_receipt_ack";
+        case SessionState::WaitingForFeeConfirmation: return "waiting_for_fee_confirmation";
         case SessionState::Complete: return "complete";
         case SessionState::Aborted: return "aborted";
     }

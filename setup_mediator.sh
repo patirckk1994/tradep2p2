@@ -23,9 +23,31 @@ Options:
   --fee-asset ASSET    charge a mediator fee in this asset (optional)
   --fee-amount N       fee amount in integer units (required with --fee-asset)
   --fee-address ADDR   your receive address for the fee (required with --fee-asset)
+  --fee-require-confirmation
+                        the fee leg does not auto-complete on the payer's own
+                        "I sent it" claim - the room stays open until you
+                        confirm receipt via the admin control channel
+                        (LISTPENDINGFEES/CONFIRMFEE). Honor-based like
+                        everything else here (no blockchain check); off by
+                        default. Only meaningful with --fee-asset and
+                        --admin-token.
+  --admin-token TOKEN  enables a loopback-only live control channel for
+                        changing the fee without a restart (optional; see
+                        --admin-port). Keep this secret - anyone who has it
+                        can change the fee. Leave unset to disable the
+                        channel entirely.
+  --admin-port N       port for the admin control channel (default 7444,
+                        only meaningful with --admin-token)
   --registry HOST:PORT registry endpoint to register with (optional)
   --registry-pin HEX   registry certificate SHA-256 pin (required with --registry)
-  --advertise HOST:PORT the endpoint peers can reach this mediator on (defaults to --bind)
+  --advertise HOST:PORT the endpoint peers can reach this mediator on (defaults
+                        to --bind). Also used, regardless of --registry, as
+                        the mediator's own identity for receipt-ack
+                        signatures - set this to whatever address your
+                        clients actually connect through (e.g. an onion
+                        address) whenever it differs from --bind (always
+                        true for a 0.0.0.0 bind), or every room will hang
+                        forever at the final-receipt-ack stage.
   --dashboard-port N   operator dashboard port (default 8091)
   --no-dashboard        do not launch the operator dashboard
   -h, --help            show this help
@@ -44,6 +66,9 @@ MEDIATOR_STATE_FILE="$ROOT/logs/lobby-state.json"
 FEE_ASSET=""
 FEE_AMOUNT=""
 FEE_ADDRESS=""
+FEE_REQUIRE_CONFIRMATION="0"
+ADMIN_TOKEN=""
+ADMIN_PORT="7444"
 REGISTRY_ENDPOINT=""
 REGISTRY_PIN=""
 ADVERTISED_ENDPOINT=""
@@ -67,6 +92,9 @@ while [[ $# -gt 0 ]]; do
         --fee-asset) FEE_ASSET="$2"; shift 2 ;;
         --fee-amount) FEE_AMOUNT="$2"; shift 2 ;;
         --fee-address) FEE_ADDRESS="$2"; shift 2 ;;
+        --fee-require-confirmation) FEE_REQUIRE_CONFIRMATION="1"; shift ;;
+        --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
+        --admin-port) ADMIN_PORT="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
         --registry-pin) REGISTRY_PIN="$2"; shift 2 ;;
         --advertise) ADVERTISED_ENDPOINT="$2"; shift 2 ;;
@@ -89,6 +117,15 @@ MEDIATOR_STATE_FILE="$MEDIATOR_STATE_FILE"
 FEE_ASSET="$FEE_ASSET"
 FEE_AMOUNT="$FEE_AMOUNT"
 FEE_ADDRESS="$FEE_ADDRESS"
+
+# "1" to hold the fee leg open until you confirm it via the admin channel
+# instead of trusting the payer's own claim. Needs ADMIN_TOKEN set too.
+FEE_REQUIRE_CONFIRMATION="$FEE_REQUIRE_CONFIRMATION"
+
+# Leave ADMIN_TOKEN empty to disable the live fee-control channel entirely.
+# Keep this secret if set - anyone who has it can change the fee live.
+ADMIN_TOKEN="$ADMIN_TOKEN"
+ADMIN_PORT="$ADMIN_PORT"
 
 # Leave REGISTRY_ENDPOINT empty to run standalone, unregistered.
 REGISTRY_ENDPOINT="$REGISTRY_ENDPOINT"
@@ -158,8 +195,14 @@ echo "  certificate pin:   $CERT_PIN"
 echo "  (share this pin with anyone who should connect a client here)"
 if [[ -n "$FEE_ASSET" ]]; then
     echo "  fee:               $FEE_AMOUNT $FEE_ASSET -> $FEE_ADDRESS"
+    if [[ "$FEE_REQUIRE_CONFIRMATION" == "1" ]]; then
+        echo "  fee confirmation:  required (honor-based, held until you confirm via admin channel)"
+    fi
 else
     echo "  fee:               none"
+fi
+if [[ -n "$ADMIN_TOKEN" ]]; then
+    echo "  admin control:     127.0.0.1:$ADMIN_PORT (loopback only, live fee changes)"
 fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
@@ -170,10 +213,20 @@ fi
 echo "============================================================"
 
 export TRADEP2P_LOBBY_STATE_FILE="$MEDIATOR_STATE_FILE"
+if [[ -n "$ADVERTISED_ENDPOINT" ]]; then
+    export TRADEP2P_MEDIATOR_ID="$ADVERTISED_ENDPOINT"
+fi
 if [[ -n "$FEE_ASSET" ]]; then
     export TRADEP2P_FEE_ASSET="$FEE_ASSET"
     export TRADEP2P_FEE_AMOUNT="$FEE_AMOUNT"
     export TRADEP2P_FEE_ADDRESS="$FEE_ADDRESS"
+fi
+if [[ "$FEE_REQUIRE_CONFIRMATION" == "1" ]]; then
+    export TRADEP2P_FEE_REQUIRE_CONFIRMATION="1"
+fi
+if [[ -n "$ADMIN_TOKEN" ]]; then
+    export TRADEP2P_ADMIN_TOKEN="$ADMIN_TOKEN"
+    export TRADEP2P_ADMIN_PORT="$ADMIN_PORT"
 fi
 
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then

@@ -105,6 +105,13 @@ struct RoomView {
     std::string receipt_status{"none"};
     bool receipt_chain_verifies{false};
 
+    // Optional (see mediator.hpp's SessionState::WaitingForFeeConfirmation):
+    // true once a FeeConfirmationPending frame arrives for this room - the
+    // fee leg's sender reported it sent, but the mediator operator has not
+    // yet confirmed receiving it, so the room stays open with nothing left
+    // for either party here to do.
+    bool fee_confirmation_pending{false};
+
     // Crypto telemetry only (dashboard display) - never used for any trust
     // decision, which is already made by recognition.hpp's verifier before
     // any of this is recorded. Populated at issue() time (the challenge WE

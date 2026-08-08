@@ -282,6 +282,14 @@ bool is_valid_transition(SessionState from, SessionState to) {
             return to == SessionState::WaitingForSent ||
                    to == SessionState::WaitingForFeeSent || to == SessionState::Aborted;
         case SessionState::WaitingForFeeSent:
+            // WaitingForFeeSent -> Complete happens directly unless the
+            // operator opted into require_fee_confirmation (mediator.hpp),
+            // in which case it passes through WaitingForFeeConfirmation
+            // first instead.
+            return to == SessionState::Complete ||
+                   to == SessionState::WaitingForFeeConfirmation ||
+                   to == SessionState::Aborted;
+        case SessionState::WaitingForFeeConfirmation:
             return to == SessionState::Complete || to == SessionState::Aborted;
         case SessionState::Complete:
         case SessionState::Aborted:

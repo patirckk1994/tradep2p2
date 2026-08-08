@@ -319,6 +319,21 @@ public:
         return it->second.login_key;
     }
 
+    // Admin-only listing: username, creation time, and whether a login key
+    // is enrolled - deliberately never the salt or password hash. Sorted by
+    // created_at so the newest registration is easy to find.
+    std::vector<std::pair<std::string, std::string>> list_summary() {
+        std::scoped_lock lock(mutex_);
+        std::vector<std::pair<std::string, std::string>> out;
+        out.reserve(accounts_.size());
+        for (const auto& [username, account] : accounts_) {
+            out.emplace_back(username, account.created_at);
+        }
+        std::sort(out.begin(), out.end(),
+                 [](const auto& left, const auto& right) { return left.second < right.second; });
+        return out;
+    }
+
 private:
     static std::vector<std::uint8_t> derive(const std::string& password,
                                              const std::vector<std::uint8_t>& salt) {
@@ -588,7 +603,7 @@ constexpr const char* kPrivacyNotice =
 
 // Matches htdocs/assets/css/style.css so this page reads as part of the
 // same site once reverse-proxied under the marketing site's domain.
-std::string page_head(const std::string& title) {
+std::string page_head(const std::string& title, const std::string& home_url) {
     std::ostringstream out;
     out << "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
@@ -655,13 +670,18 @@ std::string page_head(const std::string& title) {
         << "</style>\n</head>\n<body>\n"
         << "<div class=\"site-strip\"><div class=\"row\"><a href=\"/\">TradeP2P "
            "web client</a><span>hosted session &middot; not the mediator "
-           "itself</span></div></div>\n";
+           "itself</span>";
+    if (!home_url.empty()) {
+        out << "<a href=\"" << html_escape(home_url)
+            << "\" style=\"margin-left:auto\">&larr; main site</a>";
+    }
+    out << "</div></div>\n";
     return out.str();
 }
 
-std::string landing_html(const std::string& preauth_token) {
+std::string landing_html(const std::string& preauth_token, const std::string& home_url) {
     std::ostringstream out;
-    out << page_head("TradeP2P Web Client")
+    out << page_head("TradeP2P Web Client", home_url)
         << "<div class=\"wrap\">\n"
         << "<div class=\"warning\"><b>&#9888; Privacy warning.</b> " << kPrivacyNotice
         << "</div>\n"
@@ -776,9 +796,10 @@ std::string landing_html(const std::string& preauth_token) {
     return out.str();
 }
 
-std::string app_html(const std::string& username, const std::string& csrf_token) {
+std::string app_html(const std::string& username, const std::string& csrf_token,
+                      const std::string& home_url) {
     std::ostringstream out;
-    out << page_head("TradeP2P Web Client")
+    out << page_head("TradeP2P Web Client", home_url)
         << "<div class=\"wrap wide\">\n"
         << "<div class=\"warning\"><b>&#9888; Privacy warning.</b> " << kPrivacyNotice
         << "</div>\n"
@@ -898,7 +919,11 @@ std::string app_html(const std::string& username, const std::string& csrf_token)
            "data-abort=\"${esc(r.room_id)}\">Abort room</button>`:'';const "
            "fee=r.fee_amount>0?`<div class=\"muted mono-break\">mediator fee: "
            "${esc(r.fee_amount)} ${esc(r.fee_asset)} &rarr; "
-           "${esc(r.fee_address)}</div>`:'';return "
+           "${esc(r.fee_address)}</div>`:'';const "
+           "feeConfirmationLine=r.fee_confirmation_pending?'<p "
+           "class=\"notice\">Mediator fee reported sent - waiting for the "
+           "mediator operator to confirm receipt before this room "
+           "completes.</p>':'';return "
            "`<article class=\"room\"><div class=\"topline\"><div><b "
            "title=\"${esc(r.room_id)}\">Room "
            "${esc(short_(r.room_id))}</b><div class=\"muted\">party "
@@ -909,7 +934,7 @@ std::string app_html(const std::string& username, const std::string& csrf_token)
            "${esc(r.buy_asset)} &middot; ${esc(r.rounds)} rounds</p><div "
            "class=\"muted mono-break\">party A receives: "
            "${esc(r.receive_address_a)}<br>party B receives: "
-           "${esc(r.receive_address_b)}</div>${fee}${turn}${r.detail?`<p "
+           "${esc(r.receive_address_b)}</div>${fee}${turn}${feeConfirmationLine}${r.detail?`<p "
            "class=\"notice\">${esc(r.detail)}</p>`:''}<div "
            "class=\"row\">${primary}${abort}</div></article>`}).join('');target."
            "querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>roomAction('/"
@@ -970,7 +995,13 @@ void print_usage(const char* program) {
         << "  --accounts FILE        account store path (default "
            "logs/webclient-accounts.tsv)\n"
         << "  --max-sessions N       concurrent session cap (default 64)\n"
-        << "  --idle-minutes N       idle session timeout (default 30)\n\n"
+        << "  --idle-minutes N       idle session timeout (default 30)\n"
+        << "  --home-url URL         link back to the main site shown in the page "
+           "header (default: none, no link shown)\n"
+        << "  --admin-token TOKEN    enables GET /api/admin/accounts (username + "
+           "creation time only, never salts/hashes) when the request carries a "
+           "matching X-TradeP2P-Admin-Token header (default: unset, endpoint "
+           "returns 404)\n\n"
         << "This binary is meant to sit behind a TLS-terminating reverse proxy "
            "before it is exposed to the public Internet.\n";
 }
@@ -1026,6 +1057,14 @@ int main(int argc, char** argv) {
         // signed response cannot be replayed against a differently-named
         // deployment sharing the same account file.
         std::string server_identity;
+        // Shown as a link back to the main site in every page's header, if
+        // set. Deliberately opt-in (empty by default): this binary is meant
+        // to also work standalone, and a stale or wrong URL here is worse
+        // than no link at all.
+        std::string home_url;
+        // Gates GET /api/admin/accounts - unset (default) disables the route
+        // entirely rather than requiring an empty/guessable token.
+        std::string admin_token;
 
         for (int index = option_index; index < argc; ++index) {
             const std::string argument = argv[index];
@@ -1042,6 +1081,10 @@ int main(int argc, char** argv) {
                     parse_u32(argv[++index], "idle minute count"));
             } else if (argument == "--server-identity" && index + 1 < argc) {
                 server_identity = argv[++index];
+            } else if (argument == "--home-url" && index + 1 < argc) {
+                home_url = argv[++index];
+            } else if (argument == "--admin-token" && index + 1 < argc) {
+                admin_token = argv[++index];
             } else if (argument == "--help") {
                 print_usage(argv[0]);
                 return EXIT_SUCCESS;
@@ -1115,8 +1158,9 @@ int main(int argc, char** argv) {
             const auto cookie = read_cookie(request, kSessionCookie);
             const auto session = cookie ? sessions.touch(*cookie) : std::nullopt;
             if (session) {
-                response.set_content(app_html(session->username, session->csrf_token),
-                                     "text/html; charset=utf-8");
+                response.set_content(
+                    app_html(session->username, session->csrf_token, home_url),
+                    "text/html; charset=utf-8");
                 return;
             }
             auto preauth = read_cookie(request, kPreAuthCookie);
@@ -1126,7 +1170,8 @@ int main(int argc, char** argv) {
                     "Set-Cookie", std::string(kPreAuthCookie) + "=" + *preauth +
                                       "; Path=/; SameSite=Strict" + cookie_suffix(request));
             }
-            response.set_content(landing_html(*preauth), "text/html; charset=utf-8");
+            response.set_content(landing_html(*preauth, home_url),
+                                 "text/html; charset=utf-8");
         });
 
         server.Post("/api/register", [&](const httplib::Request& request,
@@ -1358,6 +1403,36 @@ int main(int argc, char** argv) {
             response.set_header("Cache-Control", "no-store");
             response.set_content(session->client->state_json(),
                                  "application/json; charset=utf-8");
+        });
+
+        // Deliberately unauthenticated-by-default (404, not 401/403, when
+        // admin_token is unset) so the route's very existence isn't
+        // observable without the token. Never touches AccountStore's raw
+        // file - list_summary() is the only path in, and it excludes
+        // salts/hashes by construction (see its definition above).
+        server.Get("/api/admin/accounts", [&](const httplib::Request& request,
+                                              httplib::Response& response) {
+            const std::string provided = request.get_header_value("X-TradeP2P-Admin-Token");
+            if (admin_token.empty() || provided.size() != admin_token.size() ||
+                CRYPTO_memcmp(provided.data(), admin_token.data(), admin_token.size()) != 0) {
+                response.status = 404;
+                response.set_content("not found", "text/plain; charset=utf-8");
+                return;
+            }
+            response.set_header("Cache-Control", "no-store");
+            std::ostringstream out;
+            out << "{\"ok\":true,\"accounts\":[";
+            bool first = true;
+            for (const auto& [username, created_at] : accounts.list_summary()) {
+                if (!first) {
+                    out << ',';
+                }
+                first = false;
+                out << "{\"username\":\"" << json_escape(username) << "\""
+                    << ",\"created_at\":\"" << json_escape(created_at) << "\"}";
+            }
+            out << "]}";
+            response.set_content(out.str(), "application/json; charset=utf-8");
         });
 
         const auto action = [&](auto handler) {

@@ -30,6 +30,18 @@ enum class SessionState : std::uint8_t {
     // counterparty's local history - specs.txt SS8.3), instead of costing
     // nothing.
     WaitingForFinalReceiptAck,
+    // Optional (see MediatorSession's require_fee_confirmation constructor
+    // parameter, default false - existing honor-system behavior is
+    // unchanged unless an operator opts in). Entered instead of Complete
+    // the moment the offer creator reports the fee leg sent. The mediator
+    // still cannot verify any transfer occurred - this does not change that
+    // - it just requires an explicit operator action (confirm_fee_received(),
+    // driven by lobby.cpp's admin control channel) before the room closes,
+    // instead of trusting the sender's own claim alone the way every other
+    // leg in this protocol still does. Appended at the end of the enum,
+    // like WaitingForFinalReceiptAck before it, so existing numeric values
+    // used in persisted rooms and the wire protocol never shift.
+    WaitingForFeeConfirmation,
 };
 
 // Coordinates turns only. It never creates, inspects, searches, confirms,
@@ -39,7 +51,12 @@ enum class SessionState : std::uint8_t {
 // honor-system way as every other transfer.
 class MediatorSession {
 public:
-    MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee);
+    // require_fee_confirmation: see SessionState::WaitingForFeeConfirmation.
+    // Defaults false so every existing call site (and every already-shipped
+    // deployment) keeps today's honor-system-only behavior unless an
+    // operator explicitly opts in.
+    MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee,
+                    bool require_fee_confirmation = false);
 
     // Phase 3 (mediator-side room persistence, see
     // docs/identity-03-journal-recovery.md and room_persistence.hpp):
@@ -57,6 +74,13 @@ public:
     // if that is attempted, because encode_turn()/encode_trade_ready()
     // (protocol.cpp) call validate_address() on the destination/address
     // fields and reject an empty string.
+    // require_fee_confirmation is NOT itself persisted (only the resulting
+    // `state` is) - a restored room already sitting in
+    // WaitingForFeeConfirmation stays there regardless of what is passed
+    // here, since that transition already happened before persistence.
+    // This only matters for the rare case of restoring a room still in
+    // WaitingForFeeSent, where the caller (lobby.cpp) supplies its current
+    // startup configuration, same as it would for a brand-new room.
     [[nodiscard]] static MediatorSession restore(RoomId room_id,
                                                   TradeTerms terms,
                                                   std::string receive_address_a,
@@ -65,7 +89,8 @@ public:
                                                   SessionState state,
                                                   std::uint32_t round_index,
                                                   std::uint8_t leg_index,
-                                                  std::string abort_reason);
+                                                  std::string abort_reason,
+                                                  bool require_fee_confirmation = false);
 
     [[nodiscard]] const RoomId& id() const noexcept { return room_id_; }
     [[nodiscard]] SessionState state() const noexcept { return state_; }
@@ -116,6 +141,12 @@ public:
     }
     [[nodiscard]] const FeeTerms& fee() const noexcept { return fee_; }
 
+    // The only caller of this is lobby.cpp's admin control channel (an
+    // operator action, not a client message - no client-facing wire message
+    // type exists for this). Throws std::logic_error if state() is not
+    // WaitingForFeeConfirmation.
+    void confirm_fee_received();
+
 private:
     // Only reachable via restore() - leaves every member at its in-class
     // default and skips the normal constructor's validation, since restore()
@@ -140,6 +171,10 @@ private:
     // rather than trying to persist and trust a pre-restart ack.
     bool final_receipt_acked_a_{false};
     bool final_receipt_acked_b_{false};
+    // See SessionState::WaitingForFeeConfirmation. Only read inside
+    // sender_reported_sent()'s WaitingForFeeSent branch - irrelevant once a
+    // room has already left that state, restored or not.
+    bool require_fee_confirmation_{false};
 };
 
 } // namespace tradep2p

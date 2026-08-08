@@ -128,6 +128,14 @@ enum class MessageType : std::uint16_t {
     // interprets it beyond relaying. All verification (disclosure.hpp)
     // happens only on the recipient client.
     ReceiptDisclosure = 37,
+    // Optional (see mediator.hpp's SessionState::WaitingForFeeConfirmation):
+    // sent to both parties the moment the fee leg's sender reports it sent,
+    // when the mediator operator has required an explicit confirmation
+    // instead of trusting that report alone. Carries no new information
+    // beyond "nothing to do right now, an operator action is pending" -
+    // parallels ReceiptAckRequired's role for the receipt-ack gate. Only
+    // ever sent by the mediator; a client never sends this type.
+    FeeConfirmationPending = 38,
 };
 
 struct Frame {
@@ -434,6 +442,11 @@ struct ReceiptAckRequiredMessage {
     RoomId room_id{};
 };
 
+// See MessageType::FeeConfirmationPending.
+struct FeeConfirmationPendingMessage {
+    RoomId room_id{};
+};
+
 struct ReceiptIssuedMessage {
     RoomId room_id{};
     // The mediator identifier this receipt was actually signed under (the
@@ -597,6 +610,8 @@ void validate_message_type(MessageType type);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_receipt_ack_required(const ReceiptAckRequiredMessage& message);
 [[nodiscard]] ReceiptAckRequiredMessage decode_receipt_ack_required(std::span<const std::uint8_t> bytes);
+[[nodiscard]] std::vector<std::uint8_t> encode_fee_confirmation_pending(const FeeConfirmationPendingMessage& message);
+[[nodiscard]] FeeConfirmationPendingMessage decode_fee_confirmation_pending(std::span<const std::uint8_t> bytes);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_receipt_disclosure(const ReceiptDisclosureMessage& message);
 [[nodiscard]] ReceiptDisclosureMessage decode_receipt_disclosure(std::span<const std::uint8_t> bytes);

@@ -6,9 +6,13 @@
 #include "tradep2p/receipt.hpp"
 #include "tradep2p/room_persistence.hpp"
 
+#include <openssl/crypto.h>
 #include <openssl/rand.h>
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -23,6 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -59,6 +64,21 @@ constexpr int kConnectionIoTimeoutSeconds = 30;
 struct QueuedFrame {
     MessageType type{};
     std::vector<std::uint8_t> payload;
+};
+
+// A rejection that reveals nothing an attacker couldn't already see (the
+// referenced offer/room/invite id was already legitimately known to this
+// client, or the id space being probed is public - e.g. open offer ids via
+// ListOffers) and isn't evidence of a broken or hostile client - just an
+// ordinary business-rule "no" (own offer, capacity limit, a race with the
+// other party). Thrown instead of std::invalid_argument/std::runtime_error
+// at call sites where that distinction holds, so the per-connection
+// bad-message counter below doesn't lump a misclick in with someone
+// actually probing unguessable ids (room/invite ids, which remain
+// strike-worthy via the ordinary exception types).
+class BenignRejection : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
 void set_nonblocking_close_on_exec(int fd) {
@@ -128,6 +148,7 @@ const char* session_state_name(SessionState state) {
     case SessionState::WaitingForReceived: return "waiting_for_received";
     case SessionState::WaitingForFeeSent: return "waiting_for_fee_sent";
     case SessionState::WaitingForFinalReceiptAck: return "waiting_for_final_receipt_ack";
+    case SessionState::WaitingForFeeConfirmation: return "waiting_for_fee_confirmation";
     case SessionState::Complete: return "complete";
     case SessionState::Aborted: return "aborted";
     }
@@ -252,6 +273,59 @@ FeeTerms configured_fee() {
     return fee;
 }
 
+// Gates the live admin control channel (see Impl::admin_control_loop()
+// below). Unset (the default) disables the channel entirely - no listening
+// socket is even opened - rather than opening on a fixed port with a
+// guessable or empty token.
+std::string configured_admin_token() { return env_or_empty("TRADEP2P_ADMIN_TOKEN"); }
+
+std::uint16_t configured_admin_port() {
+    const std::string text = env_or_empty("TRADEP2P_ADMIN_PORT");
+    if (text.empty()) {
+        return 7444U;
+    }
+    std::uint16_t port = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), port, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || port == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_ADMIN_PORT");
+    }
+    return port;
+}
+
+// See mediator.hpp's SessionState::WaitingForFeeConfirmation. Off by
+// default - existing honor-system fee behavior is unchanged unless an
+// operator explicitly opts in. Meaningless (and ignored) if no fee is
+// configured at all.
+bool configured_require_fee_confirmation() {
+    const std::string text = env_or_empty("TRADEP2P_FEE_REQUIRE_CONFIRMATION");
+    return text == "1" || text == "true";
+}
+
+// The mediator's own identity string, bound into every receipt-ack
+// signature it verifies and every receipt it issues (receipt.hpp's
+// ReceiptAckFields/ReceiptFields.mediator_id) - it MUST be textually
+// identical to whatever address string each connecting client was told to
+// use as ITS mediator_id (main.cpp/http_dashboard.cpp's mediator_id_text,
+// taken verbatim from that client's own command line), or
+// verify_receipt_ack() silently and permanently fails for every room that
+// reaches the final-receipt-ack gate, with no way to recover except
+// restarting the mediator with a matching value - see handle_receipt_ack().
+// Defaulting to the bind address (as before this override existed) only
+// happens to work when bind and connect are the same string, which is
+// never true for a wildcard bind (0.0.0.0) or anything reached through a
+// proxy/onion address different from the local bind host - exactly the
+// Tor hidden-service deployment this project targets. Set
+// TRADEP2P_MEDIATOR_ID to whatever address clients actually connect
+// through (e.g. the onion address) to fix that; setup_mediator.sh wires
+// its --advertise flag to this for that reason.
+std::string configured_mediator_id(const Endpoint& bind_endpoint) {
+    const std::string override_value = env_or_empty("TRADEP2P_MEDIATOR_ID");
+    if (!override_value.empty()) {
+        return override_value;
+    }
+    return bind_endpoint.host + ":" + std::to_string(bind_endpoint.port);
+}
+
 } // namespace
 
 class LobbyServer::Impl {
@@ -262,9 +336,12 @@ public:
           state_file_(configured_state_file()),
           room_persistence_path_(configured_room_persistence_file()),
           fee_(configured_fee()),
-          mediator_id_(bind_endpoint_.host + ":" + std::to_string(bind_endpoint_.port)),
+          mediator_id_(configured_mediator_id(bind_endpoint_)),
           mediator_receipt_keypair_(
-              load_or_create_mediator_receipt_key(configured_mediator_receipt_key_file())) {}
+              load_or_create_mediator_receipt_key(configured_mediator_receipt_key_file())),
+          admin_token_(configured_admin_token()),
+          admin_port_(configured_admin_port()),
+          require_fee_confirmation_(configured_require_fee_confirmation()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -273,21 +350,45 @@ public:
         }
     }
 
+    // fee_ is read from every client-handling thread (Welcome, offer
+    // creation, snapshot writes) and, once the admin control channel is
+    // enabled, written from that channel's own thread - so every access
+    // (read or write) goes through here rather than touching fee_ directly.
+    // Live changes only affect rooms/offers created AFTER the change - a
+    // room already past Welcome carries its own FeeTerms copy already (see
+    // WelcomeMessage/OfferCreated below), never a live reference back to
+    // this mediator-wide value.
+    FeeTerms current_fee() const {
+        std::scoped_lock lock(fee_mutex_);
+        return fee_;
+    }
+
+    void set_fee(FeeTerms fee) {
+        std::scoped_lock lock(fee_mutex_);
+        fee_ = std::move(fee);
+    }
+
     void run() {
         SecureListener listener(bind_endpoint_, identity_);
         std::cout << "TradeP2P lobby listening on " << bind_endpoint_.host << ':'
                   << bind_endpoint_.port << '\n';
         std::cout << "Anonymous offer rooms, address exchange and multi-room settlement.\n";
         std::cout << "No accounts, client certificates, transaction data or wallet custody.\n";
-        if (fee_.amount > 0U) {
-            std::cout << "Mediator fee: " << fee_.amount << ' ' << fee_.asset
-                      << " to " << fee_.address << " per settled trade.\n";
+        if (const FeeTerms fee = current_fee(); fee.amount > 0U) {
+            std::cout << "Mediator fee: " << fee.amount << ' ' << fee.asset
+                      << " to " << fee.address << " per settled trade.\n";
         }
 
         if (!state_file_.empty()) {
             snapshot_running_.store(true);
             snapshot_thread_ = std::thread([this] { snapshot_loop(); });
             std::cout << "Local lobby state snapshot: " << state_file_ << '\n';
+        }
+
+        if (!admin_token_.empty()) {
+            std::thread([this] { admin_control_loop(); }).detach();
+            std::cout << "Admin control listening on 127.0.0.1:" << admin_port_
+                      << " (loopback only, live fee changes)\n";
         }
 
         load_persisted_rooms_at_startup();
@@ -458,24 +559,26 @@ private:
         RoomEntry(const PendingInvite& invite,
                   RoomId room_id,
                   std::string receive_address_b,
-                  FeeTerms fee)
+                  FeeTerms fee,
+                  bool require_fee_confirmation)
             : id(room_id),
               party_a(invite.from),
               party_b(invite.to),
               session(CreateRoomMessage{invite.terms, invite.receive_address_a},
-                      room_id, std::move(fee)) {
+                      room_id, std::move(fee), require_fee_confirmation) {
             session.join(JoinRoomMessage{room_id, std::move(receive_address_b)});
         }
 
         RoomEntry(const OpenOffer& offer,
                   ClientId joining_client,
                   std::string receive_address_b,
-                  FeeTerms fee)
+                  FeeTerms fee,
+                  bool require_fee_confirmation)
             : id(offer.id),
               party_a(offer.creator),
               party_b(joining_client),
               session(CreateRoomMessage{offer.terms, offer.receive_address_a},
-                      offer.id, std::move(fee)) {
+                      offer.id, std::move(fee), require_fee_confirmation) {
             session.join(JoinRoomMessage{offer.id, std::move(receive_address_b)});
         }
 
@@ -494,14 +597,20 @@ private:
         // LobbyServer::Impl::persist_room_upsert()), so this is here purely
         // as a defensive default, not a path this constructor expects to
         // exercise for those two states in practice.
-        explicit RoomEntry(const PersistedRoom& persisted)
+        // require_fee_confirmation is this mediator's CURRENT startup
+        // config, not anything read back from disk - see
+        // MediatorSession::restore()'s header comment for why that is
+        // correct (a room already past that gate stays exactly where its
+        // persisted `state` says regardless of this value).
+        RoomEntry(const PersistedRoom& persisted, bool require_fee_confirmation)
             : id(persisted.room_id),
               party_a(persisted.party_a),
               party_b(persisted.party_b),
               session(MediatorSession::restore(
                   persisted.room_id, persisted.terms, /*receive_address_a=*/std::string{},
                   /*receive_address_b=*/std::string{}, persisted.fee, persisted.state,
-                  persisted.round_index, persisted.leg_index, persisted.abort_reason)),
+                  persisted.round_index, persisted.leg_index, persisted.abort_reason,
+                  require_fee_confirmation)),
               active(persisted.state != SessionState::Complete &&
                      persisted.state != SessionState::Aborted) {}
 
@@ -545,7 +654,7 @@ private:
             client->channel.set_timeout(kConnectionIoTimeoutSeconds);
             client->channel.send_frame(
                 MessageType::Welcome,
-                encode_welcome(WelcomeMessage{client->id, fee_}));
+                encode_welcome(WelcomeMessage{client->id, current_fee()}));
 
             std::cout << "client connected: " << client_key << '\n';
 
@@ -585,6 +694,14 @@ private:
 
                         try {
                             dispatch(client, frame);
+                        } catch (const BenignRejection& error) {
+                            // An ordinary "no" that reveals nothing an
+                            // attacker couldn't already see (see the class
+                            // comment) - send the reason but don't count it
+                            // toward the disconnect threshold below, so a
+                            // stray misclick (e.g. joining your own offer
+                            // twice) can never by itself end the session.
+                            send_error(client, error.what());
                         } catch (const std::exception& error) {
                             ++client->bad_messages;
                             send_error(client, error.what());
@@ -599,9 +716,13 @@ private:
                              processed < 16U);
                 }
 
-                if (client->alive.load()) {
-                    flush_outgoing(client);
-                }
+                // Unconditional: even when the loop above just set alive to
+                // false (Disconnect frame, 3rd strike), any reply already
+                // queued for this frame - e.g. the very Error explaining a
+                // disconnect-triggering rejection - must still go out before
+                // the socket closes below, or the client sees a bare "TLS
+                // read failed" with no idea why.
+                flush_outgoing(client);
             }
         } catch (const std::exception& error) {
             std::cerr << "client " << client_key << " disconnected: "
@@ -679,7 +800,7 @@ private:
         {
             std::scoped_lock lock(hub_mutex_);
             if (offers_.size() >= kMaxOpenOffers) {
-                throw std::runtime_error("too many open offers");
+                throw BenignRejection("too many open offers");
             }
             std::size_t own_count = 0U;
             for (const auto& entry : offers_) {
@@ -688,7 +809,7 @@ private:
                 }
             }
             if (own_count >= kMaxOffersPerClient) {
-                throw std::runtime_error("too many open offers from this client");
+                throw BenignRejection("too many open offers from this client");
             }
 
             std::string key;
@@ -765,19 +886,19 @@ private:
             const std::string key = room_id_to_hex(message.room_id);
             const auto offer_it = offers_.find(key);
             if (offer_it == offers_.end()) {
-                throw std::invalid_argument("offer does not exist or was already taken");
+                throw BenignRejection("offer does not exist or was already taken");
             }
             if (offer_it->second.creator == client->id) {
-                throw std::invalid_argument("cannot join your own offer");
+                throw BenignRejection("cannot join your own offer");
             }
             if (rooms_.size() >= kMaxRooms) {
-                throw std::runtime_error("too many active rooms");
+                throw BenignRejection("too many active rooms");
             }
             const auto creator_it = clients_.find(
                 client_id_to_hex(offer_it->second.creator));
             if (creator_it == clients_.end()) {
                 offers_.erase(offer_it);
-                throw std::runtime_error("offer creator disconnected");
+                throw BenignRejection("offer creator disconnected");
             }
             offer = offer_it->second;
             party_a = creator_it->second;
@@ -786,7 +907,8 @@ private:
             // The room id published in /offers remains stable for both parties and
             // for all later /sent, /received and /abort messages.
             room = std::make_shared<RoomEntry>(offer, client->id,
-                                               message.receive_address_b, fee_);
+                                               message.receive_address_b, current_fee(),
+                                               require_fee_confirmation_);
             rooms_.emplace(key, room);
             offers_.erase(offer_it);
         }
@@ -814,10 +936,10 @@ private:
             const std::string key = room_id_to_hex(message.room_id);
             const auto it = offers_.find(key);
             if (it == offers_.end()) {
-                throw std::invalid_argument("open offer does not exist");
+                throw BenignRejection("open offer does not exist");
             }
             if (it->second.creator != client->id) {
-                throw std::invalid_argument("offer belongs to another client");
+                throw BenignRejection("offer belongs to another client");
             }
             offers_.erase(it);
         }
@@ -846,7 +968,7 @@ private:
     void handle_invite(const std::shared_ptr<Client>& client,
                        const InviteTradeMessage& message) {
         if (message.target == client->id) {
-            throw std::invalid_argument("cannot invite yourself");
+            throw BenignRejection("cannot invite yourself");
         }
 
         PendingInvite invite;
@@ -854,7 +976,7 @@ private:
         {
             std::scoped_lock lock(hub_mutex_);
             if (invites_.size() >= kMaxPendingInvites) {
-                throw std::runtime_error("too many pending invitations");
+                throw BenignRejection("too many pending invitations");
             }
 
             std::size_t outgoing_count = 0U;
@@ -864,12 +986,15 @@ private:
                 }
             }
             if (outgoing_count >= kMaxInvitesPerClient) {
-                throw std::runtime_error("too many pending invitations from this client");
+                throw BenignRejection("too many pending invitations from this client");
             }
 
+            // Client ids are broadcast to every connected client via
+            // ListPeers just above, so this reveals nothing a target-id
+            // guess couldn't already learn from that listing.
             const auto target_it = clients_.find(client_id_to_hex(message.target));
             if (target_it == clients_.end()) {
-                throw std::invalid_argument("target client is not connected");
+                throw BenignRejection("target client is not connected");
             }
             target = target_it->second;
 
@@ -914,7 +1039,7 @@ private:
                 throw std::invalid_argument("invitation belongs to another client");
             }
             if (rooms_.size() >= kMaxRooms) {
-                throw std::runtime_error("too many active rooms");
+                throw BenignRejection("too many active rooms");
             }
 
             invite = invite_it->second;
@@ -922,7 +1047,7 @@ private:
             const auto b_it = clients_.find(client_id_to_hex(invite.to));
             if (a_it == clients_.end() || b_it == clients_.end()) {
                 invites_.erase(invite_it);
-                throw std::runtime_error("inviting peer disconnected");
+                throw BenignRejection("inviting peer disconnected");
             }
             party_a = a_it->second;
             party_b = b_it->second;
@@ -936,7 +1061,8 @@ private:
             } while (rooms_.contains(room_key));
 
             room = std::make_shared<RoomEntry>(
-                invite, room_id, message.receive_address_b, fee_);
+                invite, room_id, message.receive_address_b, current_fee(),
+                require_fee_confirmation_);
             rooms_.emplace(room_key, room);
             invites_.erase(invite_it);
         }
@@ -986,11 +1112,12 @@ private:
         const auto room = find_room_for(client->id, message.room_id);
         std::shared_ptr<Client> receiver;
         bool complete = false;
+        bool awaiting_fee_confirmation = false;
         std::optional<IssuedReceipt> completion_receipt;
         {
             std::scoped_lock lock(room->mutex);
             if (!room->active) {
-                throw std::runtime_error("room is no longer active");
+                throw BenignRejection("room is no longer active");
             }
             const Party reporting_party = party_for(*room, client->id);
             room->session.sender_reported_sent(reporting_party, message);
@@ -1002,8 +1129,14 @@ private:
             // already passed through the final-receipt-ack gate (phase 6 -
             // see mediator.hpp's SessionState::WaitingForFinalReceiptAck),
             // so issuing the stage-4 "settlement completed" receipt here is
-            // never premature - see receipt.hpp's file comment.
+            // never premature - see receipt.hpp's file comment. Unless the
+            // operator opted into require_fee_confirmation, in which case
+            // the session lands in WaitingForFeeConfirmation instead - see
+            // handle_confirm_fee() for where completion actually happens
+            // in that case.
             complete = room->session.state() == SessionState::Complete;
+            awaiting_fee_confirmation =
+                room->session.state() == SessionState::WaitingForFeeConfirmation;
             if (complete) {
                 room->active = false;
                 completion_receipt = issue_receipt(*room, ReceiptStage::SettlementCompleted, true);
@@ -1031,11 +1164,87 @@ private:
             return;
         }
 
+        if (awaiting_fee_confirmation) {
+            // Neither party has anything to do right now but wait for the
+            // operator - deliberately NOT relayed as an ordinary Sent signal
+            // (the counterparty never sent or received anything here, the
+            // fee's recipient is the mediator operator, not them).
+            send_to_room(room, MessageType::FeeConfirmationPending,
+                        encode_fee_confirmation_pending(FeeConfirmationPendingMessage{room->id}));
+            return;
+        }
+
         if (!receiver) {
             abort_room(room, "peer disconnected");
             return;
         }
         receiver->enqueue(MessageType::Sent, encode_round_signal(message));
+    }
+
+    // Admin-only (see Impl::admin_control_loop()'s CONFIRMFEE command) -
+    // there is no client-facing wire message for this, matching
+    // MediatorSession::confirm_fee_received()'s own comment. Looks the room
+    // up directly by id rather than via find_room_for(), since this is not
+    // acting on behalf of either connected party. Returns false (and
+    // changes nothing) if no room with this id is currently in
+    // WaitingForFeeConfirmation - the caller (admin_control_loop) reports
+    // that back over the admin channel rather than throwing, since "you
+    // asked about a room that isn't in that state" is a normal outcome for
+    // an operator racing their own external payment check, not a bug.
+    bool handle_confirm_fee(const RoomId& room_id) {
+        std::shared_ptr<RoomEntry> room;
+        {
+            std::scoped_lock lock(hub_mutex_);
+            const auto it = rooms_.find(room_id_to_hex(room_id));
+            if (it == rooms_.end()) {
+                return false;
+            }
+            room = it->second;
+        }
+
+        std::optional<IssuedReceipt> completion_receipt;
+        {
+            std::scoped_lock lock(room->mutex);
+            if (!room->active ||
+                room->session.state() != SessionState::WaitingForFeeConfirmation) {
+                return false;
+            }
+            room->session.confirm_fee_received();
+            room->active = false;
+            completion_receipt = issue_receipt(*room, ReceiptStage::SettlementCompleted, true);
+        }
+
+        persist_room_remove(room->id);
+        erase_room(room->id, room);
+        if (completion_receipt.has_value()) {
+            send_to_room(room, MessageType::ReceiptIssued,
+                        encode_receipt_issued(to_wire(*completion_receipt)));
+        }
+        send_to_room(room, MessageType::Complete, encode_complete(CompleteMessage{room->id}));
+        return true;
+    }
+
+    // Admin-only (LISTPENDINGFEES) - room ids currently sitting in
+    // WaitingForFeeConfirmation, for the operator to check against whatever
+    // they use to actually verify a payment arrived.
+    std::vector<RoomId> pending_fee_confirmations() {
+        std::vector<RoomId> out;
+        std::vector<std::shared_ptr<RoomEntry>> snapshot;
+        {
+            std::scoped_lock lock(hub_mutex_);
+            snapshot.reserve(rooms_.size());
+            for (const auto& [key, room] : rooms_) {
+                (void)key;
+                snapshot.push_back(room);
+            }
+        }
+        for (const auto& room : snapshot) {
+            std::scoped_lock lock(room->mutex);
+            if (room->session.state() == SessionState::WaitingForFeeConfirmation) {
+                out.push_back(room->id);
+            }
+        }
+        return out;
     }
 
     void handle_received(const std::shared_ptr<Client>& client,
@@ -1050,7 +1259,7 @@ private:
         {
             std::scoped_lock lock(room->mutex);
             if (!room->active) {
-                throw std::runtime_error("room is no longer active");
+                throw BenignRejection("room is no longer active");
             }
             const Party reporting_party = party_for(*room, client->id);
             room->session.receiver_reported_received(reporting_party, message);
@@ -1123,7 +1332,7 @@ private:
         const Party sender_party = party_for(*room, client->id);
         const auto receiver = client_for_party(*room, other_party(sender_party));
         if (!receiver) {
-            throw std::runtime_error("counterparty is not currently connected");
+            throw BenignRejection("counterparty is not currently connected");
         }
         receiver->enqueue(type, payload);
     }
@@ -1167,19 +1376,19 @@ private:
         {
             std::scoped_lock lock(room->mutex);
             if (!room->active) {
-                throw std::runtime_error("room is no longer active");
+                throw BenignRejection("room is no longer active");
             }
             if (room->session.state() != SessionState::WaitingForFinalReceiptAck) {
-                throw std::invalid_argument(
+                throw BenignRejection(
                     "room is not currently awaiting a final receipt acknowledgement");
             }
             if (static_cast<ReceiptStage>(message.stage) !=
                 ReceiptStage::PenultimateObligationsComplete) {
-                throw std::invalid_argument("unexpected receipt acknowledgement stage");
+                throw BenignRejection("unexpected receipt acknowledgement stage");
             }
             const auto& announced_key = party == Party::A ? room->ephemeral_key_a : room->ephemeral_key_b;
             if (!announced_key.has_value()) {
-                throw std::invalid_argument(
+                throw BenignRejection(
                     "no ephemeral trade key announced for this room yet - cannot verify acknowledgement");
             }
 
@@ -1262,7 +1471,14 @@ private:
                 response.reason = room->session.abort_reason();
             }
         }
-        response.fee = fee_;
+        // The room's OWN committed fee (captured at creation, see
+        // RoomEntry's constructors above), never the mediator-wide live
+        // value - a fee change after this room was created must not alter
+        // what this room itself already agreed to.
+        {
+            std::scoped_lock lock(room->mutex);
+            response.fee = room->session.fee();
+        }
         response.party_a_connected = client_for_party(*room, Party::A) != nullptr;
         response.party_b_connected = client_for_party(*room, Party::B) != nullptr;
 
@@ -1430,10 +1646,11 @@ private:
         const auto now = std::chrono::system_clock::now();
         snapshot.updated_at =
             static_cast<std::uint64_t>(std::chrono::system_clock::to_time_t(now));
-        // Fee terms are not exposed by MediatorSession directly (its
-        // accessor surface only exposes `terms()`), so they are threaded
-        // through separately by every call site below, which all already
-        // have `fee_` (the mediator-wide configured fee) in scope.
+        // The room's OWN committed fee (MediatorSession::fee()), never the
+        // mediator-wide live value - persisted state must reflect what this
+        // room actually agreed to, not whatever the fee happens to be (now
+        // live-changeable, see Impl::set_fee()) at persistence time.
+        snapshot.fee = room.session.fee();
         return snapshot;
     }
 
@@ -1448,7 +1665,6 @@ private:
             return;
         }
         PersistedRoom snapshot = persisted_room_snapshot(room);
-        snapshot.fee = fee_;
         std::scoped_lock lock(persistence_mutex_);
         persisted_rooms_[room_id_to_hex(room.id)] = std::move(snapshot);
         write_persisted_rooms_locked();
@@ -1510,7 +1726,7 @@ private:
             if (rooms_.contains(key)) {
                 continue; // should never happen this early, but never clobber
             }
-            rooms_.emplace(key, std::make_shared<RoomEntry>(persisted));
+            rooms_.emplace(key, std::make_shared<RoomEntry>(persisted, require_fee_confirmation_));
             persisted_rooms_[key] = persisted;
             ++restored;
         }
@@ -1632,6 +1848,176 @@ private:
         std::string current_sender;
     };
 
+    // A plain (non-TLS - loopback traffic only, never leaves the machine),
+    // line-based control channel, entirely separate from the anonymous
+    // trading protocol on bind_endpoint_. Deliberately hardcoded to
+    // 127.0.0.1 - not configurable to bind elsewhere - since its only
+    // purpose is letting a co-located, already-authenticated-some-other-way
+    // process (the admin page, via its own admin token) change the fee
+    // live, without a mediator restart that would drop every active
+    // connection and room.
+    //
+    // One line in, one line out, connection closed - deliberately not
+    // request/response over a persistent connection, so a slow or hostile
+    // client can only ever tie up one accept() cycle's worth of a thread,
+    // never the whole listener.
+    void admin_control_loop() {
+        const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd < 0) {
+            std::cerr << "admin control: socket() failed\n";
+            return;
+        }
+        const int reuse = 1;
+        ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(admin_port_);
+        if (::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+            std::cerr << "admin control: inet_pton failed\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            std::cerr << "admin control: bind failed on 127.0.0.1:" << admin_port_
+                      << " (" << std::strerror(errno) << ")\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::listen(listen_fd, 8) != 0) {
+            std::cerr << "admin control: listen failed\n";
+            ::close(listen_fd);
+            return;
+        }
+
+        for (;;) {
+            const int client_fd = ::accept(listen_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                continue;
+            }
+            timeval io_timeout{5, 0};
+            ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+            ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+            try {
+                handle_admin_connection(client_fd);
+            } catch (const std::exception& error) {
+                std::cerr << "admin control: " << error.what() << '\n';
+            }
+            ::close(client_fd);
+        }
+    }
+
+    static void send_admin_line(int fd, const std::string& line) {
+        const std::string framed = line + "\n";
+        ::send(fd, framed.data(), framed.size(), 0);
+    }
+
+    void handle_admin_connection(int fd) {
+        std::string line;
+        char buffer[512];
+        for (;;) {
+            const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (received <= 0) {
+                return;
+            }
+            line.append(buffer, static_cast<std::size_t>(received));
+            if (line.find('\n') != std::string::npos || line.size() > 4096U) {
+                break;
+            }
+        }
+        if (const auto newline = line.find('\n'); newline != std::string::npos) {
+            line.resize(newline);
+        }
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::istringstream stream(line);
+        std::string command;
+        std::string token;
+        stream >> command >> token;
+
+        if (admin_token_.empty() || token.size() != admin_token_.size() ||
+            CRYPTO_memcmp(token.data(), admin_token_.data(), token.size()) != 0) {
+            send_admin_line(fd, "ERR unauthorized");
+            return;
+        }
+
+        if (command == "GETFEE") {
+            const FeeTerms fee = current_fee();
+            if (fee.amount == 0U) {
+                send_admin_line(fd, "OK NONE");
+            } else {
+                send_admin_line(fd, "OK " + fee.asset + " " + std::to_string(fee.amount) +
+                                        " " + fee.address);
+            }
+            return;
+        }
+
+        if (command == "SETFEE") {
+            std::string asset;
+            std::string amount_text;
+            std::string address;
+            stream >> asset >> amount_text >> address;
+            try {
+                FeeTerms fee;
+                if (asset != "-" && !asset.empty()) {
+                    std::uint64_t amount = 0U;
+                    const auto [ptr, error] = std::from_chars(
+                        amount_text.data(), amount_text.data() + amount_text.size(), amount, 10);
+                    if (error != std::errc{} || ptr != amount_text.data() + amount_text.size() ||
+                        amount == 0U) {
+                        throw std::invalid_argument("invalid fee amount");
+                    }
+                    fee.asset = asset;
+                    fee.amount = amount;
+                    fee.address = address;
+                    validate_fee_terms(fee);
+                }
+                set_fee(fee);
+                send_admin_line(fd, "OK");
+            } catch (const std::exception& error) {
+                send_admin_line(fd, std::string("ERR ") + error.what());
+            }
+            return;
+        }
+
+        if (command == "LISTPENDINGFEES") {
+            const auto pending = pending_fee_confirmations();
+            if (pending.empty()) {
+                send_admin_line(fd, "OK NONE");
+            } else {
+                std::string ids;
+                for (const auto& room_id : pending) {
+                    if (!ids.empty()) {
+                        ids += ',';
+                    }
+                    ids += room_id_to_hex(room_id);
+                }
+                send_admin_line(fd, "OK " + ids);
+            }
+            return;
+        }
+
+        if (command == "CONFIRMFEE") {
+            std::string room_id_hex;
+            stream >> room_id_hex;
+            try {
+                const RoomId room_id = room_id_from_hex(room_id_hex);
+                if (handle_confirm_fee(room_id)) {
+                    send_admin_line(fd, "OK");
+                } else {
+                    send_admin_line(fd, "ERR no room with that id is waiting for fee confirmation");
+                }
+            } catch (const std::exception& error) {
+                send_admin_line(fd, std::string("ERR ") + error.what());
+            }
+            return;
+        }
+
+        send_admin_line(fd, "ERR unknown command");
+    }
+
     void snapshot_loop() {
         while (snapshot_running_.load()) {
             try {
@@ -1709,11 +2095,19 @@ private:
              << json_escape(bind_endpoint_.host + ":" +
                             std::to_string(bind_endpoint_.port))
              << "\",\"clients\":" << client_count
-             << ",\"pending_invites\":" << pending_invites
-             << ",\"fee_asset\":\"" << json_escape(fee_.asset)
-             << "\",\"fee_amount\":" << fee_.amount
-             << ",\"fee_address\":\"" << json_escape(fee_.address)
-             << "\",\"room_persistence_enabled\":"
+             << ",\"pending_invites\":" << pending_invites;
+        {
+            // This snapshot is the mediator-wide CURRENT fee (what a NEW
+            // offer would be charged right now) - deliberately current_fee(),
+            // unlike a specific room's persisted/reported fee elsewhere in
+            // this file, which must stay pinned to what that room actually
+            // committed to.
+            const FeeTerms fee = current_fee();
+            json << ",\"fee_asset\":\"" << json_escape(fee.asset)
+                 << "\",\"fee_amount\":" << fee.amount
+                 << ",\"fee_address\":\"" << json_escape(fee.address) << "\"";
+        }
+        json << ",\"room_persistence_enabled\":"
              << (room_persistence_path_.empty() ? "false" : "true")
              << ",\"room_persistence_path\":\""
              << json_escape(room_persistence_path_)
@@ -1783,6 +2177,9 @@ private:
     ServerTlsIdentity identity_;
     std::string state_file_;
     std::string room_persistence_path_;
+    // Guards fee_ - see current_fee()/set_fee() above for why every access
+    // goes through those rather than touching fee_ directly.
+    mutable std::mutex fee_mutex_;
     FeeTerms fee_;
     // Phase 6: this mediator's own identifier (matching the "host:port" text
     // convention every client-side mediator_id already uses - see
@@ -1790,6 +2187,16 @@ private:
     // ack's signature to verify) and its receipt-signing keypair.
     std::string mediator_id_;
     Ed25519KeyPair mediator_receipt_keypair_;
+    // Gates admin_control_loop() - see configured_admin_token()'s comment
+    // for why an empty token disables the channel entirely.
+    std::string admin_token_;
+    std::uint16_t admin_port_;
+    // See mediator.hpp's SessionState::WaitingForFeeConfirmation. Captured
+    // once at startup and threaded into every new room's MediatorSession -
+    // not itself live-changeable via the admin channel (unlike the fee
+    // amount/asset/address), so a mediator's whole runtime behaves
+    // consistently for this one setting.
+    bool require_fee_confirmation_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
     std::atomic<std::size_t> pending_handshakes_{0U};
