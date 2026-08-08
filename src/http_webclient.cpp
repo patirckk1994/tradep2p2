@@ -601,6 +601,30 @@ constexpr const char* kPrivacyNotice =
     "stronger privacy guarantees, run the CLI or dashboard client yourself, "
     "ideally over Tor.";
 
+// Same pyramid-with-a-closed-eye mark as the marketing site's
+// assets/img/favicon.svg, inlined as a data URI since this process serves
+// no static files - kept in sync deliberately, used for both the favicon
+// link and the header logo below so there is exactly one copy of the
+// encoded SVG. Closed, not all-seeing: the mediator doesn't watch trades
+// either.
+std::string logo_data_uri() {
+    return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+           "viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' "
+           "fill='%23060605'/%3E%3Crect x='1.5' y='1.5' width='61' "
+           "height='61' rx='9' fill='none' stroke='%232a2a28' "
+           "stroke-width='1.4'/%3E%3Cpath d='M32 11 L56 53 H8 Z' fill='none' "
+           "stroke='%235b8fe6' stroke-width='2.2' "
+           "stroke-linejoin='round'/%3E%3Cpath d='M23.5 26.5 H40.5' "
+           "stroke='%235b8fe6' stroke-width='1.6' stroke-linecap='round'/%3E"
+           "%3Cpath d='M21 36 Q32 41 43 36' fill='none' stroke='%238fb4f2' "
+           "stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M26 38 "
+           "L24.3 42' stroke='%238fb4f2' stroke-width='1.6' "
+           "stroke-linecap='round'/%3E%3Cpath d='M32 39.4 L32 43.6' "
+           "stroke='%238fb4f2' stroke-width='1.6' stroke-linecap='round'/%3E"
+           "%3Cpath d='M38 38 L39.7 42' stroke='%238fb4f2' stroke-width='1.6' "
+           "stroke-linecap='round'/%3E%3C/svg%3E";
+}
+
 // Matches htdocs/assets/css/style.css so this page reads as part of the
 // same site once reverse-proxied under the marketing site's domain.
 std::string page_head(const std::string& title, const std::string& home_url) {
@@ -608,6 +632,8 @@ std::string page_head(const std::string& title, const std::string& home_url) {
     out << "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
         << "<meta name=\"theme-color\" content=\"#f4f2ea\">\n"
+        << "<link rel=\"icon\" type=\"image/svg+xml\" href=\""
+           << logo_data_uri() << "\">\n"
         << "<title>" << title << "</title>\n<style>\n"
         // Same black-figure pottery palette as the marketing site's
         // style.css, kept in sync deliberately: near-black line/text (not
@@ -642,6 +668,10 @@ std::string page_head(const std::string& title, const std::string& home_url) {
         << ".site-strip a{text-decoration:none;font:700 13px \"Courier New\","
            "Courier,monospace;color:var(--text)}\n"
         << ".site-strip span{color:var(--muted);font-size:12px}\n"
+        << ".site-strip a.brand{display:inline-flex;align-items:center;gap:8px}"
+           "\n"
+        << ".brand-mark{display:block;width:24px;height:24px;border-radius:5px}"
+           "\n"
         << ".wrap{width:min(900px,calc(100% - 24px));margin:24px auto 60px}\n"
         << ".wide{width:min(1300px,calc(100% - 24px))}\n"
         << ".panel{position:relative;border:1px solid var(--line);background:"
@@ -690,9 +720,11 @@ std::string page_head(const std::string& title, const std::string& home_url) {
            "between;gap:12px;flex-wrap:wrap}\n"
         << "@media(max-width:760px){.two-col{grid-template-columns:1fr}}\n"
         << "</style>\n</head>\n<body>\n"
-        << "<div class=\"site-strip\"><div class=\"row\"><a href=\"/\">TradeP2P "
-           "web client</a><span>hosted session &middot; not the mediator "
-           "itself</span>";
+        << "<div class=\"site-strip\"><div class=\"row\"><a class=\"brand\" "
+           "href=\"/\"><img class=\"brand-mark\" src=\""
+           << logo_data_uri() << "\" width=\"24\" height=\"24\" alt=\"\">"
+           << "TradeP2P web client</a><span>hosted session &middot; not "
+              "the mediator itself</span>";
     if (!home_url.empty()) {
         out << "<a href=\"" << html_escape(home_url)
             << "\" style=\"margin-left:auto\">&larr; main site</a>";
@@ -1150,7 +1182,8 @@ int main(int argc, char** argv) {
             response.set_header("Cache-Control", "no-store");
             response.set_header("X-Frame-Options", "DENY");
             response.set_header("Content-Security-Policy",
-                                "default-src 'self'; style-src 'unsafe-inline'; "
+                                "default-src 'self'; img-src 'self' data:; "
+                                "style-src 'unsafe-inline'; "
                                 "script-src 'unsafe-inline'; frame-ancestors 'none'");
         };
 
