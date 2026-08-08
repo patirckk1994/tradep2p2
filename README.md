@@ -2,24 +2,68 @@
 
 # UMBRA
 
-**U**ntraceable **M**ediated **B**ilateral **R**outing for **A**ssets — an
-anonymous peer-to-peer trading mediator: a coordination layer that helps two
-parties settle a trade across whatever chains their assets live on, without
-ever holding, inspecting, or verifying the value that moves. Includes an
-optional, additive identity and reputation layer (keystores, a local
-counterparty history, live key-recognition, per-trade ephemeral keys,
-mediator-signed receipts with a griefing-resistant withholding fix, and
-selective private disclosure) that never produces a public transaction graph
-or a mandatory identity.
+**U**ntraceable **M**ediated **B**ilateral **R**outing for **A**ssets.
+
+Trading a crypto asset directly with a stranger, across two chains that
+share no swap primitive, leaves you with bad options: send an exchange your
+identity and your coins and hope it's still solvent next week; send an
+escrow service the same, with the same risk one layer removed; or send the
+counterparty everything up front and hope they reciprocate. Every one of
+those is a single all-or-nothing trust decision, made about someone you
+have no way to vet.
+
+UMBRA doesn't try to remove that trust decision — nothing can, without
+custody or a shared chain to build an atomic swap on. It bounds it instead.
+The mediator never touches, holds, or verifies the assets themselves (which
+is also *why* it works identically across any chain or asset pair, with
+zero integration work): all it coordinates is whose turn it is and whether
+each side has said "sent" and "received." The actual protection comes from
+splitting the trade into many small rounds instead of one big exchange — a
+counterparty who decides to run only ever gets away with the current
+round's fraction of the total, not the whole trade, and the round size is
+yours to choose. No accounts, no KYC, no custody, and — if you want
+continuity across repeat trades without a public transaction graph — an
+optional, off-by-default identity layer that stays local to you.
 
 UMBRA is the project's name; the wire protocol, binaries and source tree
 underneath all keep the existing `tradep2p` naming — this is a branding
 change, not a protocol rename.
 
+## How a trade actually runs
+
+1. **Publish.** Party A offers to sell one asset/amount for another,
+   picks a round count, and gives a receive address. This becomes a room
+   with a random ID — no negotiation, no chat, no direct invite needed.
+2. **Take.** Party B lists open offers, joins one by room ID, and supplies
+   their own receive address. The room is now an active settlement session
+   between two mutually anonymous mediator connections.
+3. **Settle, one round at a time.** The two sides alternate sending
+   tranches of `total / rounds` (remainder distributed across the earliest
+   rounds, so nothing is lost to integer division). Each leg is externally
+   verified and acknowledged before the next begins — the mediator never
+   checks a blockchain itself, it only relays the claim. If either party
+   stops responding, everything already settled stays settled and
+   everything still to come simply never executes; a defector's maximum
+   possible theft is one round's tranche, decided in advance by however
+   many rounds you chose.
+4. **The withholding fix.** Once every round is done, both sides must sign
+   an acknowledgement *before* the mediator will release the final
+   tranche (or its own fee, if one is configured). That signature is the
+   durable proof the trade happened — meaning refusing to cooperate at
+   the very last step no longer lets anyone dodge leaving evidence of an
+   otherwise-honest trade; that evidence is already signed by the time
+   there's anything left to withhold.
+5. **Receipts.** The mediator counter-signs a short, hash-chained pair of
+   receipts over that acknowledgement with its own long-lived key —
+   verifiable proof either party can keep, show selectively to a future
+   counterparty, or ignore entirely. None of it touches a blockchain and
+   none of it is visible to anyone but the two participants.
+
 For the full design rationale — threat model, the six constraints the
-reputation layer must satisfy, what it deliberately does *not* claim to
-solve (Sybil resistance chief among them) — see [`specs.txt`](specs.txt).
-This README is the practical how-to-run-it manual.
+optional reputation layer must satisfy, what it deliberately does *not*
+claim to solve (Sybil resistance chief among them) — see
+[`specs.txt`](specs.txt). This README is the practical how-to-run-it
+manual from here on.
 
 > <img src="docs/assets/qrl-badge.svg" alt="QRL" width="18" height="18" align="absmiddle"> Buy me a coffee or more at the QRL address, so we can fight the all-seeing eye :P
 > ```
