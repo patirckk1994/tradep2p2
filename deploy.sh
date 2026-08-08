@@ -22,6 +22,11 @@ PRODUCTION_WEB="${PRODUCTION_WEB:-/var/www/html/new}"
 GIT_REMOTE="${GIT_REMOTE:-test}"
 PRODUCTION_BRANCH="${PRODUCTION_BRANCH:-main}"
 WEBCLIENT_HOME_URL="${WEBCLIENT_HOME_URL:-http://dq2wrri3nvcmfvmczw36c6npv7rxravi4cnusv5n4c4zihsy4h52ziad.onion/}"
+# The webclient's own admin token (GET /api/admin/accounts) - a DIFFERENT
+# secret from mediator.conf's ADMIN_TOKEN (that one gates the mediator's
+# fee-control channel). Must match config.php's webclient_admin_token on
+# both websites.
+WEBCLIENT_ADMIN_TOKEN="${WEBCLIENT_ADMIN_TOKEN:-b816c456463beff1b31e1ff3912025fe4a641c8b1d0b54170292ae1310f1d2fd}"
 
 # Files synced verbatim from the testing website to production - everything
 # EXCEPT config.php (intentionally different per environment) and
@@ -92,7 +97,7 @@ done
 
 log "building source zip from production HEAD ..."
 ZIP_TMP="$(mktemp)"
-git archive HEAD --prefix=tradep2p2/ -o "$ZIP_TMP"
+git archive HEAD --prefix=tradep2p2/ --format=zip -o "$ZIP_TMP"
 
 log "syncing website files: $TESTING_WEB -> $PRODUCTION_WEB (config.php untouched) ..."
 for item in "${WEB_SYNC_ITEMS[@]}"; do
@@ -120,14 +125,11 @@ nohup ./setup_mediator.sh >/tmp/tradep2p-production-mediator.log 2>&1 &
 disown
 sleep 2
 
-ADMIN_TOKEN_LINE="$(grep '^ADMIN_TOKEN=' mediator.conf || true)"
-ADMIN_TOKEN_VALUE="${ADMIN_TOKEN_LINE#ADMIN_TOKEN=}"
-ADMIN_TOKEN_VALUE="${ADMIN_TOKEN_VALUE//\"/}"
-nohup ./build/tradep2p-webclient client 127.0.0.1:7443 \
+nohup "$PRODUCTION_REPO/build/tradep2p-webclient" client 127.0.0.1:7443 \
     "$(openssl x509 -in certs/mediator.cert.pem -outform DER | openssl dgst -sha256 -hex | awk '{print $2}')" \
     --listen 0.0.0.0 --port 8090 \
     --home-url "$WEBCLIENT_HOME_URL" \
-    --admin-token "$ADMIN_TOKEN_VALUE" \
+    --admin-token "$WEBCLIENT_ADMIN_TOKEN" \
     >/tmp/tradep2p-production-webclient.log 2>&1 &
 disown
 sleep 2
