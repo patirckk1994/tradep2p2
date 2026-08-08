@@ -609,16 +609,34 @@ std::string page_head(const std::string& title, const std::string& home_url) {
         << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
         << "<meta name=\"theme-color\" content=\"#f4f2ea\">\n"
         << "<title>" << title << "</title>\n<style>\n"
-        << ":root{--bg:#f4f2ea;--panel:#fbfaf5;--panel2:#f1efe4;--line:#b8b09a;"
-           "--text:#1a1a15;--muted:#5c5745;--link:#14508c;--accent:#2f6d3a;"
-           "--accent-soft:#e4ecdf;--amber:#8a5a10;--danger:#8a2f2a}\n"
+        // Same black-figure pottery palette as the marketing site's
+        // style.css, kept in sync deliberately: near-black line/text (not
+        // tan - reads "coastal"), deep Egyptian-blue accent (a color real
+        // Greek temples/pottery used, unlike the marble-white myth).
+        << ":root{--bg:#f4f2ea;--panel:#fbfaf5;--panel2:#f1efe4;--line:#2a2a28;"
+           "--text:#17140f;--muted:#55503f;--link:#1a3f8f;--accent:#1a3f8f;"
+           "--accent-soft:#dde6f5;--amber:#8a5a10;--danger:#8a2f2a;"
+           "--serif:Cambria,Georgia,\"Times New Roman\",Times,serif;"
+           // Same meander (Greek key) tile as the marketing site's
+           // style.css, kept in sync deliberately - see that file's comment.
+           // Used as a frieze between every .panel and the page background
+           // (not just header/footer), same reasoning as that file's
+           // section::after. Painted in the accent blue, same reasoning.
+           "--meander:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3."
+           "org/2000/svg' width='24' height='14'%3E%3Cpath d='M0 12 L0 2 L8 "
+           "2 L8 7 L16 7 L16 2 L24 2' fill='none' stroke='%231a3f8f' "
+           "stroke-width='2.2'/%3E%3C/svg%3E\")}\n"
         << "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:"
            "var(--text);font:15px/1.55 Verdana,Geneva,Arial,\"Helvetica Neue\","
            "Helvetica,sans-serif}\n"
         << "a{color:var(--link)}code{font-family:\"Courier New\",Courier,"
            "monospace}\n"
-        << ".site-strip{border-bottom:3px double var(--line);background:var(--"
-           "panel)}\n"
+        << "h1,h2,h3{font-family:var(--serif);letter-spacing:.01em}\n"
+        << ".site-strip{position:relative;border-bottom:3px double var(--"
+           "line);background:var(--panel)}\n"
+        << ".site-strip::after{content:\"\";display:block;height:14px;"
+           "background-image:var(--meander);background-repeat:repeat-x;"
+           "background-position:center;opacity:.8}\n"
         << ".site-strip .row{width:min(900px,calc(100% - 24px));margin:0 auto;"
            "min-height:44px;justify-content:space-between}\n"
         << ".site-strip a{text-decoration:none;font:700 13px \"Courier New\","
@@ -626,8 +644,12 @@ std::string page_head(const std::string& title, const std::string& home_url) {
         << ".site-strip span{color:var(--muted);font-size:12px}\n"
         << ".wrap{width:min(900px,calc(100% - 24px));margin:24px auto 60px}\n"
         << ".wide{width:min(1300px,calc(100% - 24px))}\n"
-        << ".panel{border:1px solid var(--line);background:var(--panel);"
-           "padding:18px;margin-bottom:14px}\n"
+        << ".panel{position:relative;border:1px solid var(--line);background:"
+           "var(--panel);padding:18px;margin-bottom:26px}\n"
+        << ".panel::after{content:\"\";display:block;position:absolute;left:0;"
+           "right:0;bottom:-20px;height:12px;background-image:var(--meander);"
+           "background-repeat:repeat-x;background-position:center;opacity:.8}"
+           "\n"
         << ".warning{border:1px solid var(--amber);background:#f6ecd9;color:"
            "#5a4110;padding:14px 16px;margin-bottom:18px;line-height:1.6}\n"
         << ".warning b{color:var(--amber)}\n"
@@ -642,7 +664,7 @@ std::string page_head(const std::string& title, const std::string& home_url) {
            "cursor:pointer}\n"
         << "button:hover{background:var(--accent-soft)}button.primary{"
            "background:var(--accent);border-color:var(--accent);color:#fff}"
-           "button.primary:hover{background:#285c31}button.danger{border-color:"
+           "button.primary:hover{background:#12295e}button.danger{border-color:"
            "var(--danger);color:var(--danger)}\n"
         << ".row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}\n"
         << ".two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}\n"
