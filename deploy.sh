@@ -58,15 +58,21 @@ for t in tradep2p_unit_tests tradep2p_journal_tests tradep2p_recovery_tests \
     "$bin"
 done
 
-log "fast-forwarding $PRODUCTION_BRANCH to $TESTING_BRANCH ..."
-if ! git merge-base --is-ancestor "$PRODUCTION_BRANCH" "$TESTING_BRANCH"; then
-    fail "$PRODUCTION_BRANCH has commits not in $TESTING_BRANCH - this script only fast-forwards, resolve manually first"
-fi
-git branch -f "$PRODUCTION_BRANCH" "$TESTING_BRANCH"
+# main is checked out in the production worktree, so it can't be
+# force-moved from here (git refuses to update a branch checked out
+# elsewhere) - push straight to the remote ref instead. git itself then
+# enforces the fast-forward-only guarantee server-side (a real check
+# against the remote's actual current state, not a possibly-stale local
+# ref), so a diverged main safely aborts here rather than silently
+# rewriting history.
+log "fetching $PRODUCTION_BRANCH from $GIT_REMOTE for an up-to-date fast-forward check ..."
+git fetch "$GIT_REMOTE" "$PRODUCTION_BRANCH"
 
-log "pushing $TESTING_BRANCH and $PRODUCTION_BRANCH to $GIT_REMOTE ..."
+log "pushing $TESTING_BRANCH to $GIT_REMOTE ..."
 git push "$GIT_REMOTE" "$TESTING_BRANCH"
-git push "$GIT_REMOTE" "$PRODUCTION_BRANCH"
+
+log "fast-forwarding $GIT_REMOTE/$PRODUCTION_BRANCH to $TESTING_BRANCH ..."
+git push "$GIT_REMOTE" "$TESTING_BRANCH:$PRODUCTION_BRANCH"
 
 log "updating production worktree ($PRODUCTION_REPO) ..."
 cd "$PRODUCTION_REPO"
