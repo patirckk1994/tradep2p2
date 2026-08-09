@@ -391,7 +391,7 @@ control the same key I've seen before on this mediator?* Nothing more — not
 "trustworthy," not "verified human." Run it once you're in a room together:
 
 ```text
-/recognize ROOM_ID [ed25519|ml-dsa-65]
+/recognize ROOM_ID [ml-dsa-65|ed25519]
 ```
 
 This sends a live, single-use, expiring challenge to the counterparty (or

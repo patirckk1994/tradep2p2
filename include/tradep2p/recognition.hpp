@@ -220,15 +220,15 @@ public:
     // prune by calling expire_stale() first, or simply retry after the
     // oldest challenges age out).
     // `suite_id` picks which suite the PROVER must answer with -
-    // kRecognitionSuiteEd25519V1 (default, unchanged behavior for existing
-    // callers) or kRecognitionSuiteMlDsa65V1. consume() below independently
-    // re-checks the response's own suite_id against this challenge's before
-    // ever calling into either suite's verify path - a prover cannot answer
+    // kRecognitionSuiteMlDsa65V1 (default - post-quantum) or
+    // kRecognitionSuiteEd25519V1. consume() below independently re-checks
+    // the response's own suite_id against this challenge's before ever
+    // calling into either suite's verify path - a prover cannot answer
     // under a different suite than it was challenged with.
     [[nodiscard]] RecognitionChallengeFields issue(const std::string& mediator_id,
                                                     const RoomId& room_id,
                                                     std::uint64_t now = 0,
-                                                    std::uint16_t suite_id = kRecognitionSuiteEd25519V1);
+                                                    std::uint16_t suite_id = kRecognitionSuiteMlDsa65V1);
 
     // Verifies and single-use-consumes `response` against a previously
     // issued challenge for `mediator_id`. Returns the sha256 fingerprint of

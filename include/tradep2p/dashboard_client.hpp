@@ -183,9 +183,10 @@ public:
     // ANSWERING a challenge does (see set_recognition_key_provider()); the
     // verifier side only needs to generate and send a nonce. `suite_id`
     // picks which suite the COUNTERPARTY must answer with -
-    // kRecognitionSuiteEd25519V1 (default) or kRecognitionSuiteMlDsa65V1.
+    // kRecognitionSuiteMlDsa65V1 (default - post-quantum) or
+    // kRecognitionSuiteEd25519V1.
     void recognize(const std::string& room_text,
-                    std::uint16_t suite_id = tradep2p::kRecognitionSuiteEd25519V1);
+                    std::uint16_t suite_id = tradep2p::kRecognitionSuiteMlDsa65V1);
 
     // These two callbacks bridge into http_dashboard.cpp's
     // IdentityDashboardState (keystore/history), which this module

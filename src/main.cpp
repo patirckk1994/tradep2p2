@@ -181,7 +181,7 @@ void print_client_help() {
         << "  /abort ROOM_ID\n"
         << "  /recovery request ROOM_ID\n"
         << "      ask the mediator what it has on file for a room you remember\n"
-        << "  /recognize ROOM_ID [ed25519|ml-dsa-65]\n"
+        << "  /recognize ROOM_ID [ml-dsa-65|ed25519]\n"
         << "      requires an unlocked keystore; asks the counterparty in that room to prove\n"
         << "      control of their per-mediator pseudonym key, right now - a locally-verified\n"
         << "      \"have I traded with this key before\" count, nothing more (specs.txt SS8);\n"
@@ -1086,19 +1086,19 @@ bool handle_client_line(SecureChannel& channel,
         std::string suite_text;
         std::string extra;
         if (!(stream >> room_text)) {
-            throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+            throw std::invalid_argument("usage: /recognize ROOM_ID [ml-dsa-65|ed25519]");
         }
-        std::uint16_t suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+        std::uint16_t suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
         if (stream >> suite_text) {
             if (suite_text == "ed25519") {
                 suite_id = tradep2p::kRecognitionSuiteEd25519V1;
             } else if (suite_text == "ml-dsa-65") {
                 suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
             } else {
-                throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+                throw std::invalid_argument("usage: /recognize ROOM_ID [ml-dsa-65|ed25519]");
             }
             if (stream >> extra) {
-                throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+                throw std::invalid_argument("usage: /recognize ROOM_ID [ml-dsa-65|ed25519]");
             }
         }
         require_unlocked_keystore(state);

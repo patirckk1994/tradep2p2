@@ -115,7 +115,7 @@ void test_sign_verify_round_trip() {
 void test_prover_supplied_nonce_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(4), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(4), 1000, tradep2p::kRecognitionSuiteEd25519V1);
 
     tradep2p::RecognitionChallengeFields forged_fields = issued;
     forged_fields.nonce = tradep2p::generate_recognition_nonce(); // prover invents its own nonce
@@ -140,7 +140,7 @@ void test_prover_supplied_nonce_rejected() {
 void test_replay_of_consumed_challenge_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(5), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(5), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     const auto response = sign_response(issued, prover);
 
     const auto first = tracker.consume("mediator-a", response, 1010);
@@ -159,7 +159,7 @@ void test_single_use_second_response_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover_a = fresh_keypair();
     const auto prover_b = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(6), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(6), 1000, tradep2p::kRecognitionSuiteEd25519V1);
 
     const auto response_a = sign_response(issued, prover_a);
     const auto first = tracker.consume("mediator-a", response_a, 1010);
@@ -181,7 +181,7 @@ void test_single_use_second_response_rejected() {
 void test_expired_challenge_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(7), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(7), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     require(issued.expires_at > issued.created_at, "issued challenge must have a real expiry window");
 
     const auto response = sign_response(issued, prover);
@@ -197,10 +197,10 @@ void test_expired_challenge_rejected() {
 void test_cross_room_replay_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued_room_a = tracker.issue("mediator-a", room_id(8), 1000);
+    const auto issued_room_a = tracker.issue("mediator-a", room_id(8), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     // A second, unrelated outstanding challenge in a different room -
     // consume() must not accidentally match against it.
-    (void)tracker.issue("mediator-a", room_id(9), 1000);
+    (void)tracker.issue("mediator-a", room_id(9), 1000, tradep2p::kRecognitionSuiteEd25519V1);
 
     tradep2p::RecognitionResponseMessage response = sign_response(issued_room_a, prover);
     response.room_id = room_id(9); // claim this signature answers the OTHER room
@@ -212,7 +212,7 @@ void test_cross_room_replay_rejected() {
 void test_cross_mediator_replay_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(10), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(10), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     const auto response = sign_response(issued, prover);
 
     // The same tracker instance, but the verifier now looks the response up
@@ -258,7 +258,7 @@ void test_scope_isolation_produces_unrelated_fingerprints() {
 
 void test_malformed_public_key_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
-    const auto issued = tracker.issue("mediator-a", room_id(11), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(11), 1000, tradep2p::kRecognitionSuiteEd25519V1);
 
     tradep2p::RecognitionResponseMessage response;
     response.room_id = issued.room_id;
@@ -274,7 +274,7 @@ void test_malformed_public_key_rejected() {
 void test_wrong_signature_rejected() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(12), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(12), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     auto response = sign_response(issued, prover);
     response.signature[0] ^= 0xFFU; // corrupt one byte of an otherwise-genuine signature
 
@@ -306,7 +306,7 @@ void test_unknown_nonce_rejected() {
 void test_expire_stale_prunes_and_prevents_late_consumption() {
     tradep2p::RecognitionChallengeTracker tracker;
     const auto prover = fresh_keypair();
-    const auto issued = tracker.issue("mediator-a", room_id(14), 1000);
+    const auto issued = tracker.issue("mediator-a", room_id(14), 1000, tradep2p::kRecognitionSuiteEd25519V1);
     require(tracker.outstanding_count() == 1U, "issuing must record exactly one outstanding challenge");
 
     tracker.expire_stale(issued.expires_at + 1U);
