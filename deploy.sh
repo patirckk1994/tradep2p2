@@ -86,7 +86,8 @@ log "building production ..."
 mkdir -p build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build -j"$(nproc)"
-for t in tradep2p_unit_tests tradep2p_journal_tests tradep2p_recovery_tests tradep2p_receipt_tests; do
+for t in tradep2p_unit_tests tradep2p_journal_tests tradep2p_recovery_tests tradep2p_receipt_tests \
+         tradep2p_recognition_tests; do
     bin="build/$t"
     [[ -x "$bin" ]] || continue
     log "  production: $t"
