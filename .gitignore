@@ -40,3 +40,7 @@ trace_dump.txt
 securitynote.txt
 docs.zip
 docs (2)/
+
+# Local MCP server config (Claude Code) - absolute machine-specific paths,
+# not portable across checkouts.
+/.mcp.json
