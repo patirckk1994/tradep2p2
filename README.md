@@ -391,7 +391,7 @@ control the same key I've seen before on this mediator?* Nothing more — not
 "trustworthy," not "verified human." Run it once you're in a room together:
 
 ```text
-/recognize ROOM_ID
+/recognize ROOM_ID [ed25519|ml-dsa-65]
 ```
 
 This sends a live, single-use, expiring challenge to the counterparty (or
@@ -399,7 +399,9 @@ auto-answers one if they send it to you and your keystore is unlocked). A
 successful proof looks up and prints your local settlement/incomplete count
 for that key. An unknown key is the *normal* case for a stranger — it is
 never shown as a warning. `tradep2p-dashboard` has an equivalent
-"Recognize counterparty" button per room.
+"Recognize counterparty" button per room (Ed25519 only — see
+[Post-quantum posture](#post-quantum-posture) for the `ml-dsa-65` option,
+CLI-only for now).
 
 ### 5. Per-trade ephemeral identities
 
@@ -511,12 +513,19 @@ precise about which is covered:
   `start_dashboard.sh`) use `ML-DSA-65` (FIPS 204), OpenSSL 3.5+'s
   standardized post-quantum signature, instead of RSA/ECDSA.
 
-Mediator receipt-signing keys (the application-layer signed objects —
-recognition, receipts, disclosure, login — see
-[§6](#6-mediator-signed-receipts-and-the-withholding-fix)) remain
-classical-only (Ed25519) for now, which matters more than most other keys
-here since receipts are meant to stay verifiable for years — a real, open
-item, not yet built. Full posture and reasoning: `specs.txt` §11.
+The application-layer signed objects — recognition, receipts, disclosure,
+login — are Ed25519 by default, and mostly still Ed25519-only. **Counterparty
+recognition** (phase 4b — [§4](#4-counterparty-recognition)) is the one exception: it now supports
+an optional `ML-DSA-65` suite alongside Ed25519, selected per-challenge
+(`/recognize ROOM_ID ml-dsa-65` on the CLI). A prover answers under
+whichever suite the challenge named — never a suite of its own choosing —
+and the wire frame cap was raised from 4096 to 8192 bytes to fit an
+ML-DSA-65 public key (1952 bytes) and signature (3309 bytes), which don't
+fit the old limit. Receipts, disclosure, and login remain classical-only for
+now — explicitly out of scope for this change, not overlooked; receipts in
+particular matter more than most keys here since they're meant to stay
+verifiable for years, so that's the natural next candidate. Full posture and
+reasoning: `specs.txt` §11.
 
 ## Semi-centralized node registry
 

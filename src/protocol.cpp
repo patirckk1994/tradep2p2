@@ -46,6 +46,19 @@ public:
         out_.insert(out_.end(), value.begin(), value.end());
     }
 
+    // Same u16-length-prefix pattern as short_string(), for variable-length
+    // binary data instead of text - added for RecognitionResponseMessage's
+    // suite-dependent key/signature fields, reusable for any future
+    // variable-length binary field.
+    void bytes(std::span<const std::uint8_t> value, std::size_t maximum) {
+        if (value.size() > maximum ||
+            value.size() > std::numeric_limits<std::uint16_t>::max()) {
+            throw std::invalid_argument("byte field exceeds protocol limit");
+        }
+        u16(static_cast<std::uint16_t>(value.size()));
+        out_.insert(out_.end(), value.begin(), value.end());
+    }
+
     [[nodiscard]] std::vector<std::uint8_t> take() { return std::move(out_); }
 
 private:
@@ -106,6 +119,20 @@ public:
         require(length);
         std::string result(
             reinterpret_cast<const char*>(input_.data() + position_), length);
+        position_ += length;
+        return result;
+    }
+
+    // Mirrors short_string() above, for variable-length binary data.
+    [[nodiscard]] std::vector<std::uint8_t> bytes(std::size_t maximum) {
+        const auto length = static_cast<std::size_t>(u16());
+        if (length > maximum) {
+            throw std::runtime_error("encoded byte field exceeds protocol limit");
+        }
+        require(length);
+        std::vector<std::uint8_t> result(
+            input_.begin() + static_cast<std::ptrdiff_t>(position_),
+            input_.begin() + static_cast<std::ptrdiff_t>(position_ + length));
         position_ += length;
         return result;
     }
@@ -1063,8 +1090,9 @@ std::vector<std::uint8_t> encode_recognition_response(const RecognitionResponseM
     Writer writer;
     writer.fixed_id(message.room_id);
     writer.fixed_id(message.nonce);
-    writer.fixed_id(message.prover_public_key);
-    writer.fixed_id(message.signature);
+    writer.u16(message.suite_id);
+    writer.bytes(message.prover_public_key, kRecognitionMaxPublicKeyLength);
+    writer.bytes(message.signature, kRecognitionMaxSignatureLength);
     return writer.take();
 }
 
@@ -1074,8 +1102,9 @@ RecognitionResponseMessage decode_recognition_response(std::span<const std::uint
     message.room_id = reader.fixed_id<32U>();
     validate_room_id(message.room_id);
     message.nonce = reader.fixed_id<kRecognitionNonceLength>();
-    message.prover_public_key = reader.fixed_id<kRecognitionPublicKeyLength>();
-    message.signature = reader.fixed_id<kRecognitionSignatureLength>();
+    message.suite_id = reader.u16();
+    message.prover_public_key = reader.bytes(kRecognitionMaxPublicKeyLength);
+    message.signature = reader.bytes(kRecognitionMaxSignatureLength);
     reader.require_finished();
     return message;
 }

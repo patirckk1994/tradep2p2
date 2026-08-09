@@ -20,6 +20,7 @@ void EvpPkeyDeleter::operator()(EVP_PKEY* key) const noexcept { EVP_PKEY_free(ke
 void EvpMdCtxDeleter::operator()(EVP_MD_CTX* ctx) const noexcept { EVP_MD_CTX_free(ctx); }
 void EvpKdfDeleter::operator()(EVP_KDF* kdf) const noexcept { EVP_KDF_free(kdf); }
 void EvpKdfCtxDeleter::operator()(EVP_KDF_CTX* ctx) const noexcept { EVP_KDF_CTX_free(ctx); }
+void EvpPkeyCtxDeleter::operator()(EVP_PKEY_CTX* ctx) const noexcept { EVP_PKEY_CTX_free(ctx); }
 
 // ---------------------------------------------------------------------------
 // SensitiveBytes<N>::clear()
@@ -30,13 +31,15 @@ void SensitiveBytes<N>::clear() noexcept {
     OPENSSL_cleanse(bytes_.data(), bytes_.size());
 }
 
-// kMasterSecretLength, kDerivedKeyLength, and kEd25519PrivateSeedLength are
-// all 32 today, so MasterSecret/DerivedKey/Ed25519PrivateSeed are all
-// literally the same SensitiveBytes<32> type - one explicit instantiation
-// covers all three aliases. If any of these sizes ever diverges, a second
-// explicit instantiation line must be added here for the new size.
+// kMasterSecretLength, kDerivedKeyLength, kEd25519PrivateSeedLength, and
+// kMlDsa65SeedLength are all 32 today, so MasterSecret/DerivedKey/
+// Ed25519PrivateSeed/MlDsa65PrivateSeed are all literally the same
+// SensitiveBytes<32> type - one explicit instantiation covers all four
+// aliases. If any of these sizes ever diverges, a second explicit
+// instantiation line must be added here for the new size.
 static_assert(kMasterSecretLength == kDerivedKeyLength &&
-                  kDerivedKeyLength == kEd25519PrivateSeedLength,
+                  kDerivedKeyLength == kEd25519PrivateSeedLength &&
+                  kEd25519PrivateSeedLength == kMlDsa65SeedLength,
               "SensitiveBytes explicit instantiation below assumes these sizes match; "
               "add another `template class SensitiveBytes<N>;` line if they diverge");
 template class SensitiveBytes<kMasterSecretLength>;
@@ -344,6 +347,146 @@ bool ed25519_verify(const Ed25519PublicKey& public_key, std::span<const std::uin
                      const Ed25519Signature& signature) {
     const EvpPkeyPtr key = load_ed25519_public_key(public_key);
     return ed25519_verify(key.get(), message, signature);
+}
+
+// ---------------------------------------------------------------------------
+// ML-DSA-65 (FIPS 204, post-quantum)
+// ---------------------------------------------------------------------------
+
+EvpPkeyPtr load_mldsa65_private_key(const MlDsa65PrivateSeed& seed) {
+    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_name(nullptr, "ML-DSA-65", nullptr));
+    if (!ctx) {
+        throw_openssl_error("failed to create ML-DSA-65 keygen context");
+    }
+    if (EVP_PKEY_keygen_init(ctx.get()) <= 0) {
+        throw_openssl_error("EVP_PKEY_keygen_init failed for ML-DSA-65");
+    }
+
+    // "seed" is the exact OSSL_PARAM key ML-DSA-65 keygen accepts for
+    // deterministic seed-based generation on this OpenSSL build - confirmed
+    // via EVP_PKEY_CTX_settable_params() against OpenSSL 3.5.5, not
+    // assumed. OSSL_PARAM_construct_octet_string wants a non-const void*;
+    // the KDF/keygen only reads through it, matching hkdf_sha256()'s same
+    // const_cast usage above for the identical reason.
+    std::array<OSSL_PARAM, 2> params{};
+    params[0] = OSSL_PARAM_construct_octet_string(
+        "seed", const_cast<std::uint8_t*>(seed.data()), seed.size());
+    params[1] = OSSL_PARAM_construct_end();
+    if (EVP_PKEY_CTX_set_params(ctx.get(), params.data()) <= 0) {
+        throw_openssl_error("failed to set ML-DSA-65 seed parameter");
+    }
+
+    EVP_PKEY* raw_key = nullptr;
+    if (EVP_PKEY_keygen(ctx.get(), &raw_key) <= 0) {
+        throw_openssl_error("ML-DSA-65 keygen failed");
+    }
+    return EvpPkeyPtr(raw_key);
+}
+
+EvpPkeyPtr load_mldsa65_public_key(const MlDsa65PublicKey& public_key) {
+    // ML-DSA has no legacy fixed EVP_PKEY_* NID the way Ed25519 does (it is
+    // provider-supplied), so reconstructing a public-key-only EVP_PKEY from
+    // raw bytes uses the newer name-based "_ex" constructor instead of
+    // EVP_PKEY_new_raw_public_key - verified against this OpenSSL build to
+    // correctly round-trip (sign with a full keypair, verify against a
+    // public-only key reconstructed this way from just its raw bytes).
+    EvpPkeyPtr key(EVP_PKEY_new_raw_public_key_ex(
+        nullptr, "ML-DSA-65", nullptr, public_key.data(), public_key.size()));
+    if (!key) {
+        throw_openssl_error("failed to load ML-DSA-65 public key");
+    }
+    return key;
+}
+
+std::optional<MlDsa65PublicKey> parse_mldsa65_public_key(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() != kMlDsa65PublicKeyLength) {
+        return std::nullopt;
+    }
+    MlDsa65PublicKey key{};
+    std::copy_n(bytes.begin(), kMlDsa65PublicKeyLength, key.begin());
+    const bool all_zero = std::all_of(key.begin(), key.end(),
+                                       [](std::uint8_t byte) { return byte == 0U; });
+    if (all_zero) {
+        return std::nullopt;
+    }
+    return key;
+}
+
+MlDsa65KeyPair derive_mldsa65_keypair(const MasterSecret& master_secret,
+                                       std::string_view label,
+                                       std::string_view identifier) {
+    static_assert(kDerivedKeyLength == kMlDsa65SeedLength,
+                  "derived scoped key must be exactly the ML-DSA-65 seed length");
+
+    DerivedKey derived = derive_scoped_key(master_secret, label, identifier);
+
+    MlDsa65KeyPair pair;
+    pair.private_seed = MlDsa65PrivateSeed(derived.bytes());
+    derived.clear();
+
+    const EvpPkeyPtr key = load_mldsa65_private_key(pair.private_seed);
+    std::size_t pub_len = pair.public_key.size();
+    if (EVP_PKEY_get_octet_string_param(key.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                         pair.public_key.data(), pair.public_key.size(),
+                                         &pub_len) != 1 ||
+        pub_len != kMlDsa65PublicKeyLength) {
+        throw_openssl_error("failed to extract ML-DSA-65 public key from derived seed");
+    }
+    return pair;
+}
+
+MlDsa65Signature mldsa65_sign(EVP_PKEY* private_key, std::span<const std::uint8_t> message) {
+    if (private_key == nullptr) {
+        throw std::invalid_argument("mldsa65_sign: null private key");
+    }
+
+    EvpMdCtxPtr md_ctx(EVP_MD_CTX_new());
+    if (!md_ctx) {
+        throw_openssl_error("failed to allocate EVP_MD_CTX");
+    }
+    // ML-DSA is also a "pure" signature scheme (no external prehash) - the
+    // digest argument to EVP_DigestSignInit must be null, same as Ed25519.
+    if (EVP_DigestSignInit(md_ctx.get(), nullptr, nullptr, nullptr, private_key) != 1) {
+        throw_openssl_error("EVP_DigestSignInit failed");
+    }
+
+    MlDsa65Signature signature{};
+    std::size_t sig_len = signature.size();
+    if (EVP_DigestSign(md_ctx.get(), signature.data(), &sig_len, message.data(),
+                        message.size()) != 1 ||
+        sig_len != kMlDsa65SignatureLength) {
+        throw_openssl_error("EVP_DigestSign failed");
+    }
+    return signature;
+}
+
+bool mldsa65_verify(EVP_PKEY* public_key, std::span<const std::uint8_t> message,
+                     const MlDsa65Signature& signature) {
+    if (public_key == nullptr) {
+        return false;
+    }
+
+    EvpMdCtxPtr md_ctx(EVP_MD_CTX_new());
+    if (!md_ctx) {
+        throw_openssl_error("failed to allocate EVP_MD_CTX");
+    }
+    if (EVP_DigestVerifyInit(md_ctx.get(), nullptr, nullptr, nullptr, public_key) != 1) {
+        throw_openssl_error("EVP_DigestVerifyInit failed");
+    }
+
+    // One-shot verify; a return value other than 1 means "does not verify" -
+    // never treat it as a thrown error, matching ed25519_verify()'s exact
+    // rationale (a malicious/malformed input reaching this function is
+    // expected, not exceptional).
+    const int result = EVP_DigestVerify(md_ctx.get(), signature.data(), signature.size(),
+                                         message.data(), message.size());
+    return result == 1;
+}
+
+bool mldsa65_verify(const MlDsa65PublicKey& public_key, std::span<const std::uint8_t> message,
+                     const MlDsa65Signature& signature) {
+    const EvpPkeyPtr key = load_mldsa65_public_key(public_key);
+    return mldsa65_verify(key.get(), message, signature);
 }
 
 // ---------------------------------------------------------------------------

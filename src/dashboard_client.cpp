@@ -814,8 +814,21 @@ void DashboardClient::handle_frame(const Frame& frame) {
             RecognitionResponseMessage response;
             response.room_id = challenge_to_answer->room_id;
             response.nonce = challenge_to_answer->nonce;
-            response.prover_public_key = key->public_key;
-            response.signature = tradep2p::sign_recognition_response(key->private_seed, fields);
+            // The dashboard only ever holds an Ed25519 pseudonym key today
+            // (no ML-DSA-65 derivation here) - explicit suite_id rather than
+            // relying on the struct's default, so this stays correct even
+            // if that default ever changes. A challenge naming the PQ suite
+            // (fields.suite_id above) still gets propagated into `fields`
+            // for the signed payload, but this response's own suite_id
+            // deliberately stays Ed25519 - RecognitionChallengeTracker::
+            // consume() on the other end rejects the mismatch cleanly
+            // rather than accepting a wrong-algorithm answer.
+            response.suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+            const Ed25519PublicKey& prover_public_key = key->public_key;
+            response.prover_public_key.assign(prover_public_key.begin(), prover_public_key.end());
+            const Ed25519Signature signature =
+                tradep2p::sign_recognition_response(key->private_seed, fields);
+            response.signature.assign(signature.begin(), signature.end());
             {
                 std::scoped_lock lock(state_mutex_);
                 auto& room = rooms_[room_id];

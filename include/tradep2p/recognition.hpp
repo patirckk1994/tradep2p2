@@ -92,6 +92,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -102,6 +103,10 @@ namespace tradep2p {
 // post-quantum suite can be added additively rather than requiring every
 // verifier to be reissued.
 constexpr std::uint16_t kRecognitionSuiteEd25519V1 = 0x0001;
+// Post-quantum (FIPS 204). Added additively, exactly as the comment above
+// anticipated - see identity.hpp's ML-DSA-65 section for the primitives
+// this suite is built on.
+constexpr std::uint16_t kRecognitionSuiteMlDsa65V1 = 0x0002;
 
 inline constexpr std::string_view kRecognitionChallengeDomainLabel =
     "TRADEP2P_RECOGNITION_CHALLENGE_V1";
@@ -154,9 +159,19 @@ struct RecognitionChallengeFields {
 [[nodiscard]] RecognitionNonce generate_recognition_nonce();
 
 // Signs encode_recognition_signed_payload(fields) with the prover's
-// per-mediator pseudonym private key.
+// per-mediator pseudonym private key. `fields.suite_id` should be
+// kRecognitionSuiteEd25519V1 - it's embedded in the signed payload, so
+// signing under the wrong suite_id here produces a signature that will
+// simply fail verification, not a security hole (RecognitionChallengeTracker
+//::consume() below independently confirms the response's suite_id matches
+// the challenge's own before ever calling into either suite's verify path).
 [[nodiscard]] Ed25519Signature sign_recognition_response(const Ed25519PrivateSeed& prover_private_seed,
                                                           const RecognitionChallengeFields& fields);
+
+// Post-quantum counterpart of the above - same contract, `fields.suite_id`
+// should be kRecognitionSuiteMlDsa65V1.
+[[nodiscard]] MlDsa65Signature sign_recognition_response_mldsa65(
+    const MlDsa65PrivateSeed& prover_private_seed, const RecognitionChallengeFields& fields);
 
 // Verifies `signature` over encode_recognition_signed_payload(fields) under
 // `prover_public_key`. This alone does NOT check freshness/single-use/
@@ -170,11 +185,20 @@ struct RecognitionChallengeFields {
                                                 const RecognitionChallengeFields& fields,
                                                 const Ed25519Signature& signature);
 
-// sha256 of a raw 32-byte Ed25519 public key - the fingerprint convention
-// this phase feeds into history.hpp's CounterpartyFingerprint (also a
-// 32-byte array; the two types are layout-compatible by construction).
+// Post-quantum counterpart of the above.
+[[nodiscard]] bool verify_recognition_response_mldsa65(const MlDsa65PublicKey& prover_public_key,
+                                                        const RecognitionChallengeFields& fields,
+                                                        const MlDsa65Signature& signature);
+
+// sha256 of a raw public key, suite-agnostic (fingerprinting doesn't care
+// which algorithm produced the bytes) - the fingerprint convention this
+// phase feeds into history.hpp's CounterpartyFingerprint (also a 32-byte
+// array; the two types are layout-compatible by construction). Both
+// Ed25519PublicKey and MlDsa65PublicKey (fixed std::arrays) convert to
+// std::span implicitly, so existing Ed25519 call sites are unaffected by
+// this generalization.
 [[nodiscard]] std::array<std::uint8_t, 32> recognition_fingerprint(
-    const Ed25519PublicKey& public_key);
+    std::span<const std::uint8_t> public_key);
 
 // ---------------------------------------------------------------------------
 // RecognitionChallengeTracker
@@ -195,9 +219,16 @@ public:
     // would exceed kRecognitionMaxOutstandingChallenges (a caller should
     // prune by calling expire_stale() first, or simply retry after the
     // oldest challenges age out).
+    // `suite_id` picks which suite the PROVER must answer with -
+    // kRecognitionSuiteEd25519V1 (default, unchanged behavior for existing
+    // callers) or kRecognitionSuiteMlDsa65V1. consume() below independently
+    // re-checks the response's own suite_id against this challenge's before
+    // ever calling into either suite's verify path - a prover cannot answer
+    // under a different suite than it was challenged with.
     [[nodiscard]] RecognitionChallengeFields issue(const std::string& mediator_id,
                                                     const RoomId& room_id,
-                                                    std::uint64_t now = 0);
+                                                    std::uint64_t now = 0,
+                                                    std::uint16_t suite_id = kRecognitionSuiteEd25519V1);
 
     // Verifies and single-use-consumes `response` against a previously
     // issued challenge for `mediator_id`. Returns the sha256 fingerprint of

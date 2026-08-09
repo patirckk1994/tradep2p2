@@ -105,6 +105,13 @@ Ed25519Signature sign_recognition_response(const Ed25519PrivateSeed& prover_priv
     return ed25519_sign(prover_private_seed, payload);
 }
 
+MlDsa65Signature sign_recognition_response_mldsa65(const MlDsa65PrivateSeed& prover_private_seed,
+                                                    const RecognitionChallengeFields& fields) {
+    const std::vector<std::uint8_t> payload = encode_recognition_signed_payload(fields);
+    const EvpPkeyPtr key = load_mldsa65_private_key(prover_private_seed);
+    return mldsa65_sign(key.get(), payload);
+}
+
 bool verify_recognition_response(const Ed25519PublicKey& prover_public_key,
                                   const RecognitionChallengeFields& fields,
                                   const Ed25519Signature& signature) {
@@ -112,13 +119,21 @@ bool verify_recognition_response(const Ed25519PublicKey& prover_public_key,
     return ed25519_verify(prover_public_key, payload, signature);
 }
 
-std::array<std::uint8_t, 32> recognition_fingerprint(const Ed25519PublicKey& public_key) {
+bool verify_recognition_response_mldsa65(const MlDsa65PublicKey& prover_public_key,
+                                          const RecognitionChallengeFields& fields,
+                                          const MlDsa65Signature& signature) {
+    const std::vector<std::uint8_t> payload = encode_recognition_signed_payload(fields);
+    return mldsa65_verify(prover_public_key, payload, signature);
+}
+
+std::array<std::uint8_t, 32> recognition_fingerprint(std::span<const std::uint8_t> public_key) {
     return sha256(public_key);
 }
 
 RecognitionChallengeFields RecognitionChallengeTracker::issue(const std::string& mediator_id,
                                                                 const RoomId& room_id,
-                                                                std::uint64_t now) {
+                                                                std::uint64_t now,
+                                                                std::uint16_t suite_id) {
     if (outstanding_.size() >= kRecognitionMaxOutstandingChallenges) {
         throw std::invalid_argument("too many outstanding recognition challenges");
     }
@@ -126,7 +141,7 @@ RecognitionChallengeFields RecognitionChallengeTracker::issue(const std::string&
         now = now_unix_seconds();
     }
     RecognitionChallengeFields fields;
-    fields.suite_id = kRecognitionSuiteEd25519V1;
+    fields.suite_id = suite_id;
     fields.protocol_version = kProtocolVersion;
     fields.mediator_id = mediator_id;
     fields.room_id = room_id;
@@ -174,16 +189,44 @@ std::optional<std::array<std::uint8_t, 32>> RecognitionChallengeTracker::consume
         return std::nullopt;
     }
 
-    const auto public_key = parse_ed25519_public_key(response.prover_public_key);
-    if (!public_key.has_value()) {
+    // The prover must answer under the suite THIS challenge named, not
+    // whatever suite_id it feels like claiming - fields.suite_id is the
+    // trusted value (this tracker generated it), response.suite_id is
+    // prover-supplied and only used below to know how many bytes to expect;
+    // a mismatch is rejected exactly like any other malformed input, without
+    // revealing which check failed.
+    if (response.suite_id != fields.suite_id) {
         return std::nullopt;
     }
 
-    if (!verify_recognition_response(*public_key, fields, response.signature)) {
-        return std::nullopt;
+    if (fields.suite_id == kRecognitionSuiteEd25519V1) {
+        const auto public_key = parse_ed25519_public_key(response.prover_public_key);
+        if (!public_key.has_value() || response.signature.size() != kEd25519SignatureLength) {
+            return std::nullopt;
+        }
+        Ed25519Signature signature{};
+        std::copy_n(response.signature.begin(), kEd25519SignatureLength, signature.begin());
+        if (!verify_recognition_response(*public_key, fields, signature)) {
+            return std::nullopt;
+        }
+        return recognition_fingerprint(*public_key);
     }
 
-    return recognition_fingerprint(*public_key);
+    if (fields.suite_id == kRecognitionSuiteMlDsa65V1) {
+        const auto public_key = parse_mldsa65_public_key(response.prover_public_key);
+        if (!public_key.has_value() || response.signature.size() != kMlDsa65SignatureLength) {
+            return std::nullopt;
+        }
+        MlDsa65Signature signature{};
+        std::copy_n(response.signature.begin(), kMlDsa65SignatureLength, signature.begin());
+        if (!verify_recognition_response_mldsa65(*public_key, fields, signature)) {
+            return std::nullopt;
+        }
+        return recognition_fingerprint(*public_key);
+    }
+
+    // Unknown suite - reject uniformly, same as every other failure above.
+    return std::nullopt;
 }
 
 } // namespace tradep2p

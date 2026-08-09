@@ -25,8 +25,22 @@ tradep2p::RecognitionResponseMessage sign_response(const tradep2p::RecognitionCh
     tradep2p::RecognitionResponseMessage response;
     response.room_id = fields.room_id;
     response.nonce = fields.nonce;
-    response.prover_public_key = prover.public_key;
-    response.signature = tradep2p::sign_recognition_response(prover.private_seed, fields);
+    response.suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+    response.prover_public_key.assign(prover.public_key.begin(), prover.public_key.end());
+    const auto signature = tradep2p::sign_recognition_response(prover.private_seed, fields);
+    response.signature.assign(signature.begin(), signature.end());
+    return response;
+}
+
+tradep2p::RecognitionResponseMessage sign_response_mldsa65(
+    const tradep2p::RecognitionChallengeFields& fields, const tradep2p::MlDsa65KeyPair& prover) {
+    tradep2p::RecognitionResponseMessage response;
+    response.room_id = fields.room_id;
+    response.nonce = fields.nonce;
+    response.suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
+    response.prover_public_key.assign(prover.public_key.begin(), prover.public_key.end());
+    const auto signature = tradep2p::sign_recognition_response_mldsa65(prover.private_seed, fields);
+    response.signature.assign(signature.begin(), signature.end());
     return response;
 }
 
@@ -108,8 +122,11 @@ void test_prover_supplied_nonce_rejected() {
     tradep2p::RecognitionResponseMessage response;
     response.room_id = forged_fields.room_id;
     response.nonce = forged_fields.nonce; // never matches anything tracker.issue() produced
-    response.prover_public_key = prover.public_key;
-    response.signature = tradep2p::sign_recognition_response(prover.private_seed, forged_fields);
+    response.suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+    response.prover_public_key.assign(prover.public_key.begin(), prover.public_key.end());
+    const auto signature =
+        tradep2p::sign_recognition_response(prover.private_seed, forged_fields);
+    response.signature.assign(signature.begin(), signature.end());
 
     const auto result = tracker.consume("mediator-a", response, 1010);
     require(!result.has_value(), "a prover-invented nonce must never be accepted");
@@ -246,8 +263,9 @@ void test_malformed_public_key_rejected() {
     tradep2p::RecognitionResponseMessage response;
     response.room_id = issued.room_id;
     response.nonce = issued.nonce;
-    response.prover_public_key.fill(0U); // all-zero: never a valid Ed25519 point
-    response.signature.fill(0x42U);
+    response.suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+    response.prover_public_key.assign(32U, 0U); // all-zero: never a valid Ed25519 point
+    response.signature.assign(64U, 0x42U);
 
     const auto result = tracker.consume("mediator-a", response, 1010);
     require(!result.has_value(), "an all-zero public key must be rejected, not crash");
@@ -299,6 +317,113 @@ void test_expire_stale_prunes_and_prevents_late_consumption() {
     require(!result.has_value(), "a pruned challenge must not be consumable afterward");
 }
 
+// ---------------------------------------------------------------------------
+// ML-DSA-65 (post-quantum suite): the same properties the Ed25519 tests
+// above check, plus the suite-mismatch rejection that's specific to having
+// two suites at all.
+// ---------------------------------------------------------------------------
+
+void test_mldsa65_derivation_is_deterministic() {
+    const tradep2p::MasterSecret master = tradep2p::generate_master_secret();
+    const auto first = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-a");
+    const auto second = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-a");
+    require(first.public_key == second.public_key,
+            "re-deriving the same (identity, mediator) pair must reproduce the identical "
+            "ML-DSA-65 public key");
+
+    const auto different_mediator = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-b");
+    require(first.public_key != different_mediator.public_key,
+            "a different mediator id must produce an unrelated ML-DSA-65 key");
+}
+
+void test_mldsa65_sign_verify_round_trip() {
+    const tradep2p::MasterSecret master = tradep2p::generate_master_secret();
+    const auto prover = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-a");
+
+    tradep2p::RecognitionChallengeTracker tracker;
+    const auto issued =
+        tracker.issue("mediator-a", room_id(20), 1000, tradep2p::kRecognitionSuiteMlDsa65V1);
+    const auto response = sign_response_mldsa65(issued, prover);
+
+    const auto result = tracker.consume("mediator-a", response, 1010);
+    require(result.has_value(), "a genuine ML-DSA-65 response must verify");
+    require(*result == tradep2p::recognition_fingerprint(prover.public_key),
+            "the returned fingerprint must match the prover's actual ML-DSA-65 public key");
+}
+
+void test_mldsa65_wrong_key_rejected() {
+    const tradep2p::MasterSecret master = tradep2p::generate_master_secret();
+    const auto prover = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-a");
+    const auto other = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-b");
+
+    tradep2p::RecognitionChallengeTracker tracker;
+    const auto issued =
+        tracker.issue("mediator-a", room_id(21), 1000, tradep2p::kRecognitionSuiteMlDsa65V1);
+    auto response = sign_response_mldsa65(issued, prover);
+    // Swap in an unrelated public key, keeping the genuine signature - must
+    // not verify under the wrong key.
+    response.prover_public_key.assign(other.public_key.begin(), other.public_key.end());
+
+    const auto result = tracker.consume("mediator-a", response, 1010);
+    require(!result.has_value(), "an ML-DSA-65 signature must not verify under an unrelated key");
+}
+
+// A prover cannot answer under a different suite than the challenge named -
+// this is the real reason RecognitionResponseMessage carries its own
+// suite_id at all (see recognition.cpp's consume(), which checks it against
+// the challenge's own suite_id before ever calling either verify path).
+void test_suite_mismatch_rejected() {
+    const tradep2p::MasterSecret master = tradep2p::generate_master_secret();
+    const auto ed25519_prover =
+        tradep2p::derive_ed25519_keypair(master, tradep2p::key_scope::kMediatorPseudonym, "mediator-a");
+
+    tradep2p::RecognitionChallengeTracker tracker;
+    // Challenge explicitly asks for ML-DSA-65...
+    const auto issued =
+        tracker.issue("mediator-a", room_id(22), 1000, tradep2p::kRecognitionSuiteMlDsa65V1);
+
+    // ...but the response claims Ed25519 and is genuinely Ed25519-signed
+    // over fields carrying the CHALLENGE's suite_id (kRecognitionSuiteMlDsa65V1) -
+    // this must fail even though the Ed25519 signature is individually
+    // genuine, because the declared suites disagree.
+    tradep2p::RecognitionChallengeFields fields = issued;
+    tradep2p::RecognitionResponseMessage response;
+    response.room_id = fields.room_id;
+    response.nonce = fields.nonce;
+    response.suite_id = tradep2p::kRecognitionSuiteEd25519V1; // mismatches fields.suite_id
+    response.prover_public_key.assign(ed25519_prover.public_key.begin(),
+                                      ed25519_prover.public_key.end());
+    const auto signature =
+        tradep2p::sign_recognition_response(ed25519_prover.private_seed, fields);
+    response.signature.assign(signature.begin(), signature.end());
+
+    const auto result = tracker.consume("mediator-a", response, 1010);
+    require(!result.has_value(),
+            "a response naming a different suite than the challenge it answers must be rejected");
+}
+
+void test_mldsa65_malformed_public_key_length_rejected() {
+    tradep2p::RecognitionChallengeTracker tracker;
+    const auto issued =
+        tracker.issue("mediator-a", room_id(23), 1000, tradep2p::kRecognitionSuiteMlDsa65V1);
+
+    tradep2p::RecognitionResponseMessage response;
+    response.room_id = issued.room_id;
+    response.nonce = issued.nonce;
+    response.suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
+    response.prover_public_key.assign(32U, 0U); // way too short for ML-DSA-65 (needs 1952)
+    response.signature.assign(3309U, 0x42U);
+
+    const auto result = tracker.consume("mediator-a", response, 1010);
+    require(!result.has_value(), "a wrong-length ML-DSA-65 public key must be rejected, not crash");
+}
+
 } // namespace
 
 int main() {
@@ -316,6 +441,11 @@ int main() {
         test_wrong_signature_rejected();
         test_unknown_nonce_rejected();
         test_expire_stale_prunes_and_prevents_late_consumption();
+        test_mldsa65_derivation_is_deterministic();
+        test_mldsa65_sign_verify_round_trip();
+        test_mldsa65_wrong_key_rejected();
+        test_suite_mismatch_rejected();
+        test_mldsa65_malformed_public_key_length_rejected();
         std::cout << "recognition unit tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -181,7 +181,7 @@ void print_client_help() {
         << "  /abort ROOM_ID\n"
         << "  /recovery request ROOM_ID\n"
         << "      ask the mediator what it has on file for a room you remember\n"
-        << "  /recognize ROOM_ID\n"
+        << "  /recognize ROOM_ID [ed25519|ml-dsa-65]\n"
         << "      requires an unlocked keystore; asks the counterparty in that room to prove\n"
         << "      control of their per-mediator pseudonym key, right now - a locally-verified\n"
         << "      \"have I traded with this key before\" count, nothing more (specs.txt SS8);\n"
@@ -343,6 +343,15 @@ LocalCounterpartyHistory& ensure_history_open(ClientState& state) {
 tradep2p::Ed25519KeyPair mediator_pseudonym_keypair(const ClientState& state) {
     return tradep2p::derive_ed25519_keypair(state.keystore->master_secret(),
                                             tradep2p::key_scope::kMediatorPseudonym, state.mediator_id);
+}
+
+// Post-quantum counterpart of the above - same rationale (direct
+// derivation, distinct key_scope label so the two algorithms' seeds stay
+// independent - see key_scope::kMediatorPseudonymMlDsa65's own comment).
+tradep2p::MlDsa65KeyPair mediator_pseudonym_keypair_mldsa65(const ClientState& state) {
+    return tradep2p::derive_mldsa65_keypair(
+        state.keystore->master_secret(),
+        tradep2p::key_scope::kMediatorPseudonymMlDsa65, state.mediator_id);
 }
 
 template <std::size_t N>
@@ -619,12 +628,35 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         fields.created_at = message.created_at;
         fields.expires_at = message.expires_at;
 
-        const auto own_keypair = mediator_pseudonym_keypair(state);
+        // Answer with whichever suite the challenge asked for - both keys
+        // are cheap, deterministic derivations (no persistence, no cost to
+        // deriving one that goes unused), so there's no reason to gate this
+        // on a client-wide default the way /recognize's own outgoing suite
+        // choice below does.
         tradep2p::RecognitionResponseMessage response;
         response.room_id = message.room_id;
         response.nonce = message.nonce;
-        response.prover_public_key = own_keypair.public_key;
-        response.signature = tradep2p::sign_recognition_response(own_keypair.private_seed, fields);
+        response.suite_id = message.suite_id;
+        if (message.suite_id == tradep2p::kRecognitionSuiteEd25519V1) {
+            const auto own_keypair = mediator_pseudonym_keypair(state);
+            response.prover_public_key.assign(own_keypair.public_key.begin(),
+                                              own_keypair.public_key.end());
+            const auto signature =
+                tradep2p::sign_recognition_response(own_keypair.private_seed, fields);
+            response.signature.assign(signature.begin(), signature.end());
+        } else if (message.suite_id == tradep2p::kRecognitionSuiteMlDsa65V1) {
+            const auto own_keypair = mediator_pseudonym_keypair_mldsa65(state);
+            response.prover_public_key.assign(own_keypair.public_key.begin(),
+                                              own_keypair.public_key.end());
+            const auto signature =
+                tradep2p::sign_recognition_response_mldsa65(own_keypair.private_seed, fields);
+            response.signature.assign(signature.begin(), signature.end());
+        } else {
+            std::cout << "\nroom " << room
+                      << ": counterparty's recognition challenge named an unknown suite_id "
+                      << message.suite_id << " - declining (no response sent)\n";
+            break;
+        }
         channel.send_frame(MessageType::RecognitionResponse,
                            tradep2p::encode_recognition_response(response));
         std::cout << "\nroom " << room << ": answered counterparty's recognition challenge\n";
@@ -1051,9 +1083,23 @@ bool handle_client_line(SecureChannel& channel,
     }
     if (command == "/recognize") {
         std::string room_text;
+        std::string suite_text;
         std::string extra;
-        if (!(stream >> room_text) || (stream >> extra)) {
-            throw std::invalid_argument("usage: /recognize ROOM_ID");
+        if (!(stream >> room_text)) {
+            throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+        }
+        std::uint16_t suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+        if (stream >> suite_text) {
+            if (suite_text == "ed25519") {
+                suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+            } else if (suite_text == "ml-dsa-65") {
+                suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
+            } else {
+                throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+            }
+            if (stream >> extra) {
+                throw std::invalid_argument("usage: /recognize ROOM_ID [ed25519|ml-dsa-65]");
+            }
         }
         require_unlocked_keystore(state);
         const RoomId room_id = tradep2p::room_id_from_hex(room_text);
@@ -1061,7 +1107,8 @@ bool handle_client_line(SecureChannel& channel,
         if (!state.room_parties.contains(canonical_room)) {
             throw std::invalid_argument("not currently a party to that room");
         }
-        const auto challenge = state.recognition_tracker.issue(state.mediator_id, room_id);
+        const auto challenge =
+            state.recognition_tracker.issue(state.mediator_id, room_id, 0, suite_id);
         channel.send_frame(MessageType::RecognitionChallenge,
                            tradep2p::encode_recognition_challenge(tradep2p::RecognitionChallengeMessage{
                                challenge.room_id, challenge.suite_id, challenge.nonce,

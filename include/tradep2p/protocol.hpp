@@ -11,7 +11,14 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kProtocolVersion = 5;
-constexpr std::size_t kMaxFramePayload = 4096;
+// Raised from 4096: an ML-DSA-65 (post-quantum) recognition response needs
+// a 1952-byte public key + a 3309-byte signature (>5.2KB) alone, which the
+// old cap couldn't fit. Confirmed safe to raise: the receive-side buffer is
+// already a std::vector sized dynamically off the wire length field (no
+// fixed-size buffer anywhere), the length field itself is a u32 with far
+// more headroom than either value, and no other hardcoded 4096 duplicates
+// this constant elsewhere in the codebase.
+constexpr std::size_t kMaxFramePayload = 8192;
 constexpr std::size_t kMaxAssetCodeLength = 16;
 constexpr std::size_t kMaxAddressLength = 256;
 constexpr std::size_t kMaxReasonLength = 128;
@@ -372,8 +379,16 @@ struct RecoveryStateResponseMessage {
 // meaning (canonical signed-payload construction, sign/verify, single-use
 // nonce tracking); this file only frames and bounds-checks them.
 constexpr std::size_t kRecognitionNonceLength = 32;
-constexpr std::size_t kRecognitionPublicKeyLength = 32;  // Ed25519
-constexpr std::size_t kRecognitionSignatureLength = 64;  // Ed25519
+// Maximum allowed length for RecognitionResponseMessage's variable-length
+// key/signature fields (see below) - bounds decode_recognition_response()
+// so a malformed/oversized field is rejected before allocating, the same
+// role short_string()'s `maximum` argument plays elsewhere in this file.
+// Sized to the larger of the two suites this codebase supports today
+// (Ed25519: 32/64 bytes; ML-DSA-65, identity.hpp's kMlDsa65PublicKeyLength/
+// kMlDsa65SignatureLength: 1952/3309 bytes) - a future suite with larger
+// keys/signatures would need this raised too.
+constexpr std::size_t kRecognitionMaxPublicKeyLength = 1952;  // ML-DSA-65
+constexpr std::size_t kRecognitionMaxSignatureLength = 3309;  // ML-DSA-65
 
 using RecognitionNonce = std::array<std::uint8_t, kRecognitionNonceLength>;
 
@@ -403,11 +418,20 @@ struct RecognitionChallengeMessage {
 // outstanding, unexpired, and being answered in the right room - a
 // mismatch on any of those is rejected identically, without revealing which
 // check failed first.
+//
+// `suite_id` and variable-length `prover_public_key`/`signature` (instead of
+// this struct's earlier fixed 32/64-byte Ed25519-only arrays) exist so a
+// prover can answer with either suite the challenge's own suite_id named -
+// see recognition.hpp for the suite_id values and recognition.cpp for the
+// sign/verify branch on it. This is a breaking wire-format change: both
+// sides of a connection must be rebuilt together, matching kMaxFramePayload's
+// bump above (same commit, same reason).
 struct RecognitionResponseMessage {
     RoomId room_id{};
     RecognitionNonce nonce{};
-    std::array<std::uint8_t, kRecognitionPublicKeyLength> prover_public_key{};
-    std::array<std::uint8_t, kRecognitionSignatureLength> signature{};
+    std::uint16_t suite_id{1};
+    std::vector<std::uint8_t> prover_public_key;
+    std::vector<std::uint8_t> signature;
 };
 
 // --- Phase 5: ephemeral trade identity announcement (see

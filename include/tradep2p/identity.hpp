@@ -60,6 +60,22 @@ constexpr std::size_t kEd25519PublicKeyLength = 32;
 constexpr std::size_t kEd25519PrivateSeedLength = 32;
 constexpr std::size_t kEd25519SignatureLength = 64;
 
+// ML-DSA-65 (FIPS 204) - a post-quantum signature suite, added alongside
+// Ed25519 rather than replacing it (see recognition.hpp's suite_id). The
+// seed is 32 bytes, same as Ed25519's, and - unlike Ed25519 - is NOT the
+// raw private key itself; OpenSSL's ML-DSA provider deterministically
+// expands a 32-byte seed into the full keypair via its own FIPS
+// 204-specified KeyGen, verified empirically against this exact OpenSSL
+// build (3.5.5): the same seed fed to `openssl genpkey -algorithm ML-DSA-65
+// -pkeyopt hexseed:<seed>` twice, and separately via the EVP_PKEY_CTX/
+// OSSL_PARAM "seed" path load_mldsa65_private_key() below uses, both
+// reproducibly yield byte-identical public keys. Sizes are the fixed FIPS
+// 204 ML-DSA-65 values, also measured directly against this build via
+// `openssl pkeyutl -sign -rawin`.
+constexpr std::size_t kMlDsa65SeedLength = 32;
+constexpr std::size_t kMlDsa65PublicKeyLength = 1952;
+constexpr std::size_t kMlDsa65SignatureLength = 3309;
+
 // encode_derivation_info() field widths: a 1-byte label length prefix caps
 // labels at 255 bytes; a 2-byte (big-endian) identifier length prefix caps
 // identifiers at 65535 bytes. Both are far larger than any label/identifier
@@ -95,6 +111,14 @@ struct EvpKdfCtxDeleter {
     void operator()(EVP_KDF_CTX* ctx) const noexcept;
 };
 using EvpKdfCtxPtr = std::unique_ptr<EVP_KDF_CTX, EvpKdfCtxDeleter>;
+
+// Needed for ML-DSA-65 keygen only - Ed25519 never needed EVP_PKEY_CTX,
+// since EVP_PKEY_new_raw_private_key/EVP_PKEY_Q_keygen cover both its
+// deterministic-from-seed and fresh-random cases directly.
+struct EvpPkeyCtxDeleter {
+    void operator()(EVP_PKEY_CTX* ctx) const noexcept;
+};
+using EvpPkeyCtxPtr = std::unique_ptr<EVP_PKEY_CTX, EvpPkeyCtxDeleter>;
 
 // ---------------------------------------------------------------------------
 // SensitiveBytes<N>: a fixed-size buffer that best-effort-zeroizes itself.
@@ -158,14 +182,26 @@ private:
 using MasterSecret = SensitiveBytes<kMasterSecretLength>;
 using DerivedKey = SensitiveBytes<kDerivedKeyLength>;
 using Ed25519PrivateSeed = SensitiveBytes<kEd25519PrivateSeedLength>;
+// Same underlying SensitiveBytes<32> instantiation as the other three
+// (kMlDsa65SeedLength == 32) - already covered by identity.cpp's single
+// explicit `template class SensitiveBytes<kMasterSecretLength>;` line, no
+// new explicit instantiation needed.
+using MlDsa65PrivateSeed = SensitiveBytes<kMlDsa65SeedLength>;
 
 using Ed25519PublicKey = std::array<std::uint8_t, kEd25519PublicKeyLength>;
 using Ed25519Signature = std::array<std::uint8_t, kEd25519SignatureLength>;
+using MlDsa65PublicKey = std::array<std::uint8_t, kMlDsa65PublicKeyLength>;
+using MlDsa65Signature = std::array<std::uint8_t, kMlDsa65SignatureLength>;
 
 // A keypair. The public key is not sensitive; the seed is (SensitiveBytes).
 struct Ed25519KeyPair {
     Ed25519PrivateSeed private_seed;
     Ed25519PublicKey public_key{};
+};
+
+struct MlDsa65KeyPair {
+    MlDsa65PrivateSeed private_seed;
+    MlDsa65PublicKey public_key{};
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +216,12 @@ struct Ed25519KeyPair {
 namespace key_scope {
 inline constexpr std::string_view kLogin = "login";                    // phase 7
 inline constexpr std::string_view kMediatorPseudonym = "mediator";     // phase 6/8
+// A DISTINCT label from kMediatorPseudonym, not a reuse of it - a client's
+// Ed25519 and ML-DSA-65 pseudonym seeds must be independently derived, so
+// that sharing one algorithm's seed can never even in principle bear on the
+// other's security, matching this file's existing per-purpose domain
+// separation rather than coupling two unrelated algorithms to one seed.
+inline constexpr std::string_view kMediatorPseudonymMlDsa65 = "mediator-mldsa65";
 inline constexpr std::string_view kLocalHistory = "local-history";    // phase 3
 // The keystore's own cached, no-passphrase-required "who am I" public key
 // (identifier always ""), distinct from kLogin's later per-service
@@ -309,6 +351,61 @@ inline constexpr std::string_view kKeystoreIdentity = "keystore-identity"; // ph
 [[nodiscard]] bool ed25519_verify(EVP_PKEY* public_key,
                                    std::span<const std::uint8_t> message,
                                    const Ed25519Signature& signature);
+
+// ---------------------------------------------------------------------------
+// ML-DSA-65 (FIPS 204, post-quantum) - deliberately parallel to the Ed25519
+// section above, not generic/parameterized: OpenSSL exposes ML-DSA only
+// through its newer provider/EVP_PKEY_CTX API (no EVP_PKEY_new_raw_private_
+// key shortcut, no fixed EVP_PKEY_* NID the way Ed25519 has), so this is a
+// genuinely separate implementation, not a template instantiation. Only the
+// deterministic-from-master-secret path is provided (mirroring
+// derive_ed25519_keypair, used for long-term scoped identities) - no
+// generate_mldsa65_keypair() fresh-random counterpart exists because
+// nothing in this codebase currently needs an ephemeral ML-DSA-65 key (see
+// recognition.hpp: recognition deliberately uses the stable per-mediator
+// pseudonym, never the per-trade ephemeral key).
+// ---------------------------------------------------------------------------
+
+// Loads a full (private+public) EVP_PKEY deterministically from a 32-byte
+// seed via ML-DSA-65's provider-native seed-expansion (EVP_PKEY_CTX_new_
+// from_name("ML-DSA-65") + keygen with the "seed" OSSL_PARAM) - verified
+// empirically to be deterministic (same seed -> byte-identical public key)
+// against this codebase's required OpenSSL 3.5+ floor.
+[[nodiscard]] EvpPkeyPtr load_mldsa65_private_key(const MlDsa65PrivateSeed& seed);
+
+// Reconstructs a public-key-only EVP_PKEY from raw wire-received bytes, via
+// EVP_PKEY_new_raw_public_key_ex(nullptr, "ML-DSA-65", nullptr, ...) - the
+// modern name-based construction OpenSSL 3.x provides for provider-supplied
+// key types that (unlike Ed25519) have no legacy fixed EVP_PKEY_* NID.
+[[nodiscard]] EvpPkeyPtr load_mldsa65_public_key(const MlDsa65PublicKey& public_key);
+
+// Validates and parses a raw public key buffer of arbitrary (e.g.
+// wire-supplied) length. Rejects a buffer whose length is not exactly
+// kMlDsa65PublicKeyLength and rejects the all-zero key outright, mirroring
+// parse_ed25519_public_key()'s exact contract and rationale.
+[[nodiscard]] std::optional<MlDsa65PublicKey> parse_mldsa65_public_key(
+    std::span<const std::uint8_t> bytes);
+
+// Deterministic keypair: derives a 32-byte scoped key via derive_scoped_key
+// (unchanged - already produces exactly kMlDsa65SeedLength bytes) and
+// expands it into a full ML-DSA-65 keypair via load_mldsa65_private_key().
+// Use key_scope::kMediatorPseudonymMlDsa65, never kMediatorPseudonym (see
+// that label's own comment on why the two must stay independent).
+[[nodiscard]] MlDsa65KeyPair derive_mldsa65_keypair(const MasterSecret& master_secret,
+                                                     std::string_view label,
+                                                     std::string_view identifier);
+
+// One-shot EVP_DigestSign/Verify, exactly the same pattern as Ed25519's
+// (ML-DSA is also a "pure" signature scheme with no external prehash, so
+// the digest argument to EVP_DigestSignInit/VerifyInit must be null here
+// too).
+[[nodiscard]] MlDsa65Signature mldsa65_sign(EVP_PKEY* private_key,
+                                             std::span<const std::uint8_t> message);
+[[nodiscard]] bool mldsa65_verify(EVP_PKEY* public_key, std::span<const std::uint8_t> message,
+                                   const MlDsa65Signature& signature);
+[[nodiscard]] bool mldsa65_verify(const MlDsa65PublicKey& public_key,
+                                   std::span<const std::uint8_t> message,
+                                   const MlDsa65Signature& signature);
 
 // ---------------------------------------------------------------------------
 // Constant-time comparison, for anything secret-shaped (derived keys, MACs,
