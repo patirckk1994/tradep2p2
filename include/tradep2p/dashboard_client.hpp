@@ -35,6 +35,16 @@ enum class RecognitionOutcome : std::uint8_t { Successful, Incomplete };
 struct RecognitionKeyMaterial {
     Ed25519PrivateSeed private_seed;
     Ed25519PublicKey public_key{};
+    // Populated alongside the Ed25519 keypair above whenever a keystore is
+    // unlocked - deriving it is a cheap, deterministic HKDF (see
+    // key_scope::kMediatorPseudonymMlDsa65's own comment on why this is a
+    // DISTINCT derivation, not the same seed reused across algorithms), so
+    // there's no reason to gate it behind a second round trip. Lets the
+    // auto-answer path (dashboard_client.cpp) respond under whichever suite
+    // an incoming challenge actually names, the same way main.cpp's CLI
+    // does, without this header growing a second provider callback.
+    std::optional<MlDsa65PrivateSeed> mldsa65_private_seed;
+    std::optional<MlDsa65PublicKey> mldsa65_public_key;
 };
 using RecognitionKeyProvider = std::function<std::optional<RecognitionKeyMaterial>()>;
 
@@ -171,8 +181,11 @@ public:
     // `room_text`. Throws std::invalid_argument if that room is not
     // currently known/active. Does not itself require a key - only
     // ANSWERING a challenge does (see set_recognition_key_provider()); the
-    // verifier side only needs to generate and send a nonce.
-    void recognize(const std::string& room_text);
+    // verifier side only needs to generate and send a nonce. `suite_id`
+    // picks which suite the COUNTERPARTY must answer with -
+    // kRecognitionSuiteEd25519V1 (default) or kRecognitionSuiteMlDsa65V1.
+    void recognize(const std::string& room_text,
+                    std::uint16_t suite_id = tradep2p::kRecognitionSuiteEd25519V1);
 
     // These two callbacks bridge into http_dashboard.cpp's
     // IdentityDashboardState (keystore/history), which this module

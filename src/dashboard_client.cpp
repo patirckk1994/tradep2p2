@@ -149,7 +149,7 @@ void DashboardClient::abort_room(const std::string& room_text) {
             "requested abort of room " + tradep2p::room_id_to_hex(room_id));
 }
 
-void DashboardClient::recognize(const std::string& room_text) {
+void DashboardClient::recognize(const std::string& room_text, std::uint16_t suite_id) {
     const RoomId room_id = tradep2p::room_id_from_hex(room_text);
     const std::string canonical = tradep2p::room_id_to_hex(room_id);
     RecognitionChallengeFields fields;
@@ -159,7 +159,7 @@ void DashboardClient::recognize(const std::string& room_text) {
         if (room_it == rooms_.end() || room_it->second.status != "active") {
             throw std::invalid_argument("room is not currently active");
         }
-        fields = recognition_tracker_.issue(mediator_id_, room_id);
+        fields = recognition_tracker_.issue(mediator_id_, room_id, 0, suite_id);
         room_it->second.recognition_status = "challenge_sent";
         room_it->second.recognized_fingerprint_hex.clear();
         room_it->second.has_recognition_challenge = true;
@@ -814,29 +814,51 @@ void DashboardClient::handle_frame(const Frame& frame) {
             RecognitionResponseMessage response;
             response.room_id = challenge_to_answer->room_id;
             response.nonce = challenge_to_answer->nonce;
-            // The dashboard only ever holds an Ed25519 pseudonym key today
-            // (no ML-DSA-65 derivation here) - explicit suite_id rather than
-            // relying on the struct's default, so this stays correct even
-            // if that default ever changes. A challenge naming the PQ suite
-            // (fields.suite_id above) still gets propagated into `fields`
-            // for the signed payload, but this response's own suite_id
-            // deliberately stays Ed25519 - RecognitionChallengeTracker::
-            // consume() on the other end rejects the mismatch cleanly
-            // rather than accepting a wrong-algorithm answer.
-            response.suite_id = tradep2p::kRecognitionSuiteEd25519V1;
-            const Ed25519PublicKey& prover_public_key = key->public_key;
-            response.prover_public_key.assign(prover_public_key.begin(), prover_public_key.end());
-            const Ed25519Signature signature =
-                tradep2p::sign_recognition_response(key->private_seed, fields);
-            response.signature.assign(signature.begin(), signature.end());
-            {
+            response.suite_id = challenge_to_answer->suite_id;
+            // Answer with whichever suite the challenge named - both keys
+            // are cheap, deterministic derivations the key provider already
+            // supplied (see RecognitionKeyMaterial's own comment), so
+            // there's no reason to only ever answer Ed25519 the way this
+            // used to work. An unknown suite_id is declined below, same as
+            // "no keystore unlocked" - nothing to prove control with.
+            bool have_response = false;
+            if (challenge_to_answer->suite_id == tradep2p::kRecognitionSuiteEd25519V1) {
+                const Ed25519PublicKey& prover_public_key = key->public_key;
+                response.prover_public_key.assign(prover_public_key.begin(), prover_public_key.end());
+                const Ed25519Signature signature =
+                    tradep2p::sign_recognition_response(key->private_seed, fields);
+                response.signature.assign(signature.begin(), signature.end());
+                have_response = true;
+            } else if (challenge_to_answer->suite_id == tradep2p::kRecognitionSuiteMlDsa65V1 &&
+                       key->mldsa65_private_seed.has_value() && key->mldsa65_public_key.has_value()) {
+                const MlDsa65PublicKey& prover_public_key = *key->mldsa65_public_key;
+                response.prover_public_key.assign(prover_public_key.begin(), prover_public_key.end());
+                const MlDsa65Signature signature = tradep2p::sign_recognition_response_mldsa65(
+                    *key->mldsa65_private_seed, fields);
+                response.signature.assign(signature.begin(), signature.end());
+                have_response = true;
+            }
+
+            if (!have_response) {
                 std::scoped_lock lock(state_mutex_);
                 auto& room = rooms_[room_id];
                 room.room_id = room_id;
-                room.own_recognition_response_signature_hex = hex_encode_bytes(response.signature);
+                room.recognition_status = "declined";
+                add_event_locked("room " + room_id +
+                                 ": counterparty's recognition challenge named an unsupported "
+                                 "suite_id " + std::to_string(challenge_to_answer->suite_id) +
+                                 " - declined");
+            } else {
+                {
+                    std::scoped_lock lock(state_mutex_);
+                    auto& room = rooms_[room_id];
+                    room.room_id = room_id;
+                    room.own_recognition_response_signature_hex = hex_encode_bytes(response.signature);
+                }
+                enqueue(MessageType::RecognitionResponse,
+                        tradep2p::encode_recognition_response(response),
+                        "answered recognition challenge for room " + room_id);
             }
-            enqueue(MessageType::RecognitionResponse, tradep2p::encode_recognition_response(response),
-                    "answered recognition challenge for room " + room_id);
         }
     }
 
