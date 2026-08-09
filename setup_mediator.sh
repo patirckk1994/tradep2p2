@@ -52,6 +52,22 @@ Options:
                         channel entirely.
   --admin-port N       port for the admin control channel (default 7444,
                         only meaningful with --admin-token)
+  --auth-port N        enables a public, unauthenticated port where ANY
+                        caller can ask this mediator to sign a fresh nonce
+                        with a persistent ML-DSA-65 identity key - proof of
+                        continuity for a returning client who already knows
+                        this mediator's key from prior trade history (see
+                        `tradep2p_cli verify-mediator`). Nothing this
+                        channel returns is sensitive, so unlike --admin-port
+                        there is no token - leave unset to disable the
+                        channel entirely (the default).
+  --auth-key-file PATH  where the mediator auth key's 32-byte seed is
+                        stored (created on first run if missing). Leave
+                        unset and a fresh key is generated every restart -
+                        every proof issued that run becomes unverifiable
+                        against a later restart's key, a real, named
+                        limitation of running without this set, not a
+                        silent one. Only meaningful with --auth-port.
   --registry HOST:PORT registry endpoint to register with (optional)
   --registry-pin HEX   registry certificate SHA-256 pin (required with --registry)
   --advertise HOST:PORT the endpoint peers can reach this mediator on (defaults
@@ -84,6 +100,8 @@ FEE_REQUIRE_CONFIRMATION="0"
 FEE_POSITION="after-last"
 ADMIN_TOKEN=""
 ADMIN_PORT="7444"
+AUTH_PORT=""
+AUTH_KEY_FILE=""
 REGISTRY_ENDPOINT=""
 REGISTRY_PIN=""
 ADVERTISED_ENDPOINT=""
@@ -116,6 +134,8 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
+        --auth-port) AUTH_PORT="$2"; shift 2 ;;
+        --auth-key-file) AUTH_KEY_FILE="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
         --registry-pin) REGISTRY_PIN="$2"; shift 2 ;;
         --advertise) ADVERTISED_ENDPOINT="$2"; shift 2 ;;
@@ -151,6 +171,12 @@ FEE_POSITION="$FEE_POSITION"
 # Keep this secret if set - anyone who has it can change the fee live.
 ADMIN_TOKEN="$ADMIN_TOKEN"
 ADMIN_PORT="$ADMIN_PORT"
+
+# Leave AUTH_PORT empty to disable the mediator auth control channel
+# entirely (default). Unlike ADMIN_TOKEN, nothing this channel returns is
+# sensitive - there is no token to keep secret here.
+AUTH_PORT="$AUTH_PORT"
+AUTH_KEY_FILE="$AUTH_KEY_FILE"
 
 # Leave REGISTRY_ENDPOINT empty to run standalone, unregistered.
 REGISTRY_ENDPOINT="$REGISTRY_ENDPOINT"
@@ -235,6 +261,9 @@ fi
 if [[ -n "$ADMIN_TOKEN" ]]; then
     echo "  admin control:     127.0.0.1:$ADMIN_PORT (loopback only, live fee changes)"
 fi
+if [[ -n "$AUTH_PORT" ]]; then
+    echo "  mediator auth:     ${MEDIATOR_BIND%:*}:$AUTH_PORT (unauthenticated, see --auth-port)"
+fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
 fi
@@ -275,6 +304,12 @@ fi
 if [[ -n "$ADMIN_TOKEN" ]]; then
     export TRADEP2P_ADMIN_TOKEN="$ADMIN_TOKEN"
     export TRADEP2P_ADMIN_PORT="$ADMIN_PORT"
+fi
+if [[ -n "$AUTH_PORT" ]]; then
+    export TRADEP2P_MEDIATOR_AUTH_PORT="$AUTH_PORT"
+    if [[ -n "$AUTH_KEY_FILE" ]]; then
+        export TRADEP2P_MEDIATOR_AUTH_KEY_FILE="$AUTH_KEY_FILE"
+    fi
 fi
 
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then

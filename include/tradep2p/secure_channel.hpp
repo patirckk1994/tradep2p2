@@ -114,4 +114,15 @@ private:
     ssl_ctx_st* ctx_{nullptr};
 };
 
+// Raw, unencrypted socket connections - for callers that have no use for
+// TLS at all, e.g. main.cpp's verify-mediator CLI command, which speaks a
+// plain-text line protocol to the mediator's separate auth port (see
+// mediator_auth.hpp) rather than the pinned-TLS trading protocol. Reuses
+// this module's own internal TCP-connect/SOCKS5-CONNECT logic (the same
+// code SecureChannel::connect_direct()/connect_via_socks5() already use
+// before layering TLS on top) rather than duplicating it. The caller owns
+// the returned descriptor.
+[[nodiscard]] int connect_raw_tcp(const Endpoint& endpoint);
+[[nodiscard]] int connect_raw_via_socks5(const Endpoint& proxy, const Endpoint& destination);
+
 } // namespace tradep2p

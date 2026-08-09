@@ -2,6 +2,7 @@
 
 #include "tradep2p/ephemeral.hpp"
 #include "tradep2p/mediator.hpp"
+#include "tradep2p/mediator_auth.hpp"
 #include "tradep2p/protocol.hpp"
 #include "tradep2p/receipt.hpp"
 #include "tradep2p/room_persistence.hpp"
@@ -36,6 +37,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <sstream>
 #include <string>
@@ -60,6 +62,48 @@ constexpr std::size_t kMaxPendingInvites = 256U;
 constexpr std::size_t kMaxInvitesPerClient = 16U;
 constexpr std::size_t kMaxQueuedFrames = 128U;
 constexpr int kConnectionIoTimeoutSeconds = 30;
+
+// Small, self-contained hex helpers for the mediator auth control channel
+// (auth_control_loop() below) - duplicated locally rather than shared,
+// matching this codebase's established per-module convention for these
+// small helpers (see recognition.cpp's own comment on why).
+std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const std::uint8_t byte : bytes) {
+        out.push_back(digits[(byte >> 4U) & 0x0fU]);
+        out.push_back(digits[byte & 0x0fU]);
+    }
+    return out;
+}
+
+// Returns std::nullopt on any malformed input (wrong length, non-hex
+// characters) rather than throwing - callers here are parsing untrusted,
+// unauthenticated client input on a public port and should reject it
+// quietly, not via exception-driven control flow.
+template <std::size_t N>
+std::optional<std::array<std::uint8_t, N>> hex_decode_fixed(const std::string& text) {
+    if (text.size() != N * 2U) {
+        return std::nullopt;
+    }
+    std::array<std::uint8_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        const auto parse_nibble = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        const int hi = parse_nibble(text[i * 2U]);
+        const int lo = parse_nibble(text[i * 2U + 1U]);
+        if (hi < 0 || lo < 0) {
+            return std::nullopt;
+        }
+        out[i] = static_cast<std::uint8_t>((hi << 4) | lo);
+    }
+    return out;
+}
 
 struct QueuedFrame {
     MessageType type{};
@@ -239,6 +283,47 @@ std::string configured_mediator_receipt_key_file() {
     return env_or_empty("TRADEP2P_MEDIATOR_RECEIPT_KEY_FILE");
 }
 
+// See mediator_auth.hpp's file comment. Line-for-line the same tradeoffs as
+// load_or_create_mediator_receipt_key() above (plaintext-on-disk operational
+// key, not a user identity; unset means a fresh key every restart, which
+// means every prior proof becomes unverifiable against the new one - a
+// real, named limitation, not a silent one) - only the algorithm differs
+// (ML-DSA-65 instead of Ed25519, since this key's whole purpose is to be
+// the mediator's post-quantum auth identity, see mediator_auth.hpp).
+MlDsa65KeyPair load_or_create_mediator_auth_key(const std::string& path) {
+    if (path.empty()) {
+        return generate_mldsa65_keypair();
+    }
+    const int existing_fd = ::open(path.c_str(), O_RDONLY);
+    if (existing_fd >= 0) {
+        std::array<std::uint8_t, kMlDsa65SeedLength> raw{};
+        const ssize_t n = ::read(existing_fd, raw.data(), raw.size());
+        ::close(existing_fd);
+        if (n != static_cast<ssize_t>(raw.size())) {
+            throw std::runtime_error("mediator auth key file '" + path +
+                                     "' is not exactly " +
+                                     std::to_string(kMlDsa65SeedLength) + " bytes");
+        }
+        // Re-derives the public key from the loaded seed rather than storing
+        // it separately, same reasoning as the receipt key loader above.
+        return load_mldsa65_keypair(MlDsa65PrivateSeed(raw));
+    }
+
+    MlDsa65KeyPair fresh = generate_mldsa65_keypair();
+    const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) {
+        throw std::runtime_error("failed to create mediator auth key file '" + path + "'");
+    }
+    const auto& seed_bytes = fresh.private_seed.bytes();
+    const ssize_t written = ::write(fd, seed_bytes.data(), seed_bytes.size());
+    ::close(fd);
+    if (written != static_cast<ssize_t>(seed_bytes.size())) {
+        ::unlink(path.c_str());
+        throw std::runtime_error("failed to write mediator auth key file '" + path + "'");
+    }
+    return fresh;
+}
+
 std::uint64_t now_unix_seconds() {
     return static_cast<std::uint64_t>(
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
@@ -367,6 +452,38 @@ std::uint16_t configured_admin_port() {
     return port;
 }
 
+// See mediator_auth.hpp. Unlike configured_mediator_receipt_key_file(),
+// unset does NOT mean "generate fresh every restart and move on quietly" in
+// the same low-stakes way - a mediator auth key that changes every restart
+// makes every previously-recorded proof from this mediator unverifiable
+// against the new one, defeating the entire point (continuity). Still
+// allowed (mirrors the receipt key's own honest, stated tradeoff) rather
+// than refusing to start, since an operator testing this feature locally
+// has no reason to be forced into persistence first.
+std::string configured_mediator_auth_key_file() {
+    return env_or_empty("TRADEP2P_MEDIATOR_AUTH_KEY_FILE");
+}
+
+// Gates the mediator auth control channel (Impl::auth_control_loop() below).
+// Unlike the admin channel, there is no token - the whole point is that
+// ANY caller may request a fresh signed proof at any time (see
+// mediator_auth.hpp's file comment on why this is not a security problem:
+// nothing returned is sensitive). std::nullopt (the default, unset) disables
+// the channel entirely - no listening socket is even opened - so an
+// existing deployment never starts exposing a new port silently.
+std::optional<std::uint16_t> configured_mediator_auth_port() {
+    const std::string text = env_or_empty("TRADEP2P_MEDIATOR_AUTH_PORT");
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    std::uint16_t port = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), port, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || port == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_MEDIATOR_AUTH_PORT");
+    }
+    return port;
+}
+
 // See mediator.hpp's SessionState::WaitingForFeeConfirmation. Off by
 // default - existing honor-system fee behavior is unchanged unless an
 // operator explicitly opts in. Meaningless (and ignored) if no fee is
@@ -436,7 +553,12 @@ public:
           admin_port_(configured_admin_port()),
           require_fee_confirmation_(configured_require_fee_confirmation()),
           fee_position_(configured_fee_position()),
-          fee_persist_file_(configured_fee_persist_file()) {}
+          fee_persist_file_(configured_fee_persist_file()),
+          mediator_auth_port_(configured_mediator_auth_port()),
+          mediator_auth_keypair_(
+              mediator_auth_port_.has_value()
+                  ? load_or_create_mediator_auth_key(configured_mediator_auth_key_file())
+                  : MlDsa65KeyPair{}) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -491,6 +613,14 @@ public:
             std::thread([this] { admin_control_loop(); }).detach();
             std::cout << "Admin control listening on 127.0.0.1:" << admin_port_
                       << " (loopback only, live fee changes)\n";
+        }
+
+        if (mediator_auth_port_.has_value()) {
+            std::thread([this] { auth_control_loop(); }).detach();
+            std::cout << "Mediator auth control listening on " << bind_endpoint_.host << ':'
+                      << *mediator_auth_port_
+                      << " (unauthenticated - proves control of the mediator auth key to anyone "
+                         "who asks, see docs)\n";
         }
 
         load_persisted_rooms_at_startup();
@@ -2145,6 +2275,122 @@ private:
         send_admin_line(fd, "ERR unknown command");
     }
 
+    // See mediator_auth.hpp's file comment for the full design. Structurally
+    // identical to admin_control_loop() above (one line in, one line out,
+    // connection closed - same reasoning: a slow or hostile caller can only
+    // ever tie up one accept() cycle's worth of a thread) but bound to this
+    // mediator's own bind host rather than hardcoded to loopback - the whole
+    // point is remote reachability - and with no token check at all, since
+    // nothing this channel ever returns is sensitive (see
+    // configured_mediator_auth_port()'s comment).
+    void auth_control_loop() {
+        const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd < 0) {
+            std::cerr << "mediator auth control: socket() failed\n";
+            return;
+        }
+        const int reuse = 1;
+        ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(*mediator_auth_port_);
+        const std::string& bind_host = bind_endpoint_.host;
+        if (::inet_pton(AF_INET, bind_host.c_str(), &address.sin_addr) != 1) {
+            std::cerr << "mediator auth control: inet_pton failed for host '" << bind_host
+                      << "' - only a literal IPv4 address is supported here, not a hostname\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            std::cerr << "mediator auth control: bind failed on " << bind_host << ':'
+                      << *mediator_auth_port_ << " (" << std::strerror(errno) << ")\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::listen(listen_fd, 8) != 0) {
+            std::cerr << "mediator auth control: listen failed\n";
+            ::close(listen_fd);
+            return;
+        }
+
+        for (;;) {
+            const int client_fd = ::accept(listen_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                continue;
+            }
+            timeval io_timeout{5, 0};
+            ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+            ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+            try {
+                handle_auth_connection(client_fd);
+            } catch (const std::exception& error) {
+                std::cerr << "mediator auth control: " << error.what() << '\n';
+            }
+            ::close(client_fd);
+        }
+    }
+
+    static void send_auth_line(int fd, const std::string& line) {
+        const std::string framed = line + "\n";
+        ::send(fd, framed.data(), framed.size(), 0);
+    }
+
+    void handle_auth_connection(int fd) {
+        std::string line;
+        char buffer[256];
+        for (;;) {
+            const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (received <= 0) {
+                return;
+            }
+            line.append(buffer, static_cast<std::size_t>(received));
+            // A nonce request is short (command + 64 hex chars); this cap is
+            // generous headroom against a hostile caller sending an
+            // unbounded stream that never contains a newline, not a
+            // realistic operating limit.
+            if (line.find('\n') != std::string::npos || line.size() > 1024U) {
+                break;
+            }
+        }
+        if (const auto newline = line.find('\n'); newline != std::string::npos) {
+            line.resize(newline);
+        }
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::istringstream stream(line);
+        std::string command;
+        std::string nonce_hex;
+        stream >> command >> nonce_hex;
+
+        if (command != "AUTH") {
+            send_auth_line(fd, "ERR unknown command");
+            return;
+        }
+        const auto nonce = hex_decode_fixed<kMediatorAuthNonceLength>(nonce_hex);
+        if (!nonce.has_value()) {
+            send_auth_line(fd, "ERR nonce must be exactly " +
+                                   std::to_string(kMediatorAuthNonceLength * 2U) + " hex characters");
+            return;
+        }
+
+        MediatorAuthFields fields;
+        fields.mediator_id = mediator_id_;
+        fields.nonce = *nonce;
+        fields.created_at = now_unix_seconds();
+        fields.expires_at = fields.created_at + kMediatorAuthTtlSeconds;
+        const MlDsa65Signature signature =
+            sign_mediator_auth(mediator_auth_keypair_.private_seed, fields);
+
+        send_auth_line(fd, "OK " + mediator_id_ + " " +
+                               hex_encode_bytes(mediator_auth_keypair_.public_key) + " " +
+                               std::to_string(fields.created_at) + " " +
+                               std::to_string(fields.expires_at) + " " +
+                               hex_encode_bytes(signature));
+    }
+
     void snapshot_loop() {
         while (snapshot_running_.load()) {
             try {
@@ -2331,6 +2577,12 @@ private:
     // persistence entirely - SETFEE stays exactly as live-only as before
     // this existed, matching prior behavior for anyone not opting in.
     std::string fee_persist_file_;
+    // See mediator_auth.hpp / configured_mediator_auth_port()'s comment.
+    // nullopt disables the mediator auth control channel entirely - no
+    // listening socket opened, no key generated/loaded either (see the
+    // constructor's conditional load above).
+    std::optional<std::uint16_t> mediator_auth_port_;
+    MlDsa65KeyPair mediator_auth_keypair_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
     std::atomic<std::size_t> pending_handshakes_{0U};

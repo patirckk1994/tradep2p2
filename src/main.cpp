@@ -4,6 +4,7 @@
 #include "tradep2p/journal.hpp"
 #include "tradep2p/keystore.hpp"
 #include "tradep2p/lobby.hpp"
+#include "tradep2p/mediator_auth.hpp"
 #include "tradep2p/protocol.hpp"
 #include "tradep2p/receipt.hpp"
 #include "tradep2p/recognition.hpp"
@@ -12,10 +13,12 @@
 #include "tradep2p/secure_channel.hpp"
 
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +45,8 @@ using tradep2p::AbortMessage;
 using tradep2p::CancelOfferMessage;
 using tradep2p::CreateOfferMessage;
 using tradep2p::ClientTlsPolicy;
+using tradep2p::connect_raw_tcp;
+using tradep2p::connect_raw_via_socks5;
 using tradep2p::CounterpartyFingerprint;
 using tradep2p::CounterpartyHistoryEntry;
 using tradep2p::IdentityKeystore;
@@ -1466,6 +1471,126 @@ void run_client(SecureChannel channel, std::string mediator_id) {
     }
 }
 
+// Speaks the mediator auth control channel's plain-text line protocol (see
+// mediator_auth.hpp/lobby.cpp's auth_control_loop()) over an already-
+// connected raw socket - direct or via SOCKS5, the caller (main()'s
+// verify-mediator/verify-mediator-tor modes) has already handled that part.
+// Closes `fd` before returning either way. Returns true (PASS) only when
+// the signature verifies AND the response is still within its TTL AND (if
+// `expect_key_hex` is non-empty) the returned key matches it - a FAIL here
+// is a legitimate negative result, not an error, so this does not throw for
+// any of those three cases; it only throws for genuine protocol/connection
+// failures (can't send, connection closed early, malformed response).
+bool run_verify_mediator(int fd, const std::string& expect_key_hex) {
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { ::close(fd); }
+    } guard{fd};
+
+    const tradep2p::MediatorAuthNonce nonce = tradep2p::generate_mediator_auth_nonce();
+    const std::string request = "AUTH " + hex_encode(nonce) + "\n";
+    {
+        std::size_t offset = 0;
+        while (offset < request.size()) {
+            const ssize_t sent =
+                ::send(fd, request.data() + offset, request.size() - offset, 0);
+            if (sent <= 0) {
+                throw std::runtime_error("failed to send AUTH request to mediator auth port");
+            }
+            offset += static_cast<std::size_t>(sent);
+        }
+    }
+
+    std::string line;
+    char buffer[8192];
+    for (;;) {
+        const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (received <= 0) {
+            throw std::runtime_error(
+                "connection closed before the mediator sent a response");
+        }
+        line.append(buffer, static_cast<std::size_t>(received));
+        if (line.find('\n') != std::string::npos || line.size() > 16384U) {
+            break;
+        }
+    }
+    if (const auto newline = line.find('\n'); newline != std::string::npos) {
+        line.resize(newline);
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+
+    std::istringstream stream(line);
+    std::string status;
+    stream >> status;
+    if (status == "ERR") {
+        std::string reason;
+        std::getline(stream, reason);
+        throw std::runtime_error("mediator auth port returned an error:" + reason);
+    }
+    if (status != "OK") {
+        throw std::runtime_error("malformed response from mediator auth port");
+    }
+
+    std::string mediator_id;
+    std::string public_key_hex;
+    std::string created_text;
+    std::string expires_text;
+    std::string signature_hex;
+    stream >> mediator_id >> public_key_hex >> created_text >> expires_text >> signature_hex;
+    if (mediator_id.empty() || public_key_hex.empty() || created_text.empty() ||
+        expires_text.empty() || signature_hex.empty()) {
+        throw std::runtime_error("malformed response from mediator auth port");
+    }
+
+    std::uint64_t created_at = 0;
+    std::uint64_t expires_at = 0;
+    const auto created_result = std::from_chars(
+        created_text.data(), created_text.data() + created_text.size(), created_at);
+    const auto expires_result = std::from_chars(
+        expires_text.data(), expires_text.data() + expires_text.size(), expires_at);
+    if (created_result.ec != std::errc{} || expires_result.ec != std::errc{}) {
+        throw std::runtime_error("malformed timestamps in mediator auth response");
+    }
+
+    const auto public_key = hex_decode<tradep2p::kMlDsa65PublicKeyLength>(public_key_hex);
+    const auto signature = hex_decode<tradep2p::kMlDsa65SignatureLength>(signature_hex);
+
+    tradep2p::MediatorAuthFields fields;
+    fields.mediator_id = mediator_id;
+    fields.nonce = nonce;
+    fields.created_at = created_at;
+    fields.expires_at = expires_at;
+
+    const bool signature_valid = tradep2p::verify_mediator_auth(public_key, fields, signature);
+    const auto now = static_cast<std::uint64_t>(std::time(nullptr));
+    const bool fresh = expires_at > now;
+
+    std::cout << "mediator_id:     " << mediator_id << '\n';
+    std::cout << "auth public key: " << public_key_hex << '\n';
+    std::cout << "signature:       " << (signature_valid ? "verifies" : "DOES NOT VERIFY") << '\n';
+    std::cout << "freshness:       "
+              << (fresh ? "within TTL"
+                        : "EXPIRED (clock skew, or a replayed old response)")
+              << '\n';
+
+    bool overall = signature_valid && fresh;
+
+    if (!expect_key_hex.empty()) {
+        std::string normalized_expect = expect_key_hex;
+        std::transform(normalized_expect.begin(), normalized_expect.end(),
+                       normalized_expect.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool matches = normalized_expect == public_key_hex;
+        std::cout << "matches --expect-key: " << (matches ? "yes" : "NO") << '\n';
+        overall = overall && matches;
+    }
+
+    std::cout << (overall ? "PASS" : "FAIL") << '\n';
+    return overall;
+}
+
 void run_registry_heartbeat(Endpoint registry,
                             ClientTlsPolicy registry_tls,
                             RegistryNode node) {
@@ -1511,7 +1636,11 @@ void print_usage(const char* program) {
         << "  " << program
         << " client <node:port> <node-cert-sha256>\n"
         << "  " << program
-        << " client-tor <proxy:port> <onion:port> <node-cert-sha256>\n";
+        << " client-tor <proxy:port> <onion:port> <node-cert-sha256>\n"
+        << "  " << program
+        << " verify-mediator <host:port> [--expect-key HEX]\n"
+        << "  " << program
+        << " verify-mediator-tor <proxy:port> <onion:port> [--expect-key HEX]\n";
 }
 
 } // namespace
@@ -1677,6 +1806,32 @@ int main(int argc, char** argv) {
             run_client(SecureChannel::connect_via_socks5(
                 parse_endpoint(argv[2]), parse_endpoint(argv[3]),
                 ClientTlsPolicy{argv[4]}), std::string(argv[3]));
+        } else if (mode == "verify-mediator") {
+            if (argc != 3 && argc != 5) {
+                throw std::invalid_argument("wrong verify-mediator argument count");
+            }
+            std::string expect_key;
+            if (argc == 5) {
+                if (std::string_view(argv[3]) != "--expect-key") {
+                    throw std::invalid_argument("expected --expect-key");
+                }
+                expect_key = argv[4];
+            }
+            const int fd = connect_raw_tcp(parse_endpoint(argv[2]));
+            return run_verify_mediator(fd, expect_key) ? EXIT_SUCCESS : EXIT_FAILURE;
+        } else if (mode == "verify-mediator-tor") {
+            if (argc != 4 && argc != 6) {
+                throw std::invalid_argument("wrong verify-mediator-tor argument count");
+            }
+            std::string expect_key;
+            if (argc == 6) {
+                if (std::string_view(argv[4]) != "--expect-key") {
+                    throw std::invalid_argument("expected --expect-key");
+                }
+                expect_key = argv[5];
+            }
+            const int fd = connect_raw_via_socks5(parse_endpoint(argv[2]), parse_endpoint(argv[3]));
+            return run_verify_mediator(fd, expect_key) ? EXIT_SUCCESS : EXIT_FAILURE;
         } else {
             print_usage(argv[0]);
             return EXIT_FAILURE;
