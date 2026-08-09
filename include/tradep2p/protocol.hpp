@@ -280,6 +280,14 @@ struct TurnMessage {
     std::string asset;
     std::uint64_t amount{};
     std::string destination;
+    // Authoritative, set only by MediatorSession::current_turn() - whether
+    // this leg is the mediator fee rather than a real trade tranche. Needed
+    // now that the fee's position is configurable (see FeePosition in
+    // mediator.hpp): it can legitimately reuse a round_index that also
+    // belongs to a real round (0, or rounds-1), so "round_index >= rounds"
+    // is no longer a valid way to infer this client-side - see
+    // dashboard_client.cpp's is_fee_turn, the one place that used to guess.
+    bool is_fee{false};
 };
 
 struct RoundSignalMessage {

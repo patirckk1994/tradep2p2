@@ -162,6 +162,110 @@ void test_mediator_fee_flow() {
             "reporting the fee as sent should complete the room directly");
 }
 
+void test_mediator_fee_before_first_round() {
+    const tradep2p::FeeTerms fee{"BTC", 7U, "mediator-fee-address"};
+    tradep2p::MediatorSession session(
+        {terms_fixture(), "address-for-party-a"}, room_fixture(), fee,
+        /*require_fee_confirmation=*/false, tradep2p::FeePosition::BeforeFirstRound);
+    session.join({session.id(), "address-for-party-b"});
+
+    require(session.state() == tradep2p::SessionState::WaitingForFeeSent,
+            "fee should be due immediately after join for BeforeFirstRound");
+    const auto fee_turn = session.current_turn();
+    require(fee_turn.is_fee, "fee turn must be marked is_fee");
+    require(fee_turn.asset == fee.asset && fee_turn.amount == fee.amount &&
+                fee_turn.destination == fee.address,
+            "fee turn does not match configured fee terms");
+    require(fee_turn.round_index == 0U, "fee before the first round sits at round_index 0");
+
+    const tradep2p::RoundSignalMessage fee_signal{
+        fee_turn.room_id, fee_turn.round_index, fee_turn.sender};
+    session.sender_reported_sent(tradep2p::Party::A, fee_signal);
+    require(session.state() == tradep2p::SessionState::WaitingForSent,
+            "paying an early fee must resume real trading, not complete the room");
+
+    while (session.state() != tradep2p::SessionState::Complete) {
+        if (session.state() != tradep2p::SessionState::WaitingForFinalReceiptAck) {
+            require(!session.current_turn().is_fee, "no second fee turn should ever appear");
+        }
+        acknowledge_current_turn(session);
+    }
+    require(session.round_index() == 3U, "all rounds must still complete exactly once");
+}
+
+void test_mediator_fee_before_last_round() {
+    const tradep2p::FeeTerms fee{"BTC", 7U, "mediator-fee-address"};
+    tradep2p::MediatorSession session(
+        {terms_fixture(), "address-for-party-a"}, room_fixture(), fee,
+        /*require_fee_confirmation=*/false, tradep2p::FeePosition::BeforeLastRound);
+    session.join({session.id(), "address-for-party-b"});
+    require(session.state() == tradep2p::SessionState::WaitingForSent,
+            "3-round trade must not owe the fee before round 0 for BeforeLastRound");
+
+    // Drive rounds 0 and 1 (indices 0,1) normally - the fee must not appear yet.
+    while (session.round_index() < 2U) {
+        const auto turn = session.current_turn();
+        require(!turn.is_fee, "fee must not appear before the last round");
+        acknowledge_current_turn(session);
+    }
+
+    require(session.state() == tradep2p::SessionState::WaitingForFeeSent,
+            "fee must be due exactly when the last round (index 2) is about to start");
+    const auto fee_turn = session.current_turn();
+    require(fee_turn.is_fee, "fee turn must be marked is_fee");
+    require(fee_turn.round_index == 2U, "fee before the last round sits at that round's index");
+
+    const tradep2p::RoundSignalMessage fee_signal{
+        fee_turn.room_id, fee_turn.round_index, fee_turn.sender};
+    session.sender_reported_sent(tradep2p::Party::A, fee_signal);
+    require(session.state() == tradep2p::SessionState::WaitingForSent,
+            "paying the fee before the last round must resume trading for that round");
+
+    while (session.state() != tradep2p::SessionState::Complete) {
+        if (session.state() != tradep2p::SessionState::WaitingForFinalReceiptAck) {
+            require(!session.current_turn().is_fee, "no second fee turn should ever appear");
+        }
+        acknowledge_current_turn(session);
+    }
+    require(session.round_index() == 3U, "all rounds must still complete exactly once");
+}
+
+void test_mediator_fee_before_last_round_single_round_matches_before_first() {
+    tradep2p::TradeTerms terms = terms_fixture();
+    terms.rounds = 1U;
+    const tradep2p::FeeTerms fee{"BTC", 7U, "mediator-fee-address"};
+    tradep2p::MediatorSession session(
+        {terms, "address-for-party-a"}, room_fixture(), fee,
+        /*require_fee_confirmation=*/false, tradep2p::FeePosition::BeforeLastRound);
+    session.join({session.id(), "address-for-party-b"});
+    require(session.state() == tradep2p::SessionState::WaitingForFeeSent,
+            "with only one round, BeforeLastRound must degenerate to before that round");
+}
+
+void test_mediator_fee_confirmation_with_early_position() {
+    const tradep2p::FeeTerms fee{"BTC", 7U, "mediator-fee-address"};
+    tradep2p::MediatorSession session(
+        {terms_fixture(), "address-for-party-a"}, room_fixture(), fee,
+        /*require_fee_confirmation=*/true, tradep2p::FeePosition::BeforeFirstRound);
+    session.join({session.id(), "address-for-party-b"});
+
+    const auto fee_turn = session.current_turn();
+    const tradep2p::RoundSignalMessage fee_signal{
+        fee_turn.room_id, fee_turn.round_index, fee_turn.sender};
+    session.sender_reported_sent(tradep2p::Party::A, fee_signal);
+    require(session.state() == tradep2p::SessionState::WaitingForFeeConfirmation,
+            "an early fee with confirmation required must still park for confirmation");
+
+    session.confirm_fee_received();
+    require(session.state() == tradep2p::SessionState::WaitingForSent,
+            "confirming an early fee must resume trading, not complete the room");
+
+    while (session.state() != tradep2p::SessionState::Complete) {
+        acknowledge_current_turn(session);
+    }
+    require(session.round_index() == 3U, "all rounds must still complete exactly once");
+}
+
 } // namespace
 
 int main() {
@@ -171,6 +275,10 @@ int main() {
         test_registry_serialization();
         test_mediator_flow();
         test_mediator_fee_flow();
+        test_mediator_fee_before_first_round();
+        test_mediator_fee_before_last_round();
+        test_mediator_fee_before_last_round_single_round_matches_before_first();
+        test_mediator_fee_confirmation_with_early_position();
         std::cout << "unit tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -816,6 +816,7 @@ std::vector<std::uint8_t> encode_turn(const TurnMessage& message) {
     writer.short_string(message.asset, kMaxAssetCodeLength);
     writer.u64(message.amount);
     writer.short_string(message.destination, kMaxAddressLength);
+    writer.u8(message.is_fee ? 1U : 0U);
     return writer.take();
 }
 
@@ -828,6 +829,7 @@ TurnMessage decode_turn(std::span<const std::uint8_t> bytes) {
     message.asset = reader.short_string(kMaxAssetCodeLength);
     message.amount = reader.u64();
     message.destination = reader.short_string(kMaxAddressLength);
+    message.is_fee = reader.u8() != 0U;
     validate_room_id(message.room_id);
     validate_party(message.sender);
     validate_asset(message.asset);

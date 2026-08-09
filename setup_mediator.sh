@@ -31,6 +31,20 @@ Options:
                         everything else here (no blockchain check); off by
                         default. Only meaningful with --fee-asset and
                         --admin-token.
+  --fee-position before-first|before-last|after-last
+                        when the fee is actually collected relative to the
+                        real trade rounds (default after-last, today's only
+                        historical behavior - honor-based, paid last, a party
+                        can complete the whole trade and never pay).
+                        before-first: paid before any real tranche - most
+                        protection against being crossed, most exposure for
+                        the payer if the counterparty then doesn't cooperate.
+                        before-last: paid before the LAST real round - most of
+                        the trade's real skin-in-the-game has already changed
+                        hands, a smaller window to skip out than after-last.
+                        Degenerates to before-first when --rounds is 1 (no
+                        earlier round exists to hook the fee onto). Only
+                        meaningful with --fee-asset.
   --admin-token TOKEN  enables a loopback-only live control channel for
                         changing the fee without a restart (optional; see
                         --admin-port). Keep this secret - anyone who has it
@@ -67,6 +81,7 @@ FEE_ASSET=""
 FEE_AMOUNT=""
 FEE_ADDRESS=""
 FEE_REQUIRE_CONFIRMATION="0"
+FEE_POSITION="after-last"
 ADMIN_TOKEN=""
 ADMIN_PORT="7444"
 REGISTRY_ENDPOINT=""
@@ -93,6 +108,12 @@ while [[ $# -gt 0 ]]; do
         --fee-amount) FEE_AMOUNT="$2"; shift 2 ;;
         --fee-address) FEE_ADDRESS="$2"; shift 2 ;;
         --fee-require-confirmation) FEE_REQUIRE_CONFIRMATION="1"; shift ;;
+        --fee-position)
+            case "$2" in
+                before-first|before-last|after-last) FEE_POSITION="$2" ;;
+                *) echo "invalid --fee-position: $2 (must be before-first, before-last, or after-last)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
         --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
@@ -121,6 +142,10 @@ FEE_ADDRESS="$FEE_ADDRESS"
 # "1" to hold the fee leg open until you confirm it via the admin channel
 # instead of trusting the payer's own claim. Needs ADMIN_TOKEN set too.
 FEE_REQUIRE_CONFIRMATION="$FEE_REQUIRE_CONFIRMATION"
+
+# before-first, before-last, or after-last (default) - see --fee-position
+# above for what each means.
+FEE_POSITION="$FEE_POSITION"
 
 # Leave ADMIN_TOKEN empty to disable the live fee-control channel entirely.
 # Keep this secret if set - anyone who has it can change the fee live.
@@ -200,6 +225,7 @@ echo "  certificate pin:   $CERT_PIN"
 echo "  (share this pin with anyone who should connect a client here)"
 if [[ -n "$FEE_ASSET" ]]; then
     echo "  fee:               $FEE_AMOUNT $FEE_ASSET -> $FEE_ADDRESS"
+    echo "  fee position:      $FEE_POSITION"
     if [[ "$FEE_REQUIRE_CONFIRMATION" == "1" ]]; then
         echo "  fee confirmation:  required (honor-based, held until you confirm via admin channel)"
     fi
@@ -242,6 +268,9 @@ if [[ -f "$CONFIG_FILE" ]]; then
 fi
 if [[ "$FEE_REQUIRE_CONFIRMATION" == "1" ]]; then
     export TRADEP2P_FEE_REQUIRE_CONFIRMATION="1"
+fi
+if [[ "$FEE_POSITION" != "after-last" ]]; then
+    export TRADEP2P_FEE_POSITION="$FEE_POSITION"
 fi
 if [[ -n "$ADMIN_TOKEN" ]]; then
     export TRADEP2P_ADMIN_TOKEN="$ADMIN_TOKEN"

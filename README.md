@@ -266,9 +266,34 @@ export TRADEP2P_FEE_ADDRESS=your-fee-receive-address
 
 Leaving `TRADEP2P_FEE_ASSET` unset charges no fee (the default). When a fee is
 configured, the mediator advertises it to every connecting client and adds it
-to the settlement as one extra final leg, paid by the offer creator after the
-last trade round. It settles through the same `sent`/`received` acknowledgement
-flow as every other transfer.
+to the settlement as one extra leg, paid by the offer creator, settling
+through the same `sent`/`received` acknowledgement flow as every other
+transfer.
+
+**When the fee is collected is configurable** (`TRADEP2P_FEE_POSITION` /
+`setup_mediator.sh --fee-position`, one of `before-first`, `before-last`, or
+`after-last` — default `after-last`), because honor-based collection after
+everything else lets a party complete the entire trade and never pay —
+"crossing" the mediator entirely:
+
+- `after-last` (default): paid after every real round completes. Honor-based
+  like the rest of this protocol — nothing stops a party from finishing the
+  whole trade and skipping the fee.
+- `before-last`: paid before the *last* real round starts. Most of the
+  trade's real value has already changed hands by then, leaving a much
+  smaller window to skip out than `after-last` — but still less exposure for
+  the payer than paying up front. Degenerates to `before-first` when the
+  trade has only one round (there's no earlier round to hook the fee onto).
+- `before-first`: paid before *any* real tranche. Maximum protection against
+  being crossed, at the cost of maximum exposure for the payer if the
+  counterparty then refuses to trade at all.
+
+None of these involve verifying an actual transfer occurred. Separately,
+`TRADEP2P_FEE_REQUIRE_CONFIRMATION=1` (`--fee-require-confirmation`) holds
+whichever fee leg is due open until the operator explicitly confirms receipt
+over the admin control channel, instead of trusting the payer's own "I sent
+it" claim alone — still honor-based (no blockchain check), just
+operator-gated rather than fully automatic. Combines with any fee position.
 
 ## Terminal commands — trading
 

@@ -44,6 +44,28 @@ enum class SessionState : std::uint8_t {
     WaitingForFeeConfirmation,
 };
 
+// When a configured fee is actually collected relative to the real trade
+// rounds - an operator choice about how much of the trade happens before the
+// mediator is paid, trading off the mediator's risk of being "crossed"
+// (a party completes the whole trade and never pays the fee) against the
+// payer's risk of losing the fee if the counterparty then doesn't cooperate.
+// AfterLastRound is today's only behavior and stays the default so every
+// existing deployment is unaffected unless an operator opts in.
+enum class FeePosition : std::uint8_t {
+    // Paid before ANY real tranche - maximum protection against being
+    // crossed, maximum exposure for the payer (nothing has been traded yet).
+    BeforeFirstRound,
+    // Paid before the LAST real round - most of the trade's real
+    // skin-in-the-game has already changed hands, a smaller window to skip
+    // out afterward than AfterLastRound, less payer exposure than
+    // BeforeFirstRound. Degenerates to BeforeFirstRound when the trade has
+    // only one round (there is no earlier round to hook the fee onto).
+    BeforeLastRound,
+    // Paid after every real round completes - honor-based, today's only
+    // behavior. A party can complete the entire trade and never pay.
+    AfterLastRound,
+};
+
 // Coordinates turns only. It never creates, inspects, searches, confirms,
 // stores, or identifies cryptocurrency transactions. When a mediator-wide fee
 // is configured, it is settled as one extra final leg paid by the offer
@@ -54,9 +76,11 @@ public:
     // require_fee_confirmation: see SessionState::WaitingForFeeConfirmation.
     // Defaults false so every existing call site (and every already-shipped
     // deployment) keeps today's honor-system-only behavior unless an
-    // operator explicitly opts in.
+    // operator explicitly opts in. fee_position: see FeePosition above;
+    // defaults to AfterLastRound for the same reason.
     MediatorSession(CreateRoomMessage creator, RoomId room_id, FeeTerms fee,
-                    bool require_fee_confirmation = false);
+                    bool require_fee_confirmation = false,
+                    FeePosition fee_position = FeePosition::AfterLastRound);
 
     // Phase 3 (mediator-side room persistence, see
     // docs/identity-03-journal-recovery.md and room_persistence.hpp):
@@ -81,6 +105,11 @@ public:
     // This only matters for the rare case of restoring a room still in
     // WaitingForFeeSent, where the caller (lobby.cpp) supplies its current
     // startup configuration, same as it would for a brand-new room.
+    // fee_position is likewise not persisted, for the identical reason -
+    // whatever position was in effect at the moment the fee actually
+    // triggered is already baked into the persisted round_index/state; this
+    // parameter only matters for whatever fee-related transition (if any)
+    // hasn't happened yet as of restore.
     [[nodiscard]] static MediatorSession restore(RoomId room_id,
                                                   TradeTerms terms,
                                                   std::string receive_address_a,
@@ -90,7 +119,8 @@ public:
                                                   std::uint32_t round_index,
                                                   std::uint8_t leg_index,
                                                   std::string abort_reason,
-                                                  bool require_fee_confirmation = false);
+                                                  bool require_fee_confirmation = false,
+                                                  FeePosition fee_position = FeePosition::AfterLastRound);
 
     [[nodiscard]] const RoomId& id() const noexcept { return room_id_; }
     [[nodiscard]] SessionState state() const noexcept { return state_; }
@@ -129,15 +159,19 @@ public:
     [[nodiscard]] bool final_receipt_acked(Party party) const noexcept {
         return party == Party::A ? final_receipt_acked_a_ : final_receipt_acked_b_;
     }
-    // True while gating the mediator-collected fee leg (fee configured,
-    // this is the trade's true final tranche); false while gating the last
-    // round's second leg (no fee configured, that leg is the final
-    // tranche). Deterministically derivable from already-persisted state
-    // (round_index_, terms().rounds, fee amount) - not itself persisted,
-    // so a mediator restart mid-gate recomputes it identically rather than
-    // needing a new persisted field.
+    // True while gating the mediator-collected fee leg (fee configured AND
+    // positioned after all rounds, so this is the trade's true final
+    // tranche); false while gating the last round's second leg instead (no
+    // fee configured, OR the fee is positioned before the last round and so
+    // is never the thing this gate needs to protect - see FeePosition).
+    // Deterministically derivable from already-persisted state
+    // (round_index_, terms().rounds, fee amount) plus the mediator's current
+    // fee-position config - not itself persisted, so a mediator restart
+    // mid-gate recomputes it identically rather than needing a new
+    // persisted field.
     [[nodiscard]] bool final_receipt_gate_is_fee_leg() const noexcept {
-        return fee_.amount > 0U && round_index_ == creator_.terms.rounds;
+        return fee_.amount > 0U && fee_position_ == FeePosition::AfterLastRound &&
+               round_index_ == creator_.terms.rounds;
     }
     [[nodiscard]] const FeeTerms& fee() const noexcept { return fee_; }
 
@@ -175,6 +209,8 @@ private:
     // sender_reported_sent()'s WaitingForFeeSent branch - irrelevant once a
     // room has already left that state, restored or not.
     bool require_fee_confirmation_{false};
+    // See FeePosition above.
+    FeePosition fee_position_{FeePosition::AfterLastRound};
 };
 
 } // namespace tradep2p

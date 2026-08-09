@@ -272,8 +272,15 @@ std::string DashboardClient::state_json() const {
             json << ',';
         }
         first_room = false;
-        const bool is_fee_turn =
-            room.has_turn && room.turn.round_index >= room.terms.rounds;
+        // Authoritative wire field (TurnMessage.is_fee, set only by
+        // MediatorSession::current_turn()'s WaitingForFeeSent branch) - NOT
+        // "round_index >= terms.rounds" anymore. That used to work only
+        // because AfterLastRound was the only possible fee position, so a
+        // round_index past the end was the sole way to see one; now that
+        // the fee's position is configurable (mediator.hpp's FeePosition),
+        // a fee leg can legitimately reuse an in-range round_index (0, or
+        // rounds-1), making that comparison ambiguous with a real round.
+        const bool is_fee_turn = room.has_turn && room.turn.is_fee;
         std::string action = "none";
         if (room.status == "active" && room.has_turn && !room.fee_confirmation_pending) {
             if (is_fee_turn) {

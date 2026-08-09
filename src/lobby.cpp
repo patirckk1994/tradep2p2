@@ -376,6 +376,24 @@ bool configured_require_fee_confirmation() {
     return text == "1" || text == "true";
 }
 
+// See mediator.hpp's FeePosition. Defaults to AfterLastRound (today's only
+// behavior, honor-based, paid last) so every existing deployment is
+// unaffected unless an operator explicitly opts in - also the fallback for
+// an unset or unrecognized value, same fail-open-to-current-behavior posture
+// every other env-var parser in this file already has, rather than refusing
+// to start the mediator over a typo. Meaningless (and ignored) if no fee is
+// configured at all.
+FeePosition configured_fee_position() {
+    const std::string text = env_or_empty("TRADEP2P_FEE_POSITION");
+    if (text == "before-first") {
+        return FeePosition::BeforeFirstRound;
+    }
+    if (text == "before-last") {
+        return FeePosition::BeforeLastRound;
+    }
+    return FeePosition::AfterLastRound;
+}
+
 // The mediator's own identity string, bound into every receipt-ack
 // signature it verifies and every receipt it issues (receipt.hpp's
 // ReceiptAckFields/ReceiptFields.mediator_id) - it MUST be textually
@@ -417,6 +435,7 @@ public:
           admin_token_(configured_admin_token()),
           admin_port_(configured_admin_port()),
           require_fee_confirmation_(configured_require_fee_confirmation()),
+          fee_position_(configured_fee_position()),
           fee_persist_file_(configured_fee_persist_file()) {}
 
     ~Impl() {
@@ -643,12 +662,13 @@ private:
                   RoomId room_id,
                   std::string receive_address_b,
                   FeeTerms fee,
-                  bool require_fee_confirmation)
+                  bool require_fee_confirmation,
+                  FeePosition fee_position)
             : id(room_id),
               party_a(invite.from),
               party_b(invite.to),
               session(CreateRoomMessage{invite.terms, invite.receive_address_a},
-                      room_id, std::move(fee), require_fee_confirmation) {
+                      room_id, std::move(fee), require_fee_confirmation, fee_position) {
             session.join(JoinRoomMessage{room_id, std::move(receive_address_b)});
         }
 
@@ -656,12 +676,13 @@ private:
                   ClientId joining_client,
                   std::string receive_address_b,
                   FeeTerms fee,
-                  bool require_fee_confirmation)
+                  bool require_fee_confirmation,
+                  FeePosition fee_position)
             : id(offer.id),
               party_a(offer.creator),
               party_b(joining_client),
               session(CreateRoomMessage{offer.terms, offer.receive_address_a},
-                      offer.id, std::move(fee), require_fee_confirmation) {
+                      offer.id, std::move(fee), require_fee_confirmation, fee_position) {
             session.join(JoinRoomMessage{offer.id, std::move(receive_address_b)});
         }
 
@@ -685,7 +706,8 @@ private:
         // MediatorSession::restore()'s header comment for why that is
         // correct (a room already past that gate stays exactly where its
         // persisted `state` says regardless of this value).
-        RoomEntry(const PersistedRoom& persisted, bool require_fee_confirmation)
+        RoomEntry(const PersistedRoom& persisted, bool require_fee_confirmation,
+                  FeePosition fee_position)
             : id(persisted.room_id),
               party_a(persisted.party_a),
               party_b(persisted.party_b),
@@ -693,7 +715,7 @@ private:
                   persisted.room_id, persisted.terms, /*receive_address_a=*/std::string{},
                   /*receive_address_b=*/std::string{}, persisted.fee, persisted.state,
                   persisted.round_index, persisted.leg_index, persisted.abort_reason,
-                  require_fee_confirmation)),
+                  require_fee_confirmation, fee_position)),
               active(persisted.state != SessionState::Complete &&
                      persisted.state != SessionState::Aborted) {}
 
@@ -991,7 +1013,7 @@ private:
             // for all later /sent, /received and /abort messages.
             room = std::make_shared<RoomEntry>(offer, client->id,
                                                message.receive_address_b, current_fee(),
-                                               require_fee_confirmation_);
+                                               require_fee_confirmation_, fee_position_);
             rooms_.emplace(key, room);
             offers_.erase(offer_it);
         }
@@ -1145,7 +1167,7 @@ private:
 
             room = std::make_shared<RoomEntry>(
                 invite, room_id, message.receive_address_b, current_fee(),
-                require_fee_confirmation_);
+                require_fee_confirmation_, fee_position_);
             rooms_.emplace(room_key, room);
             invites_.erase(invite_it);
         }
@@ -1196,6 +1218,18 @@ private:
         std::shared_ptr<Client> receiver;
         bool complete = false;
         bool awaiting_fee_confirmation = false;
+        // True only when an early-positioned fee leg (FeePosition::
+        // BeforeFirstRound/BeforeLastRound - see mediator.hpp) was just
+        // reported sent and real trade rounds remain: sender_reported_sent()
+        // then lands back in WaitingForSent, which a NORMAL (non-fee) sent
+        // report can never do (that always goes to WaitingForReceived
+        // instead) - so this state uniquely identifies "resume trading with
+        // a fresh Turn", not "forward a Sent signal to the counterparty".
+        // The mediator is the fee's recipient, not the other party, so the
+        // ordinary receiver->enqueue(Sent, ...) relay below would be wrong
+        // here - the counterparty has nothing to acknowledge about the fee.
+        bool resumed_trading_after_early_fee = false;
+        TurnMessage resumed_turn;
         std::optional<IssuedReceipt> completion_receipt;
         {
             std::scoped_lock lock(room->mutex);
@@ -1208,21 +1242,25 @@ private:
             // Reporting a mediator fee as sent can complete the room directly,
             // since the mediator (not the counterparty) is the recipient of
             // that leg and needs no separate receipt acknowledgement. By the
-            // time this room could ever be in WaitingForFeeSent at all, it
-            // already passed through the final-receipt-ack gate (phase 6 -
-            // see mediator.hpp's SessionState::WaitingForFinalReceiptAck),
-            // so issuing the stage-4 "settlement completed" receipt here is
-            // never premature - see receipt.hpp's file comment. Unless the
-            // operator opted into require_fee_confirmation, in which case
-            // the session lands in WaitingForFeeConfirmation instead - see
-            // handle_confirm_fee() for where completion actually happens
-            // in that case.
-            complete = room->session.state() == SessionState::Complete;
-            awaiting_fee_confirmation =
-                room->session.state() == SessionState::WaitingForFeeConfirmation;
+            // time this room could ever be in WaitingForFeeSent at all with
+            // FeePosition::AfterLastRound, it already passed through the
+            // final-receipt-ack gate (phase 6 - see mediator.hpp's
+            // SessionState::WaitingForFinalReceiptAck), so issuing the
+            // stage-4 "settlement completed" receipt here is never premature
+            // - see receipt.hpp's file comment. Unless the operator opted
+            // into require_fee_confirmation, in which case the session lands
+            // in WaitingForFeeConfirmation instead - see handle_confirm_fee()
+            // for where completion actually happens in that case. An early
+            // fee position instead lands in WaitingForSent, handled below.
+            const SessionState new_state = room->session.state();
+            complete = new_state == SessionState::Complete;
+            awaiting_fee_confirmation = new_state == SessionState::WaitingForFeeConfirmation;
+            resumed_trading_after_early_fee = new_state == SessionState::WaitingForSent;
             if (complete) {
                 room->active = false;
                 completion_receipt = issue_receipt(*room, ReceiptStage::SettlementCompleted, true);
+            } else if (resumed_trading_after_early_fee) {
+                resumed_turn = room->session.current_turn();
             }
             // Durably record the new state (or drop it - see
             // persist_room_remove()'s comment - once it is Complete)
@@ -1254,6 +1292,11 @@ private:
             // fee's recipient is the mediator operator, not them).
             send_to_room(room, MessageType::FeeConfirmationPending,
                         encode_fee_confirmation_pending(FeeConfirmationPendingMessage{room->id}));
+            return;
+        }
+
+        if (resumed_trading_after_early_fee) {
+            send_turn_to_room(room, resumed_turn);
             return;
         }
 
@@ -1809,7 +1852,8 @@ private:
             if (rooms_.contains(key)) {
                 continue; // should never happen this early, but never clobber
             }
-            rooms_.emplace(key, std::make_shared<RoomEntry>(persisted, require_fee_confirmation_));
+            rooms_.emplace(key, std::make_shared<RoomEntry>(persisted, require_fee_confirmation_,
+                                                             fee_position_));
             persisted_rooms_[key] = persisted;
             ++restored;
         }
@@ -2280,6 +2324,9 @@ private:
     // amount/asset/address), so a mediator's whole runtime behaves
     // consistently for this one setting.
     bool require_fee_confirmation_;
+    // See mediator.hpp's FeePosition. Same "captured once at startup, not
+    // live-changeable" treatment as require_fee_confirmation_ above.
+    FeePosition fee_position_;
     // See configured_fee_persist_file()'s comment. Empty disables
     // persistence entirely - SETFEE stays exactly as live-only as before
     // this existed, matching prior behavior for anyone not opting in.
