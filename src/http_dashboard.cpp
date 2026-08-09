@@ -239,19 +239,108 @@ std::string dashboard_html(const std::string& token,
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TradeP2P Lobby Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23060605'/%3E%3Crect x='1.5' y='1.5' width='61' height='61' rx='9' fill='none' stroke='%232a2a28' stroke-width='1.4'/%3E%3Cpath d='M32 11 L56 53 H8 Z' fill='none' stroke='%235b8fe6' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M23.5 26.5 H40.5' stroke='%235b8fe6' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M21 36 Q32 41 43 36' fill='none' stroke='%238fb4f2' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M26 38 L24.3 42' stroke='%238fb4f2' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M32 39.4 L32 43.6' stroke='%238fb4f2' stroke-width='1.6' stroke-linecap='round'/%3E%3Cpath d='M38 38 L39.7 42' stroke='%238fb4f2' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#071019;--panel:#0d1824;--panel2:#101f2e;--line:#20384d;--text:#dcecff;--muted:#8da7bd;--cyan:#58d8ff;--green:#77ff9b;--amber:#ffd166;--red:#ff7575}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#12364b 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.wrap{width:min(1500px,calc(100% - 24px));margin:18px auto 60px}.top,.panel{border:1px solid var(--line);background:rgba(13,24,36,.96);border-radius:14px;box-shadow:0 18px 48px #0007}.top{padding:20px 24px;margin-bottom:14px}.topline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{font-size:clamp(1.4rem,3vw,2.4rem);margin:.2rem 0}h2{margin:0 0 14px;color:var(--cyan);font-size:1.05rem}h3{margin:0 0 10px;color:var(--green);font-size:.95rem}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(340px,.8fr) minmax(500px,1.7fr);gap:14px}.stack{display:grid;gap:14px}.panel{padding:18px}.status{display:inline-block;padding:.25rem .6rem;border-radius:99px;background:#38495c}.status.connected,.status.active,.status.complete{background:#155c35}.status.connecting{background:#604d16}.status.disconnected,.status.aborted{background:#6b2525}label{display:grid;gap:5px;color:var(--muted)}input,button{font:inherit;border-radius:8px;border:1px solid var(--line)}input{width:100%;padding:9px 10px;background:#07111b;color:var(--text)}button{padding:8px 11px;background:#15334a;color:var(--text);cursor:pointer}button:hover{border-color:var(--cyan)}button.primary{background:#135534;color:#effff4}button.danger{background:#622727}button:disabled{opacity:.45;cursor:not-allowed}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.span2{grid-column:span 2}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--muted);font-size:.8rem}.room{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:13px;margin-bottom:10px}.room-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.mono-break{word-break:break-all}.turn{margin-top:10px;padding:10px;border-left:3px solid var(--amber);background:#09131d}.events{max-height:330px;overflow:auto;margin:0;padding-left:20px}.events li{margin:5px 0;color:#bfd1df}.server-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.metric{background:#08131d;border:1px solid var(--line);border-radius:9px;padding:10px}.metric b{display:block;color:var(--cyan);font-size:.75rem}.error{color:var(--red)}.notice{margin:8px 0 0;color:var(--amber)}@media(max-width:1000px){.grid{grid-template-columns:1fr}}@media(max-width:620px){.form-grid,.server-grid{grid-template-columns:1fr}.span2{grid-column:auto}}
-button.copy{padding:2px 7px;font-size:.8rem;background:transparent;border-color:var(--line);color:var(--muted)}button.copy:hover{color:var(--cyan);border-color:var(--cyan)}.hexrow{display:flex;align-items:center;gap:6px}.hexrow .mono-break{flex:1}details.crypto{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}details.crypto summary{cursor:pointer;color:var(--cyan);font-size:.85rem}details.crypto .field{margin:6px 0}details.crypto .field b{display:block;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px}.receipt-card{background:#08131d;border:1px solid var(--line);border-radius:8px;padding:9px;margin-top:6px}.pq{color:var(--green)}.classical{color:var(--amber)}
+/* Same design language as the main UMBRA site (assets/css/style.css) -
+   this page can't link that stylesheet directly (it's served standalone
+   by this binary, not through the PHP site), so the shared palette/fonts/
+   meander motif are duplicated here rather than approximated. Layout
+   below is dashboard-specific (data-dense, wider .wrap than the site's
+   880px prose .shell) since this is a working tool, not a marketing page. */
+:root{--bg:#0c0c0a;--bg-deep:#060605;--panel:#17160f;--panel-2:#201f16;--line:#4a453a;--line-soft:#322f27;--text:#f2efe4;--muted:#a39d89;--accent:#5b8fe6;--accent-soft:#16233d;--amber:#d9a441;--danger:#d9635c;--sans:Verdana,Geneva,Arial,"Helvetica Neue",Helvetica,sans-serif;--mono:"Courier New",Courier,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--serif:Cambria,Georgia,"Times New Roman",Times,serif;--meander:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='14'%3E%3Cpath d='M0 12 L0 2 L8 2 L8 7 L16 7 L16 2 L24 2' fill='none' stroke='%235b8fe6' stroke-width='2.2'/%3E%3C/svg%3E")}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 var(--sans)}
+h1,h2,h3{font-family:var(--serif);letter-spacing:.01em}
+code,.mono-break,input,button{font-family:var(--mono)}
+.wrap{width:min(1500px,calc(100% - 24px));margin:0 auto}
+.site-header{position:relative;border-bottom:3px double var(--line);background:var(--panel);margin-bottom:0}
+.site-header::after{content:"";display:block;height:12px;background-image:var(--meander);background-repeat:repeat-x;background-position:center;opacity:.8}
+.nav-shell{min-height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 0}
+.brand{display:inline-flex;align-items:center;gap:10px}
+.brand-mark{display:block;flex:none}
+.brand-copy{display:grid;line-height:1.15}
+.brand-copy strong{font:700 15px var(--mono);color:var(--text)}
+.brand-copy small{color:var(--muted);font-size:11px;letter-spacing:.03em;margin-top:2px}
+.session-bar{padding:10px 0;border-bottom:1px solid var(--line-soft);background:var(--panel);margin-bottom:18px}
+#identity{color:var(--muted);font-size:13px}
+.notice{color:var(--amber);font-size:13px;padding:6px 0 0}
+.grid{display:grid;grid-template-columns:minmax(340px,.8fr) minmax(500px,1.7fr);gap:14px;padding-bottom:60px}
+/* min-width:0 on every grid/flex level below is the actual fix for the
+   "squashed/overlapping panels" bug: grid items default to min-width:auto,
+   which lets wide unbreakable content (a 64-hex-char fingerprint, an
+   nowrap table row) force a track past its intended size instead of
+   scrolling inside .table-wrap/.hexrow as intended - the overflow then
+   visually bleeds into the adjacent column. */
+.grid,.stack,.panel,.hexrow{min-width:0}
+.stack{display:grid;gap:14px;align-content:start}
+.panel{padding:20px;border:1px solid var(--line);background:var(--panel)}
+.panel h2{margin:0 0 14px;color:var(--accent);font-size:1.05rem}
+.panel h3{margin:0 0 10px;color:var(--text);font-size:.95rem}
+.topline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.topline h2{margin:0}
+.muted{color:var(--muted)}
+.status{display:inline-block;padding:.25rem .6rem;border:1px solid var(--line);font:700 11px var(--mono);text-transform:uppercase;letter-spacing:.03em;background:var(--panel-2)}
+.status.connected,.status.active,.status.complete{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.status.connecting{border-color:var(--amber);color:var(--amber);background:#241a08}
+.status.disconnected,.status.aborted{border-color:var(--danger);color:var(--danger);background:#2a1512}
+label{display:grid;gap:5px;color:var(--muted);font-family:var(--sans);font-size:13px}
+input,button{font-size:13px;border:1px solid var(--line)}
+input{width:100%;padding:9px 10px;background:var(--bg-deep);color:var(--text);min-width:0}
+button{padding:8px 12px;background:var(--panel-2);color:var(--text);cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{background:#7fa8ee}
+button.danger{background:#3a1c14;border-color:var(--danger);color:#f3c9c2}
+button:disabled{opacity:.45;cursor:not-allowed}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.span2{grid-column:span 2}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:9px 8px;border-bottom:1px solid var(--line-soft);text-align:left}
+th{color:var(--muted);font:700 11px var(--mono);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+td{font-size:13px;font-family:var(--sans)}
+.room{border:1px solid var(--line);background:var(--panel-2);padding:14px;margin-bottom:10px}
+.room-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.mono-break{word-break:break-all;font-size:.85em}
+.turn{margin-top:10px;padding:10px;border-left:3px solid var(--amber);background:var(--bg-deep)}
+.events{max-height:330px;overflow:auto;margin:0;padding-left:20px;font-size:13px;font-family:var(--sans)}
+.events li{margin:5px 0;color:var(--text)}
+.server-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.metric{background:var(--bg-deep);border:1px solid var(--line);padding:10px;min-width:0}
+.metric b{display:block;color:var(--accent);font:700 11px var(--mono);text-transform:uppercase}
+.error{color:var(--danger)}
+@media(max-width:1000px){.grid{grid-template-columns:1fr}}
+@media(max-width:620px){.form-grid,.server-grid{grid-template-columns:1fr}.span2{grid-column:auto}}
+button.copy{padding:2px 7px;font-size:.8rem;background:transparent;border-color:var(--line);color:var(--muted)}button.copy:hover{color:var(--accent);border-color:var(--accent)}.hexrow{display:flex;align-items:center;gap:6px}.hexrow .mono-break{flex:1;min-width:0}details.crypto{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}details.crypto summary{cursor:pointer;color:var(--accent);font-size:.85rem;font-family:var(--sans)}details.crypto .field{margin:6px 0}details.crypto .field b{display:block;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px;font-family:var(--sans)}.receipt-card{background:var(--bg-deep);border:1px solid var(--line);padding:9px;margin-top:6px}.pq{color:var(--accent)}.classical{color:var(--amber)}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <div class="topline"><div><div class="muted">TRADEP2P / PROGRESSIVE FRACTIONAL SETTLEMENT</div><h1>Lobby client + mediator dashboard</h1></div><div><span id="connection" class="status connecting">connecting</span></div></div>
-    <div id="identity" class="muted">anonymous client not connected yet</div>
+<header class="site-header">
+  <div class="wrap nav-shell">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 64 64" width="32" height="32" aria-hidden="true">
+        <rect width="64" height="64" rx="10" fill="#060605"/>
+        <rect x="1.5" y="1.5" width="61" height="61" rx="9" fill="none" stroke="#2a2a28" stroke-width="1.4"/>
+        <path d="M32 11 L56 53 H8 Z" fill="none" stroke="#5b8fe6" stroke-width="2.2" stroke-linejoin="round"/>
+        <path d="M23.5 26.5 H40.5" stroke="#5b8fe6" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M21 36 Q32 41 43 36" fill="none" stroke="#8fb4f2" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M26 38 L24.3 42" stroke="#8fb4f2" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M32 39.4 L32 43.6" stroke="#8fb4f2" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M38 38 L39.7 42" stroke="#8fb4f2" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-copy"><strong>TRADEP2P</strong><small>lobby + mediator dashboard</small></span>
+    </div>
+    <span id="connection" class="status connecting">connecting</span>
+  </div>
+</header>
+<div class="session-bar">
+  <div class="wrap">
+    <div id="identity">anonymous client not connected yet</div>
     <div id="notice" class="notice"></div>
-  </header>
+  </div>
+</div>
+<div class="wrap">
   <div class="grid">
     <div class="stack">
       <section class="panel">
