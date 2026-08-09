@@ -2,12 +2,19 @@
 
 #include "tradep2p/protocol.hpp"
 
+#include <openssl/crypto.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -32,9 +39,18 @@ namespace {
 // send a ClientHello could still spawn unbounded threads.
 constexpr std::size_t kMaxPendingHandshakes = 64U;
 
+// A registration is invisible to ordinary RegistryList callers (and to the
+// public state-snapshot JSON) until an admin explicitly approves it over the
+// loopback admin channel below - see Impl::admin_control_loop(). This is
+// enforced by filtering in snapshot(), not by a separate wire message, so
+// the public RegistryList/RegistryRegister framing is unchanged for every
+// existing mediator operator and client.
+enum class RegistryStatus { Pending, Approved };
+
 struct RegistryEntry {
     RegistryNode node;
     std::chrono::steady_clock::time_point expires_at;
+    RegistryStatus status;
 };
 
 std::string registry_key(const RegistryNode& node) {
@@ -85,6 +101,30 @@ std::string configured_registry_state_file() {
     return value == nullptr ? std::string{} : std::string(value);
 }
 
+// Gates the live admin control channel (see Impl::admin_control_loop()
+// below), mirroring lobby.cpp's configured_admin_token()/admin_control_loop
+// exactly. Unset (the default) disables the channel entirely - no listening
+// socket is even opened - rather than opening on a fixed port with a
+// guessable or empty token.
+std::string configured_registry_admin_token() {
+    const char* value = std::getenv("TRADEP2P_REGISTRY_ADMIN_TOKEN");
+    return value == nullptr ? std::string{} : std::string(value);
+}
+
+std::uint16_t configured_registry_admin_port() {
+    const char* value = std::getenv("TRADEP2P_REGISTRY_ADMIN_PORT");
+    if (value == nullptr || *value == '\0') {
+        return 7445U; // one past the mediator admin channel's default 7444
+    }
+    const std::string text(value);
+    std::uint16_t port = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), port, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || port == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_REGISTRY_ADMIN_PORT");
+    }
+    return port;
+}
+
 } // namespace
 
 class RegistryServer::Impl {
@@ -92,7 +132,9 @@ public:
     Impl(Endpoint bind_endpoint, ServerTlsIdentity identity)
         : bind_endpoint_(std::move(bind_endpoint)),
           identity_(std::move(identity)),
-          state_file_(configured_registry_state_file()) {}
+          state_file_(configured_registry_state_file()),
+          admin_token_(configured_registry_admin_token()),
+          admin_port_(configured_registry_admin_port()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -112,6 +154,15 @@ public:
             snapshot_running_.store(true);
             snapshot_thread_ = std::thread([this] { snapshot_loop(); });
             std::cout << "Local registry state snapshot: " << state_file_ << '\n';
+        }
+
+        if (!admin_token_.empty()) {
+            std::thread([this] { admin_control_loop(); }).detach();
+            std::cout << "Registry admin control channel on 127.0.0.1:" << admin_port_ << '\n';
+        } else {
+            std::cout << "New registrations are Pending until approved: set "
+                         "TRADEP2P_REGISTRY_ADMIN_TOKEN to enable the admin control "
+                         "channel, otherwise nothing can ever be approved.\n";
         }
 
         for (;;) {
@@ -217,8 +268,15 @@ private:
         if (existing == entries_.end() && entries_.size() >= kMaxRegistryNodes) {
             throw std::runtime_error("registry is full");
         }
+        // A heartbeat refresh from an already-known key preserves whatever
+        // approval status it already has - only a brand-new key starts
+        // Pending. Otherwise every ~60-second re-registration (main.cpp's
+        // run_registry_heartbeat) would silently revert an approved mediator
+        // back to invisible.
+        const RegistryStatus status =
+            existing != entries_.end() ? existing->second.status : RegistryStatus::Pending;
         entries_[key] = RegistryEntry{
-            std::move(node), now + std::chrono::seconds(kRegistryTtlSeconds)};
+            std::move(node), now + std::chrono::seconds(kRegistryTtlSeconds), status};
     }
 
     RegistryNodesMessage snapshot() {
@@ -230,6 +288,13 @@ private:
             result.nodes.reserve(entries_.size());
             for (const auto& [key, entry] : entries_) {
                 (void)key;
+                // Pending entries are invisible to every ordinary caller
+                // (RegistryList responses and the public state-snapshot
+                // JSON both go through this function) until approved over
+                // the loopback admin channel - see admin_control_loop().
+                if (entry.status != RegistryStatus::Approved) {
+                    continue;
+                }
                 RegistryNode node = entry.node;
                 const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
                     entry.expires_at - now);
@@ -246,6 +311,145 @@ private:
                       return left.port < right.port;
                   });
         return result;
+    }
+
+    // Loopback-only moderation channel, structurally copied from
+    // lobby.cpp's Impl::admin_control_loop()/handle_admin_connection() - a
+    // shared token gates a simple "COMMAND token args...\n" line protocol,
+    // one line in, one line out, connection closed. Deliberately not part of
+    // the public TLS-facing registry protocol: RegistryList/RegistryRegister
+    // framing is unchanged for every existing mediator operator and client,
+    // and admin capability never touches the port reachable over Tor.
+    void admin_control_loop() {
+        const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd < 0) {
+            std::cerr << "registry admin control: socket() failed\n";
+            return;
+        }
+        const int reuse = 1;
+        ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(admin_port_);
+        if (::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+            std::cerr << "registry admin control: inet_pton failed\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            std::cerr << "registry admin control: bind failed on 127.0.0.1:" << admin_port_
+                      << " (" << std::strerror(errno) << ")\n";
+            ::close(listen_fd);
+            return;
+        }
+        if (::listen(listen_fd, 8) != 0) {
+            std::cerr << "registry admin control: listen failed\n";
+            ::close(listen_fd);
+            return;
+        }
+
+        for (;;) {
+            const int client_fd = ::accept(listen_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                continue;
+            }
+            timeval io_timeout{5, 0};
+            ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+            ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+            try {
+                handle_admin_connection(client_fd);
+            } catch (const std::exception& error) {
+                std::cerr << "registry admin control: " << error.what() << '\n';
+            }
+            ::close(client_fd);
+        }
+    }
+
+    static void send_admin_line(int fd, const std::string& line) {
+        const std::string framed = line + "\n";
+        ::send(fd, framed.data(), framed.size(), 0);
+    }
+
+    void handle_admin_connection(int fd) {
+        std::string line;
+        char buffer[512];
+        for (;;) {
+            const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (received <= 0) {
+                return;
+            }
+            line.append(buffer, static_cast<std::size_t>(received));
+            if (line.find('\n') != std::string::npos || line.size() > 4096U) {
+                break;
+            }
+        }
+        if (const auto newline = line.find('\n'); newline != std::string::npos) {
+            line.resize(newline);
+        }
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::istringstream stream(line);
+        std::string command;
+        std::string token;
+        stream >> command >> token;
+
+        if (admin_token_.empty() || token.size() != admin_token_.size() ||
+            CRYPTO_memcmp(token.data(), admin_token_.data(), token.size()) != 0) {
+            send_admin_line(fd, "ERR unauthorized");
+            return;
+        }
+
+        if (command == "LISTPENDING") {
+            std::string listing;
+            {
+                std::scoped_lock lock(mutex_);
+                remove_expired_locked(std::chrono::steady_clock::now());
+                for (const auto& [key, entry] : entries_) {
+                    if (entry.status != RegistryStatus::Pending) {
+                        continue;
+                    }
+                    if (!listing.empty()) {
+                        listing += ',';
+                    }
+                    listing += key + '|' + certificate_pin_to_hex(entry.node.certificate_pin);
+                }
+            }
+            send_admin_line(fd, listing.empty() ? "OK NONE" : "OK " + listing);
+            return;
+        }
+
+        if (command == "APPROVE" || command == "REJECT") {
+            std::string host;
+            std::string port_text;
+            stream >> host >> port_text;
+            std::uint16_t port = 0U;
+            const auto [ptr, error] =
+                std::from_chars(port_text.data(), port_text.data() + port_text.size(), port, 10);
+            if (host.empty() || error != std::errc{} ||
+                ptr != port_text.data() + port_text.size()) {
+                send_admin_line(fd, "ERR invalid host/port");
+                return;
+            }
+            const std::string key = host + ":" + std::to_string(port);
+            std::scoped_lock lock(mutex_);
+            const auto existing = entries_.find(key);
+            if (existing == entries_.end()) {
+                send_admin_line(fd, "ERR no such registration");
+                return;
+            }
+            if (command == "APPROVE") {
+                existing->second.status = RegistryStatus::Approved;
+            } else {
+                entries_.erase(existing);
+            }
+            send_admin_line(fd, "OK");
+            return;
+        }
+
+        send_admin_line(fd, "ERR unknown command");
     }
 
 private:
@@ -332,6 +536,11 @@ private:
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
     std::atomic<std::size_t> pending_handshakes_{0U};
+    // Gates admin_control_loop() - see configured_registry_admin_token()'s
+    // comment. Read once at construction, never mutated afterward, so no
+    // lock is needed to read it from the admin thread.
+    std::string admin_token_;
+    std::uint16_t admin_port_;
     std::mutex mutex_;
     std::unordered_map<std::string, RegistryEntry> entries_;
 };

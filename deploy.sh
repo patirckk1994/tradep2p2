@@ -4,11 +4,13 @@
 # rebuilds the production worktree from main, refreshes the production
 # website with the tested PHP/asset files and a fresh source zip (git
 # archive - never uploads build output or secrets), and restarts the
-# production mediator/dashboard from the freshly built binaries.
+# production mediator/webclient/dashboard from the freshly built binaries.
 #
-# Hosted trading (tradep2p-webclient) is retired - deploy.sh only ensures
-# it stays down, it never (re)launches it. If it comes back intentionally,
-# restore the launch+health-check block from git history.
+# Hosted trading (tradep2p-webclient) was retired, then rebuilt properly per
+# docs/identity-09-hosted-webclient.md (a real per-account trading identity,
+# ML-DSA-65/Ed25519 recognition, keystore export) and revived deliberately -
+# see landing_html()'s honest-ceiling disclosure in http_webclient.cpp for
+# what this account system does and does not protect against.
 #
 # Deliberately does NOT touch either side's config.php (they intentionally
 # differ - different ports, different "TESTING environment" label) or the
@@ -25,6 +27,12 @@ TESTING_WEB="${TESTING_WEB:-/var/www/html/testing}"
 PRODUCTION_WEB="${PRODUCTION_WEB:-/var/www/html/new}"
 GIT_REMOTE="${GIT_REMOTE:-test}"
 PRODUCTION_BRANCH="${PRODUCTION_BRANCH:-main}"
+WEBCLIENT_HOME_URL="${WEBCLIENT_HOME_URL:-http://dq2wrri3nvcmfvmczw36c6npv7rxravi4cnusv5n4c4zihsy4h52ziad.onion/}"
+# The webclient's own admin token (GET /api/admin/accounts) - a DIFFERENT
+# secret from mediator.conf's ADMIN_TOKEN (that one gates the mediator's
+# fee-control channel). Must match config.php's webclient_admin_token on
+# both websites (confirmed identical there as of this restore).
+WEBCLIENT_ADMIN_TOKEN="${WEBCLIENT_ADMIN_TOKEN:-b816c456463beff1b31e1ff3912025fe4a641c8b1d0b54170292ae1310f1d2fd}"
 
 # Files synced verbatim from the testing website to production - everything
 # EXCEPT config.php (intentionally different per environment) and
@@ -124,7 +132,17 @@ nohup ./setup_mediator.sh >/tmp/tradep2p-production-mediator.log 2>&1 &
 disown
 sleep 2
 
+nohup "$PRODUCTION_REPO/build/tradep2p-webclient" client 127.0.0.1:7443 \
+    "$(openssl x509 -in certs/mediator.cert.pem -outform DER | openssl dgst -sha256 -hex | awk '{print $2}')" \
+    --listen 0.0.0.0 --port 8090 \
+    --home-url "$WEBCLIENT_HOME_URL" \
+    --admin-token "$WEBCLIENT_ADMIN_TOKEN" \
+    >/tmp/tradep2p-production-webclient.log 2>&1 &
+disown
+sleep 2
+
 log "health check ..."
+curl -sf -o /dev/null "http://127.0.0.1:8090/" || fail "production webclient did not come up - see /tmp/tradep2p-production-webclient.log"
 curl -sf -o /dev/null "http://127.0.0.1:8091/" || fail "production mediator dashboard did not come up - see /tmp/tradep2p-production-mediator.log"
 
 log "deploy complete: $TESTING_BRANCH -> $PRODUCTION_BRANCH, pushed, rebuilt, website synced, services restarted."

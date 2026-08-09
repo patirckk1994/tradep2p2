@@ -19,6 +19,14 @@ Options:
   --cert FILE          TLS certificate path (default certs/registry.cert.pem)
   --key FILE           TLS private key path (default certs/registry.key.pem)
   --state-file FILE    registry snapshot path (default logs/registry-state.json)
+  --admin-token TOKEN  enables a loopback-only channel to approve/reject
+                        pending mediator registrations (LISTPENDING/APPROVE/
+                        REJECT) without a restart (optional; see
+                        --admin-port). Keep this secret. Leave unset and
+                        every registration stays Pending forever - nothing
+                        can ever be approved.
+  --admin-port N       port for the admin control channel (default 7445,
+                        only meaningful with --admin-token)
   --dashboard-port N   operator dashboard port (default 8092)
   --no-dashboard        do not launch the operator dashboard
   -h, --help            show this help
@@ -34,6 +42,8 @@ REGISTRY_BIND="0.0.0.0:7555"
 REGISTRY_CERT="$ROOT/certs/registry.cert.pem"
 REGISTRY_KEY="$ROOT/certs/registry.key.pem"
 REGISTRY_STATE_FILE="$ROOT/logs/registry-state.json"
+ADMIN_TOKEN=""
+ADMIN_PORT="7445"
 DASHBOARD_PORT="8092"
 RUN_DASHBOARD="1"
 
@@ -51,6 +61,8 @@ while [[ $# -gt 0 ]]; do
         --cert) REGISTRY_CERT="$2"; shift 2 ;;
         --key) REGISTRY_KEY="$2"; shift 2 ;;
         --state-file) REGISTRY_STATE_FILE="$2"; shift 2 ;;
+        --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
+        --admin-port) ADMIN_PORT="$2"; shift 2 ;;
         --dashboard-port) DASHBOARD_PORT="$2"; shift 2 ;;
         --no-dashboard) RUN_DASHBOARD="0"; shift ;;
         -h|--help) print_usage; exit 0 ;;
@@ -65,6 +77,8 @@ REGISTRY_BIND="$REGISTRY_BIND"
 REGISTRY_CERT="$REGISTRY_CERT"
 REGISTRY_KEY="$REGISTRY_KEY"
 REGISTRY_STATE_FILE="$REGISTRY_STATE_FILE"
+ADMIN_TOKEN="$ADMIN_TOKEN"
+ADMIN_PORT="$ADMIN_PORT"
 DASHBOARD_PORT="$DASHBOARD_PORT"
 RUN_DASHBOARD="$RUN_DASHBOARD"
 EOF
@@ -115,10 +129,21 @@ echo "  bind:              $REGISTRY_BIND"
 echo "  certificate pin:   $CERT_PIN"
 echo "  (give this pin, plus the bind host:port, to mediator operators"
 echo "   so they can pass it to setup_mediator.sh --registry / --registry-pin)"
+if [[ -n "$ADMIN_TOKEN" ]]; then
+    echo "  admin control:     127.0.0.1:$ADMIN_PORT (loopback only; LISTPENDING/APPROVE/REJECT)"
+else
+    echo "  admin control:     disabled - every registration stays Pending forever,"
+    echo "                     nothing will ever appear on RegistryList or status.php"
+    echo "                     until you re-run with --admin-token"
+fi
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
     echo "  operator dashboard: http://127.0.0.1:$DASHBOARD_PORT (loopback only; proxy it yourself to expose remotely)"
 fi
 echo "============================================================"
 
 export TRADEP2P_REGISTRY_STATE_FILE="$REGISTRY_STATE_FILE"
+if [[ -n "$ADMIN_TOKEN" ]]; then
+    export TRADEP2P_REGISTRY_ADMIN_TOKEN="$ADMIN_TOKEN"
+    export TRADEP2P_REGISTRY_ADMIN_PORT="$ADMIN_PORT"
+fi
 exec "$CLI" registry "$REGISTRY_BIND" "$REGISTRY_CERT" "$REGISTRY_KEY"
