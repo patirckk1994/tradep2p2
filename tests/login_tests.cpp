@@ -1,5 +1,6 @@
 #include "tradep2p/login.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 
@@ -35,6 +36,78 @@ void test_full_round_trip_accepted() {
     tracker.consume(issued.session_id);
     require(!tracker.peek(issued.session_id, 1010).has_value(),
             "a consumed challenge must no longer be outstanding");
+}
+
+// ---------------------------------------------------------------------------
+// ML-DSA-65 (post-quantum suite): same round trip, plus the suite_id
+// threading through issue() that this codebase's other trackers
+// (RecognitionChallengeTracker) already have and LoginChallengeTracker did
+// not until now.
+// ---------------------------------------------------------------------------
+
+void test_mldsa65_round_trip_accepted() {
+    tradep2p::LoginChallengeTracker tracker;
+    const auto account_key = tradep2p::generate_mldsa65_keypair();
+    const auto issued = tracker.issue("tradep2p-webclient", "example.com:8090", "alice", 1000,
+                                      tradep2p::kLoginSuiteMlDsa65V1);
+    require(issued.suite_id == tradep2p::kLoginSuiteMlDsa65V1,
+            "issue() must actually set the requested suite_id, not just accept the parameter");
+
+    const auto signature = tradep2p::sign_login_response_mldsa65(account_key.private_seed, issued);
+    const auto found = tracker.peek(issued.session_id, 1010);
+    require(found.has_value(), "an unexpired, outstanding challenge must be found by peek()");
+    require(tradep2p::verify_login_response_mldsa65(account_key.public_key, *found, signature),
+            "a genuine ML-DSA-65 signature over its own challenge fields must verify");
+
+    const auto other = tradep2p::generate_mldsa65_keypair();
+    require(!tradep2p::verify_login_response_mldsa65(other.public_key, *found, signature),
+            "an ML-DSA-65 signature must not verify under an unrelated key");
+}
+
+// The two suites' verify functions must never be interchangeable - a
+// genuine Ed25519 signature must not be mistaken for a valid (all-zero or
+// otherwise) ML-DSA-65 one, and the challenge's own suite_id (embedded in
+// the signed bytes via encode_login_challenge_signed_payload) must change
+// what gets signed, matching recognition_tests.cpp's domain-separation
+// checks for suite_id specifically. The actual "which function may a caller
+// even invoke" guard lives in http_webclient.cpp (looks the suite up from
+// the account, never from caller input) - this test covers the primitives
+// login.hpp/login.cpp are directly responsible for.
+void test_suite_id_changes_signed_bytes_and_algorithms_do_not_cross_verify() {
+    tradep2p::LoginChallengeFields ed25519_fields;
+    ed25519_fields.suite_id = tradep2p::kLoginSuiteEd25519V1;
+    ed25519_fields.service_id = "tradep2p-webclient";
+    ed25519_fields.server_identity = "example.com:8090";
+    ed25519_fields.username = "alice";
+    ed25519_fields.session_id = tradep2p::generate_login_session_id();
+    ed25519_fields.nonce = tradep2p::generate_login_nonce();
+    ed25519_fields.created_at = 1000;
+    ed25519_fields.expires_at = 1120;
+
+    auto mldsa65_fields = ed25519_fields;
+    mldsa65_fields.suite_id = tradep2p::kLoginSuiteMlDsa65V1;
+    require(tradep2p::encode_login_challenge_signed_payload(ed25519_fields) !=
+                tradep2p::encode_login_challenge_signed_payload(mldsa65_fields),
+            "different suite_id must change the encoded/signed payload");
+
+    const auto ed25519_key = fresh_keypair();
+    const auto mldsa65_key = tradep2p::generate_mldsa65_keypair();
+    const auto ed25519_signature =
+        tradep2p::sign_login_response(ed25519_key.private_seed, ed25519_fields);
+
+    // An all-zero ML-DSA-65 signature (the shape a caller would substitute
+    // for a wrong-type input) must never verify.
+    require(!tradep2p::verify_login_response_mldsa65(mldsa65_key.public_key, mldsa65_fields,
+                                                     tradep2p::MlDsa65Signature{}),
+            "an all-zero ML-DSA-65 signature must never verify");
+    // A genuine Ed25519 signature's raw bytes, reinterpreted as the prefix
+    // of an all-zero-padded ML-DSA-65 signature, must not verify either -
+    // the two signature schemes are not bit-compatible or interchangeable.
+    tradep2p::MlDsa65Signature reinterpreted{};
+    std::copy(ed25519_signature.begin(), ed25519_signature.end(), reinterpreted.begin());
+    require(!tradep2p::verify_login_response_mldsa65(mldsa65_key.public_key, ed25519_fields,
+                                                     reinterpreted),
+            "an Ed25519 signature's bytes must never verify as an ML-DSA-65 signature");
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +236,8 @@ void test_expire_stale_prunes() {
 int main() {
     try {
         test_full_round_trip_accepted();
+        test_mldsa65_round_trip_accepted();
+        test_suite_id_changes_signed_bytes_and_algorithms_do_not_cross_verify();
         test_expired_challenge_rejected();
         test_replayed_challenge_rejected();
         test_wrong_context_rejected();

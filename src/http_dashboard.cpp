@@ -83,6 +83,11 @@ std::string identity_state_json_locked(const IdentityDashboardState& state) {
          << ",\"alias\":\"" << json_escape(identity.alias) << "\""
          << ",\"identity_id\":\"" << json_escape(hex_encode(identity.identity_id)) << "\""
          << ",\"public_key\":\"" << json_escape(hex_encode(identity.identity_public_key)) << "\""
+         << ",\"public_key_mldsa65\":\""
+         << (state.keystore->is_unlocked()
+                 ? json_escape(hex_encode(state.keystore->identity_public_key_mldsa65()))
+                 : std::string{})
+         << "\""
          << ",\"created_at\":" << identity.created_at
          << ",\"key_generation\":" << identity.key_generation << "}";
     return json.str();

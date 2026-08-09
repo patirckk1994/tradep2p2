@@ -121,6 +121,15 @@ public:
         pos_ += N;
         return result;
     }
+    // Everything left in the input, as a fresh vector - for a trailing
+    // variable-length field with no length prefix of its own (its length is
+    // implied by context, e.g. a checkpoint signature sized by its suite_id).
+    [[nodiscard]] std::vector<std::uint8_t> bytes_remaining() {
+        std::vector<std::uint8_t> result(input_.begin() + static_cast<std::ptrdiff_t>(pos_),
+                                         input_.end());
+        pos_ = input_.size();
+        return result;
+    }
     [[nodiscard]] std::string string_u16(std::size_t max_len) {
         const auto length = static_cast<std::size_t>(u16());
         if (length > max_len) {
@@ -155,19 +164,39 @@ private:
 
 constexpr std::uint8_t kRecordKindEntry = 1U;
 constexpr std::uint8_t kRecordKindCheckpoint = 2U;
+// The suite-tagged checkpoint record kind (see journal.hpp's
+// kJournalCheckpointSuiteEd25519V1/kJournalCheckpointSuiteMlDsa65V1) - a
+// NEW kind rather than extending kRecordKindCheckpoint's body, since that
+// body's 112-byte fixed layout has no room to grow without breaking
+// already-written records (Reader::require_finished() would reject the new
+// length). Journal::open()'s replay understands both kinds; only
+// checkpoint_mldsa65() ever writes this one - checkpoint() keeps writing
+// kRecordKindCheckpoint exactly as before.
+constexpr std::uint8_t kRecordKindCheckpointSuiteV1 = 3U;
 // Generous headroom over the real max entry body (~550 bytes) and the real
-// checkpoint body (112 bytes) - bounded so a corrupted length field fails
-// fast rather than driving an unbounded allocation.
+// checkpoint bodies (112 bytes for kRecordKindCheckpoint; up to ~3.3KB for
+// kRecordKindCheckpointSuiteV1's ML-DSA-65 case) - bounded so a corrupted
+// length field fails fast rather than driving an unbounded allocation.
 constexpr std::uint32_t kMaxRecordBodyLength = 16384U;
 
 constexpr std::array<std::uint8_t, 4> kHeadMagic = {'T', 'P', 'J', 'H'};
 constexpr std::uint16_t kHeadFormatVersion = 1;
+// The suite-tagged head-pointer format - written only by checkpoint_mldsa65()
+// (checkpoint() keeps writing version 1, byte-for-byte identical to before).
+// decode_head() accepts both; see HeadPointer's comment.
+constexpr std::uint16_t kHeadFormatVersionSuiteV1 = 2;
 
 // Domain-separates checkpoint signatures from anything else Ed25519 might
 // ever sign in this codebase (defense in depth against cross-protocol
 // signature reuse), matching the domain-separation spirit of
 // identity.hpp's encode_derivation_info().
 constexpr std::string_view kCheckpointDomainTag = "tradep2p-journal-checkpoint-v1";
+// A DISTINCT domain tag from the one above, not a reuse of it - the
+// suite-tagged encoding below embeds an extra field (suite_id), and this
+// codebase's convention is that any change to what's actually being signed
+// gets a new domain label, never an ambiguous shared one (see receipt.hpp's
+// kReceiptSuiteEd25519MlDsa65HybridV1 comment for the same reasoning).
+constexpr std::string_view kCheckpointSuiteDomainTag = "tradep2p-journal-checkpoint-suite-v1";
 
 const JournalHash kGenesisHash{}; // 32 zero bytes; not a secret, just a fixed anchor
 
@@ -251,6 +280,28 @@ std::vector<std::uint8_t> checkpoint_signed_bytes(std::uint64_t index, const Jou
     writer.bytes(hash);
     writer.u64(signed_at);
     return writer.take();
+}
+
+std::vector<std::uint8_t> checkpoint_suite_signed_bytes(std::uint16_t suite_id, std::uint64_t index,
+                                                         const JournalHash& hash,
+                                                         std::uint64_t signed_at) {
+    Writer writer;
+    writer.bytes_u16(kCheckpointSuiteDomainTag);
+    writer.u16(suite_id);
+    writer.u64(index);
+    writer.bytes(hash);
+    writer.u64(signed_at);
+    return writer.take();
+}
+
+std::size_t expected_checkpoint_signature_length(std::uint16_t suite_id) {
+    if (suite_id == kJournalCheckpointSuiteEd25519V1) {
+        return kEd25519SignatureLength;
+    }
+    if (suite_id == kJournalCheckpointSuiteMlDsa65V1) {
+        return kMlDsa65SignatureLength;
+    }
+    return 0U;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,21 +462,39 @@ std::uint64_t now_unix_seconds() {
 // Head-pointer file encode/decode.
 // ---------------------------------------------------------------------------
 
+// Unified across both head-pointer formats: `suite_id` is implicit
+// (kJournalCheckpointSuiteEd25519V1) and `signature` always exactly
+// kEd25519SignatureLength bytes for a version-1 file; a version-2 file
+// carries `suite_id` explicitly and `signature` sized by whatever that
+// suite needs. encode_head() below reproduces the ORIGINAL version-1 byte
+// layout exactly (byte-for-byte) whenever suite_id is Ed25519, so
+// checkpoint()'s output is unchanged by this generalization.
 struct HeadPointer {
+    std::uint16_t suite_id{kJournalCheckpointSuiteEd25519V1};
     std::uint64_t index{0};
     JournalHash hash{};
     std::uint64_t signed_at{0};
-    Ed25519Signature signature{};
+    std::vector<std::uint8_t> signature;
 };
 
 std::vector<std::uint8_t> encode_head(const HeadPointer& head) {
     Writer writer;
     writer.bytes(kHeadMagic);
-    writer.u16(kHeadFormatVersion);
-    writer.u64(head.index);
-    writer.bytes(head.hash);
-    writer.u64(head.signed_at);
-    writer.bytes(head.signature);
+    if (head.suite_id == kJournalCheckpointSuiteEd25519V1) {
+        // Byte-identical to this file's original, pre-suite_id format.
+        writer.u16(kHeadFormatVersion);
+        writer.u64(head.index);
+        writer.bytes(head.hash);
+        writer.u64(head.signed_at);
+        writer.bytes(std::span<const std::uint8_t>(head.signature));
+    } else {
+        writer.u16(kHeadFormatVersionSuiteV1);
+        writer.u16(head.suite_id);
+        writer.u64(head.index);
+        writer.bytes(head.hash);
+        writer.u64(head.signed_at);
+        writer.bytes(std::span<const std::uint8_t>(head.signature));
+    }
     return writer.take();
 }
 
@@ -436,14 +505,28 @@ HeadPointer decode_head(std::span<const std::uint8_t> bytes) {
         throw JournalFormatError("not a tradep2p journal head-pointer file (bad magic)");
     }
     const std::uint16_t version = reader.u16();
-    if (version != kHeadFormatVersion) {
+    HeadPointer head;
+    if (version == kHeadFormatVersion) {
+        head.suite_id = kJournalCheckpointSuiteEd25519V1;
+        head.index = reader.u64();
+        head.hash = reader.fixed<kJournalHashLength>();
+        head.signed_at = reader.u64();
+        const auto signature = reader.fixed<kEd25519SignatureLength>();
+        head.signature.assign(signature.begin(), signature.end());
+    } else if (version == kHeadFormatVersionSuiteV1) {
+        head.suite_id = reader.u16();
+        head.index = reader.u64();
+        head.hash = reader.fixed<kJournalHashLength>();
+        head.signed_at = reader.u64();
+        const auto expected_length = expected_checkpoint_signature_length(head.suite_id);
+        if (expected_length == 0U || reader.remaining() != expected_length) {
+            throw JournalFormatError(
+                "journal head-pointer signature length does not match its suite id");
+        }
+        head.signature = reader.bytes_remaining();
+    } else {
         throw JournalFormatError("unsupported journal head-pointer format version");
     }
-    HeadPointer head;
-    head.index = reader.u64();
-    head.hash = reader.fixed<kJournalHashLength>();
-    head.signed_at = reader.u64();
-    head.signature = reader.fixed<kEd25519SignatureLength>();
     reader.require_finished();
     return head;
 }
@@ -493,7 +576,8 @@ Journal::~Journal() {
 }
 
 Journal Journal::open(const std::string& log_path, const std::string& head_path,
-                       const Ed25519PublicKey& local_history_public_key) {
+                       const Ed25519PublicKey& local_history_public_key,
+                       const std::optional<MlDsa65PublicKey>& local_history_public_key_mldsa65) {
     ensure_parent_directory(log_path);
     const int fd = ::open(log_path.c_str(), O_CREAT | O_RDWR | O_APPEND, 0600);
     if (fd < 0) {
@@ -646,6 +730,57 @@ Journal Journal::open(const std::string& log_path, const std::string& head_path,
             }
             journal.last_checkpoint_index_ = index;
             journal.has_checkpoint_ = true;
+        } else if (kind == kRecordKindCheckpointSuiteV1) {
+            Reader reader(body);
+            const std::uint16_t suite_id = reader.u16();
+            const std::uint64_t index = reader.u64();
+            const auto hash = reader.fixed<kJournalHashLength>();
+            const std::uint64_t signed_at = reader.u64();
+            const auto expected_length = expected_checkpoint_signature_length(suite_id);
+            if (expected_length == 0U || reader.remaining() != expected_length) {
+                throw JournalFormatError(
+                    "journal checkpoint signature length does not match its suite id");
+            }
+            const auto signature = reader.bytes_remaining();
+
+            if (index >= journal.entries_.size()) {
+                throw JournalTamperError(
+                    "checkpoint references an entry index that has not occurred yet");
+            }
+            if (journal.entries_[index].entry_hash != hash) {
+                throw JournalTamperError(
+                    "checkpoint hash does not match the entry it claims to checkpoint");
+            }
+            if (journal.has_checkpoint_ && index < journal.last_checkpoint_index_) {
+                throw JournalTamperError(
+                    "checkpoint index moved backward (rollback to an older checkpoint "
+                    "within the same log)");
+            }
+            const auto signed_bytes = checkpoint_suite_signed_bytes(suite_id, index, hash, signed_at);
+            bool verified = false;
+            if (suite_id == kJournalCheckpointSuiteMlDsa65V1) {
+                if (!local_history_public_key_mldsa65.has_value()) {
+                    throw JournalTamperError(
+                        "journal contains an ML-DSA-65 checkpoint but no ML-DSA-65 "
+                        "local-history public key was supplied to verify it against");
+                }
+                MlDsa65Signature fixed_signature{};
+                std::copy(signature.begin(), signature.end(), fixed_signature.begin());
+                verified = mldsa65_verify(*local_history_public_key_mldsa65, signed_bytes,
+                                          fixed_signature);
+            } else if (suite_id == kJournalCheckpointSuiteEd25519V1) {
+                Ed25519Signature fixed_signature{};
+                std::copy(signature.begin(), signature.end(), fixed_signature.begin());
+                verified = ed25519_verify(local_history_public_key, signed_bytes, fixed_signature);
+            } else {
+                throw JournalFormatError("unknown journal checkpoint suite id");
+            }
+            if (!verified) {
+                throw JournalTamperError(
+                    "checkpoint signature does not verify against the local-history public key");
+            }
+            journal.last_checkpoint_index_ = index;
+            journal.has_checkpoint_ = true;
         } else {
             throw JournalFormatError("unknown journal record kind");
         }
@@ -679,8 +814,26 @@ Journal Journal::open(const std::string& log_path, const std::string& head_path,
     const std::vector<std::uint8_t> head_raw = read_file_all(head_path, head_existed);
     if (head_existed) {
         const HeadPointer head = decode_head(head_raw); // throws JournalFormatError
-        const auto signed_bytes = checkpoint_signed_bytes(head.index, head.hash, head.signed_at);
-        if (!ed25519_verify(local_history_public_key, signed_bytes, head.signature)) {
+        bool head_verified = false;
+        if (head.suite_id == kJournalCheckpointSuiteMlDsa65V1) {
+            if (!local_history_public_key_mldsa65.has_value()) {
+                throw JournalTamperError(
+                    "journal head-pointer file is an ML-DSA-65 checkpoint but no ML-DSA-65 "
+                    "local-history public key was supplied to verify it against");
+            }
+            const auto signed_bytes =
+                checkpoint_suite_signed_bytes(head.suite_id, head.index, head.hash, head.signed_at);
+            MlDsa65Signature fixed_signature{};
+            std::copy(head.signature.begin(), head.signature.end(), fixed_signature.begin());
+            head_verified =
+                mldsa65_verify(*local_history_public_key_mldsa65, signed_bytes, fixed_signature);
+        } else {
+            const auto signed_bytes = checkpoint_signed_bytes(head.index, head.hash, head.signed_at);
+            Ed25519Signature fixed_signature{};
+            std::copy(head.signature.begin(), head.signature.end(), fixed_signature.begin());
+            head_verified = ed25519_verify(local_history_public_key, signed_bytes, fixed_signature);
+        }
+        if (!head_verified) {
             throw JournalTamperError(
                 "journal head-pointer file signature does not verify - "
                 "possibly corrupted or forged independently of the main log");
@@ -774,10 +927,49 @@ void Journal::checkpoint(const Ed25519PrivateSeed& local_history_private_key) {
     write_all_and_sync(log_fd_, record_writer.take());
 
     HeadPointer head;
+    head.suite_id = kJournalCheckpointSuiteEd25519V1;
     head.index = index;
     head.hash = hash;
     head.signed_at = signed_at;
-    head.signature = signature;
+    head.signature.assign(signature.begin(), signature.end());
+    write_replace_atomic(head_path_, encode_head(head));
+
+    last_checkpoint_index_ = index;
+    has_checkpoint_ = true;
+}
+
+void Journal::checkpoint_mldsa65(const MlDsa65PrivateSeed& local_history_private_key_mldsa65) {
+    if (entries_.empty()) {
+        throw std::logic_error("cannot checkpoint a journal with no entries");
+    }
+    const std::uint64_t index = entries_.back().index;
+    const JournalHash hash = chain_head_;
+    const std::uint64_t signed_at = now_unix_seconds();
+    const auto signed_bytes = checkpoint_suite_signed_bytes(kJournalCheckpointSuiteMlDsa65V1, index,
+                                                            hash, signed_at);
+    const EvpPkeyPtr key = load_mldsa65_private_key(local_history_private_key_mldsa65);
+    const MlDsa65Signature signature = mldsa65_sign(key.get(), signed_bytes);
+
+    Writer body_writer;
+    body_writer.u16(kJournalCheckpointSuiteMlDsa65V1);
+    body_writer.u64(index);
+    body_writer.bytes(hash);
+    body_writer.u64(signed_at);
+    body_writer.bytes(signature);
+    const std::vector<std::uint8_t> body = body_writer.take();
+
+    Writer record_writer;
+    record_writer.u8(kRecordKindCheckpointSuiteV1);
+    record_writer.u32(static_cast<std::uint32_t>(body.size()));
+    record_writer.bytes(std::span<const std::uint8_t>(body));
+    write_all_and_sync(log_fd_, record_writer.take());
+
+    HeadPointer head;
+    head.suite_id = kJournalCheckpointSuiteMlDsa65V1;
+    head.index = index;
+    head.hash = hash;
+    head.signed_at = signed_at;
+    head.signature.assign(signature.begin(), signature.end());
     write_replace_atomic(head_path_, encode_head(head));
 
     last_checkpoint_index_ = index;

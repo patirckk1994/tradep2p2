@@ -254,6 +254,47 @@ std::vector<std::uint8_t> from_hex(const std::string& raw_text) {
     return bytes;
 }
 
+// An enrolled login key's suite plus its raw public-key bytes - length
+// depends on suite_id (32 for kLoginSuiteEd25519V1, 1952 for
+// kLoginSuiteMlDsa65V1). Kept as raw bytes rather than a fixed-size typed
+// array so the account store doesn't need a second field type per suite;
+// login.hpp's own suite-specific verify functions are the only place that
+// interprets these bytes cryptographically.
+struct EnrolledLoginKey {
+    std::uint16_t suite_id{};
+    std::vector<std::uint8_t> bytes;
+};
+
+std::size_t expected_login_key_length(std::uint16_t suite_id) {
+    if (suite_id == tradep2p::kLoginSuiteEd25519V1) {
+        return tradep2p::kEd25519PublicKeyLength;
+    }
+    if (suite_id == tradep2p::kLoginSuiteMlDsa65V1) {
+        return tradep2p::kMlDsa65PublicKeyLength;
+    }
+    return 0U; // unknown suite - never a valid length, rejected by callers
+}
+
+std::size_t expected_login_signature_length(std::uint16_t suite_id) {
+    if (suite_id == tradep2p::kLoginSuiteEd25519V1) {
+        return tradep2p::kEd25519SignatureLength;
+    }
+    if (suite_id == tradep2p::kLoginSuiteMlDsa65V1) {
+        return tradep2p::kMlDsa65SignatureLength;
+    }
+    return 0U;
+}
+
+std::string login_suite_name(std::uint16_t suite_id) {
+    if (suite_id == tradep2p::kLoginSuiteEd25519V1) {
+        return "ed25519";
+    }
+    if (suite_id == tradep2p::kLoginSuiteMlDsa65V1) {
+        return "ml-dsa-65";
+    }
+    return "unknown";
+}
+
 struct Account {
     std::string username;
     std::vector<std::uint8_t> salt;
@@ -266,7 +307,7 @@ struct Account {
     // Present means the account has OPTED IN to also (not instead of - see
     // AccountStore::verify()/login_key(), password auth is never disabled
     // by enrolling a key) accepting challenge-response login with this key.
-    std::optional<tradep2p::Ed25519PublicKey> login_key;
+    std::optional<EnrolledLoginKey> login_key;
 };
 
 // A local convenience-account store for this web client only. It has no
@@ -320,13 +361,14 @@ public:
     // route) require an already-authenticated session before calling this,
     // so "does the caller actually own this account" is established before
     // this function is ever reached, not by this function itself.
-    void set_login_key(const std::string& username, const tradep2p::Ed25519PublicKey& key) {
+    void set_login_key(const std::string& username, std::uint16_t suite_id,
+                       const std::vector<std::uint8_t>& key_bytes) {
         std::scoped_lock lock(mutex_);
         const auto it = accounts_.find(username);
         if (it == accounts_.end()) {
             throw std::runtime_error("unknown account");
         }
-        it->second.login_key = key;
+        it->second.login_key = EnrolledLoginKey{suite_id, key_bytes};
         append_locked(it->second);
     }
 
@@ -334,7 +376,7 @@ public:
     // key - callers must not distinguish the two in any response they send
     // back to a caller who hasn't already authenticated (account
     // enumeration - see the /api/login/key/* routes).
-    std::optional<tradep2p::Ed25519PublicKey> login_key(const std::string& username) {
+    std::optional<EnrolledLoginKey> login_key(const std::string& username) {
         std::scoped_lock lock(mutex_);
         const auto it = accounts_.find(username);
         if (it == accounts_.end() || !it->second.login_key.has_value()) {
@@ -382,7 +424,7 @@ private:
                 continue;
             }
             std::istringstream stream(line);
-            std::string username, salt_hex, hash_hex, created_at, login_key_hex;
+            std::string username, salt_hex, hash_hex, created_at, login_key_hex, suite_text;
             if (!std::getline(stream, username, '\t') ||
                 !std::getline(stream, salt_hex, '\t') ||
                 !std::getline(stream, hash_hex, '\t') ||
@@ -398,16 +440,39 @@ private:
             // append_locked()/set_login_key()), and this loop lets a LATER
             // line for the same username overwrite an earlier one, so the
             // most recent record always wins.
-            std::getline(stream, login_key_hex);
+            std::getline(stream, login_key_hex, '\t');
+            // Phase "Phase 2 post-quantum" trailing 6th field (suite id, as
+            // decimal text), same optional-trailing-field convention as the
+            // 5th field above: a pre-this-change record has no 6th field at
+            // all, so a present-but-suite-less key must have been enrolled
+            // before any suite but Ed25519 existed - defaulting to
+            // kLoginSuiteEd25519V1 here is therefore exact, not a guess.
+            std::getline(stream, suite_text);
             Account account{username, from_hex(salt_hex), from_hex(hash_hex), created_at,
                             std::nullopt};
             if (!login_key_hex.empty()) {
+                // A malformed trailing field (non-numeric suite id, wrong
+                // length for the suite, unknown suite id) is treated as "no
+                // key enrolled" rather than aborting the whole load -
+                // password auth for this and every other account must keep
+                // working regardless.
+                std::uint16_t suite_id = tradep2p::kLoginSuiteEd25519V1;
+                bool suite_valid = true;
+                if (!suite_text.empty()) {
+                    try {
+                        std::size_t consumed = 0;
+                        const unsigned long parsed = std::stoul(suite_text, &consumed);
+                        suite_valid = consumed == suite_text.size() &&
+                                     parsed <= std::numeric_limits<std::uint16_t>::max();
+                        suite_id = static_cast<std::uint16_t>(parsed);
+                    } catch (const std::exception&) {
+                        suite_valid = false;
+                    }
+                }
                 const auto raw = from_hex(login_key_hex);
-                account.login_key = tradep2p::parse_ed25519_public_key(raw);
-                // A malformed trailing field (wrong length, all-zero) is
-                // treated as "no key enrolled" rather than aborting the
-                // whole load - password auth for this and every other
-                // account must keep working regardless.
+                if (suite_valid && raw.size() == expected_login_key_length(suite_id)) {
+                    account.login_key = EnrolledLoginKey{suite_id, raw};
+                }
             }
             accounts_[username] = std::move(account);
         }
@@ -424,7 +489,10 @@ private:
         }
         output << account.username << '\t' << to_hex(account.salt) << '\t'
                << to_hex(account.hash) << '\t' << account.created_at << '\t'
-               << (account.login_key.has_value() ? to_hex(*account.login_key) : std::string{})
+               << (account.login_key.has_value() ? to_hex(account.login_key->bytes) : std::string{})
+               << '\t'
+               << (account.login_key.has_value() ? std::to_string(account.login_key->suite_id)
+                                                  : std::string{})
                << '\n';
         output.close();
         // The file holds password salts and hashes; keep it readable only by
@@ -526,6 +594,7 @@ struct KeystoreStatus {
     std::string alias;
     std::string identity_id_hex;
     std::string public_key_hex;
+    std::string public_key_mldsa65_hex; // empty unless unlocked - never cached on disk
     std::uint64_t created_at = 0U;
     std::uint32_t key_generation = 0U;
     std::string path;
@@ -682,6 +751,10 @@ public:
             status.alias = identity.alias;
             status.identity_id_hex = to_hex(identity.identity_id);
             status.public_key_hex = to_hex(identity.identity_public_key);
+            if (status.unlocked) {
+                status.public_key_mldsa65_hex =
+                    to_hex(it->second.keystore->identity_public_key_mldsa65());
+            }
             status.created_at = identity.created_at;
             status.key_generation = identity.key_generation;
         }
@@ -1061,6 +1134,7 @@ private seed.</p>
 using the same external tool that generated it, then paste the resulting
 signature below. Expires <span id="key-expires"></span> (unix seconds).</p>
 <table class="mono-break"><tbody>
+<tr><td>suite</td><td id="key-suite"></td></tr>
 <tr><td>service_id</td><td id="key-service"></td></tr>
 <tr><td>server_identity</td><td id="key-server"></td></tr>
 <tr><td>session_id</td><td id="key-session"></td></tr>
@@ -1068,7 +1142,7 @@ signature below. Expires <span id="key-expires"></span> (unix seconds).</p>
 <tr><td>created_at</td><td id="key-created"></td></tr>
 </tbody></table>
 <form id="key-verify-form">
-<label>Signature (128 hex characters)<input name="signature" id="key-signature" maxlength="128" required></label>
+<label>Signature (hex - 128 chars for Ed25519, 6618 for ML-DSA-65)<input name="signature" id="key-signature" maxlength="6618" required></label>
 <button class="primary" type="submit">Log in</button>
 </form>
 </div>
@@ -1089,7 +1163,7 @@ async function submitForm(form,path){const d=Object.fromEntries(new FormData(for
 document.getElementById('login-form').onsubmit=async(e)=>{e.preventDefault();try{await submitForm(e.target,'/api/login')}catch(err){notice(err.message,true)}};
 document.getElementById('register-form').onsubmit=async(e)=>{e.preventDefault();try{await submitForm(e.target,'/api/register')}catch(err){notice(err.message,true)}};
 let pendingSessionId=null;
-document.getElementById('key-challenge-form').onsubmit=async(e)=>{e.preventDefault();try{const username=document.getElementById('key-username').value;const r=await fetch('/api/login/key/challenge',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','__PREAUTH_HEADER__':PREAUTH_TOKEN},body:new URLSearchParams({username})});const body=await r.json();if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));pendingSessionId=body.session_id;document.getElementById('key-service').textContent=body.service_id;document.getElementById('key-server').textContent=body.server_identity;document.getElementById('key-session').textContent=body.session_id;document.getElementById('key-nonce').textContent=body.nonce;document.getElementById('key-created').textContent=body.created_at;document.getElementById('key-expires').textContent=body.expires_at;document.getElementById('key-challenge-box').style.display='block'}catch(err){notice(err.message,true)}};
+document.getElementById('key-challenge-form').onsubmit=async(e)=>{e.preventDefault();try{const username=document.getElementById('key-username').value;const r=await fetch('/api/login/key/challenge',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','__PREAUTH_HEADER__':PREAUTH_TOKEN},body:new URLSearchParams({username})});const body=await r.json();if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));pendingSessionId=body.session_id;document.getElementById('key-suite').textContent=body.suite;document.getElementById('key-service').textContent=body.service_id;document.getElementById('key-server').textContent=body.server_identity;document.getElementById('key-session').textContent=body.session_id;document.getElementById('key-nonce').textContent=body.nonce;document.getElementById('key-created').textContent=body.created_at;document.getElementById('key-expires').textContent=body.expires_at;document.getElementById('key-challenge-box').style.display='block'}catch(err){notice(err.message,true)}};
 document.getElementById('key-verify-form').onsubmit=async(e)=>{e.preventDefault();try{const username=document.getElementById('key-username').value;const signature=document.getElementById('key-signature').value;const r=await fetch('/api/login/key/verify',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','__PREAUTH_HEADER__':PREAUTH_TOKEN},body:new URLSearchParams({username,session_id:pendingSessionId,signature})});const body=await r.json();if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));location.reload()}catch(err){notice(err.message,true)}};
 </script>
 </body>
@@ -1201,7 +1275,8 @@ never disables the password). Generate the keypair with a native tool you
 trust, never in this browser page; see the "Log in with a key" panel on the
 login screen for how the resulting login works.</p>
 <form id="enroll-key-form">
-<label>Public key (64 hex characters)<input name="public_key" maxlength="64" required></label>
+<label>Suite<select name="suite" id="enroll-key-suite"><option value="ml-dsa-65" selected>ML-DSA-65 (post-quantum)</option><option value="ed25519">Ed25519</option></select></label>
+<label>Public key (hex - 3904 characters for ML-DSA-65, 64 for Ed25519)<input name="public_key" maxlength="3904" required></label>
 <button type="submit">Enroll key</button>
 </form>
 </section>
@@ -1231,7 +1306,7 @@ document.getElementById('offer-form').onsubmit=async(e)=>{e.preventDefault();try
 document.getElementById('refresh-offers').onclick=async()=>{try{await post('/api/offers/refresh');notice('offer refresh queued')}catch(e){notice(e.message,true)}};
 document.getElementById('refresh-history').onclick=()=>refreshHistory();
 document.getElementById('logout').onclick=async()=>{try{await post('/api/logout')}catch(e){}location.reload()};
-document.getElementById('enroll-key-form').onsubmit=async(e)=>{e.preventDefault();try{const public_key=document.getElementById('enroll-key-form').public_key.value;await post('/api/account/enroll-key',{public_key});notice('login key enrolled')}catch(err){notice(err.message,true)}};
+document.getElementById('enroll-key-form').onsubmit=async(e)=>{e.preventDefault();try{const public_key=document.getElementById('enroll-key-form').public_key.value;const suite=document.getElementById('enroll-key-suite').value;await post('/api/account/enroll-key',{public_key,suite});notice('login key enrolled')}catch(err){notice(err.message,true)}};
 document.getElementById('ks-enable').onclick=async()=>{try{const password=document.querySelector('#keystore-form [name=ks_password]').value;await post('/api/keystore/enable',{password});notice('trading identity ready');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
 document.getElementById('ks-lock').onclick=async()=>{try{await post('/api/keystore/lock');notice('trading identity locked');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
 document.getElementById('ks-export-reveal').onclick=()=>{document.getElementById('ks-export-form').style.display='block'};
@@ -1531,8 +1606,18 @@ int main(int argc, char** argv) {
                            if (!auth_limiter.allowed(username)) {
                                throw std::invalid_argument("too many attempts, try again later");
                            }
-                           const auto challenge =
-                               login_tracker.issue(kLoginServiceId, server_identity, username);
+                           // The suite is whatever this account actually
+                           // enrolled - never client-selectable (see
+                           // kLoginSuiteMlDsa65V1's comment in login.hpp) -
+                           // defaulting to the post-quantum suite for an
+                           // unknown/keyless account is moot either way,
+                           // since verify() below will reject those
+                           // regardless of suite.
+                           const auto enrolled = accounts.login_key(username);
+                           const std::uint16_t suite_id =
+                               enrolled.has_value() ? enrolled->suite_id : tradep2p::kLoginSuiteMlDsa65V1;
+                           const auto challenge = login_tracker.issue(kLoginServiceId, server_identity,
+                                                                      username, 0, suite_id);
                            std::ostringstream json;
                            json << "{\"ok\":true"
                                 << ",\"session_id\":\"" << json_escape(to_hex(challenge.session_id))
@@ -1540,6 +1625,8 @@ int main(int argc, char** argv) {
                                 << ",\"service_id\":\"" << json_escape(challenge.service_id) << "\""
                                 << ",\"server_identity\":\""
                                 << json_escape(challenge.server_identity) << "\""
+                                << ",\"suite_id\":" << challenge.suite_id
+                                << ",\"suite\":\"" << json_escape(login_suite_name(challenge.suite_id)) << "\""
                                 << ",\"created_at\":" << challenge.created_at
                                 << ",\"expires_at\":" << challenge.expires_at << "}";
                            response.status = 200;
@@ -1574,31 +1661,64 @@ int main(int argc, char** argv) {
                            const auto session_id_bytes = from_hex(session_id_hex);
                            const auto signature_bytes = from_hex(signature_hex);
                            bool ok = false;
-                           if (session_id_bytes.size() == tradep2p::kLoginSessionIdLength &&
-                               signature_bytes.size() == tradep2p::kEd25519SignatureLength) {
+                           if (session_id_bytes.size() == tradep2p::kLoginSessionIdLength) {
                                tradep2p::LoginSessionId session_id{};
                                std::copy(session_id_bytes.begin(), session_id_bytes.end(),
                                         session_id.begin());
-                               tradep2p::Ed25519Signature signature{};
-                               std::copy(signature_bytes.begin(), signature_bytes.end(),
-                                        signature.begin());
 
                                const auto challenge = login_tracker.peek(session_id);
                                login_tracker.consume(session_id); // unconditional - single-use either way
                                // A key is always fetched (or, for an
                                // unenrolled/unknown account, a fixed dummy
-                               // key is substituted) so that verification
-                               // always does the same amount of work on the
-                               // same shape of input, regardless of account
-                               // state - part of the same enumeration-
-                               // resistance property AccountStore::verify()
-                               // already applies to the password path.
-                               static const tradep2p::Ed25519PublicKey kDummyKey{};
+                               // Ed25519 key is substituted, matching the
+                               // challenge route's own default suite) so
+                               // that verification always does the same
+                               // amount of work on the same shape of input,
+                               // regardless of account state - part of the
+                               // same enumeration-resistance property
+                               // AccountStore::verify() already applies to
+                               // the password path. The suite to verify
+                               // under is likewise always the ACCOUNT's own
+                               // enrolled suite, never anything derived from
+                               // this request - see kLoginSuiteMlDsa65V1's
+                               // comment in login.hpp.
                                const auto enrolled = accounts.login_key(username);
-                               const auto& key_to_check = enrolled.has_value() ? *enrolled : kDummyKey;
-                               ok = challenge.has_value() && challenge->username == username &&
-                                    enrolled.has_value() &&
-                                    tradep2p::verify_login_response(key_to_check, *challenge, signature);
+                               const std::uint16_t suite_id = enrolled.has_value()
+                                                                   ? enrolled->suite_id
+                                                                   : tradep2p::kLoginSuiteMlDsa65V1;
+                               if (signature_bytes.size() == expected_login_signature_length(suite_id)) {
+                                   const bool challenge_matches = challenge.has_value() &&
+                                                                  challenge->username == username &&
+                                                                  challenge->suite_id == suite_id &&
+                                                                  enrolled.has_value();
+                                   if (suite_id == tradep2p::kLoginSuiteEd25519V1) {
+                                       static const tradep2p::Ed25519PublicKey kDummyKey{};
+                                       tradep2p::Ed25519PublicKey key_to_check = kDummyKey;
+                                       if (enrolled.has_value()) {
+                                           std::copy(enrolled->bytes.begin(), enrolled->bytes.end(),
+                                                    key_to_check.begin());
+                                       }
+                                       tradep2p::Ed25519Signature signature{};
+                                       std::copy(signature_bytes.begin(), signature_bytes.end(),
+                                                signature.begin());
+                                       ok = challenge_matches &&
+                                            tradep2p::verify_login_response(key_to_check, *challenge,
+                                                                            signature);
+                                   } else if (suite_id == tradep2p::kLoginSuiteMlDsa65V1) {
+                                       static const tradep2p::MlDsa65PublicKey kDummyKeyMlDsa65{};
+                                       tradep2p::MlDsa65PublicKey key_to_check = kDummyKeyMlDsa65;
+                                       if (enrolled.has_value()) {
+                                           std::copy(enrolled->bytes.begin(), enrolled->bytes.end(),
+                                                    key_to_check.begin());
+                                       }
+                                       tradep2p::MlDsa65Signature signature{};
+                                       std::copy(signature_bytes.begin(), signature_bytes.end(),
+                                                signature.begin());
+                                       ok = challenge_matches &&
+                                            tradep2p::verify_login_response_mldsa65(key_to_check, *challenge,
+                                                                                    signature);
+                                   }
+                               }
                            }
 
                            if (!ok) {
@@ -1666,14 +1786,22 @@ int main(int argc, char** argv) {
                            return;
                        }
                        try {
+                           const std::string suite = request.get_param_value("suite");
+                           std::uint16_t suite_id = tradep2p::kLoginSuiteMlDsa65V1;
+                           if (suite == "ed25519") {
+                               suite_id = tradep2p::kLoginSuiteEd25519V1;
+                           } else if (!suite.empty() && suite != "ml-dsa-65") {
+                               throw std::invalid_argument("unknown login suite: " + suite);
+                           }
                            const std::string public_key_hex = required_param(request, "public_key");
                            const auto raw = from_hex(public_key_hex);
-                           const auto parsed = tradep2p::parse_ed25519_public_key(raw);
-                           if (!parsed.has_value()) {
-                               throw std::invalid_argument("invalid public key");
+                           if (raw.size() != expected_login_key_length(suite_id)) {
+                               throw std::invalid_argument("invalid public key length for suite " +
+                                                           login_suite_name(suite_id));
                            }
-                           accounts.set_login_key(session->username, *parsed);
-                           set_json_result(response, true, "login key enrolled");
+                           accounts.set_login_key(session->username, suite_id, raw);
+                           set_json_result(response, true,
+                                          "login key enrolled (" + login_suite_name(suite_id) + ")");
                        } catch (const std::exception& error) {
                            set_json_result(response, false, error.what(), 400);
                        }
@@ -1793,6 +1921,8 @@ int main(int argc, char** argv) {
                             << ",\"alias\":\"" << json_escape(status->alias) << "\""
                             << ",\"identity_id\":\"" << json_escape(status->identity_id_hex) << "\""
                             << ",\"public_key\":\"" << json_escape(status->public_key_hex) << "\""
+                            << ",\"public_key_mldsa65\":\""
+                            << json_escape(status->public_key_mldsa65_hex) << "\""
                             << ",\"created_at\":" << status->created_at
                             << ",\"key_generation\":" << status->key_generation << "}";
                        response.set_content(json.str(), "application/json; charset=utf-8");

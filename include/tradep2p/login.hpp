@@ -72,6 +72,15 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kLoginSuiteEd25519V1 = 0x0001;
+// Post-quantum suite, additive alongside the Ed25519 one above - see
+// recognition.hpp's identical two-suite shape. Unlike recognition (where the
+// requester picks either suite freely), login's suite is a property of
+// whichever key the account actually enrolled - see http_webclient.cpp's
+// enroll-key/challenge/verify routes, which look the suite up from the
+// account rather than accepting it as a client-supplied parameter, so a
+// login attempt can never downgrade to a weaker suite than what was
+// enrolled.
+constexpr std::uint16_t kLoginSuiteMlDsa65V1 = 0x0002;
 constexpr std::uint16_t kLoginProtocolVersion = 1;
 inline constexpr std::string_view kLoginChallengeDomainLabel = "TRADEP2P_LOGIN_CHALLENGE_V1";
 constexpr std::size_t kLoginNonceLength = 32;
@@ -115,6 +124,11 @@ struct LoginChallengeFields {
 [[nodiscard]] bool verify_login_response(const Ed25519PublicKey& login_public_key,
                                          const LoginChallengeFields& fields,
                                          const Ed25519Signature& signature);
+[[nodiscard]] MlDsa65Signature sign_login_response_mldsa65(const MlDsa65PrivateSeed& login_private_seed,
+                                                           const LoginChallengeFields& fields);
+[[nodiscard]] bool verify_login_response_mldsa65(const MlDsa65PublicKey& login_public_key,
+                                                 const LoginChallengeFields& fields,
+                                                 const MlDsa65Signature& signature);
 
 // ---------------------------------------------------------------------------
 // LoginChallengeTracker - server-side (verifier), single-use, expiring.
@@ -127,11 +141,19 @@ public:
     // Issues a fresh challenge for `username` (which may not exist, or may
     // have no enrolled login key - see http_webclient.cpp's account-
     // enumeration-resistance handling; this tracker itself does not care
-    // whether the account is real). Throws std::invalid_argument if this
-    // would exceed kLoginMaxOutstandingChallenges.
+    // whether the account is real). `suite_id` should be the account's own
+    // enrolled suite (looked up by the caller, e.g. via AccountStore) -
+    // this tracker does not verify signatures itself, so it has no way to
+    // enforce that on its own; see kLoginSuiteMlDsa65V1's comment above for
+    // why the caller must never let this be client-chosen. Defaults to
+    // kLoginSuiteMlDsa65V1 for callers with no enrolled-key context yet
+    // (e.g. issuing a challenge for a username that turns out not to exist,
+    // where the choice is moot). Throws std::invalid_argument if this would
+    // exceed kLoginMaxOutstandingChallenges.
     [[nodiscard]] LoginChallengeFields issue(const std::string& service_id,
                                              const std::string& server_identity,
-                                             const std::string& username, std::uint64_t now = 0);
+                                             const std::string& username, std::uint64_t now = 0,
+                                             std::uint16_t suite_id = kLoginSuiteMlDsa65V1);
 
     // Looks up (without consuming) the outstanding challenge for
     // `session_id`, if any and unexpired - used by the caller to know which

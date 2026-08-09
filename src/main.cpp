@@ -429,11 +429,19 @@ const char* recovery_category_name(tradep2p::RecoveryActionCategory category) {
     return "unknown";
 }
 
-void print_public_identity(const tradep2p::PublicIdentity& identity) {
+void print_public_identity(
+    const tradep2p::PublicIdentity& identity,
+    const std::optional<tradep2p::MlDsa65PublicKey>& identity_public_key_mldsa65 = std::nullopt) {
     std::cout << "  identity id:  " << hex_encode(identity.identity_id) << '\n'
               << "  alias:        " << (identity.alias.empty() ? "(none)" : identity.alias) << '\n'
-              << "  public key:   " << hex_encode(identity.identity_public_key) << '\n'
-              << "  created at:   " << identity.created_at << " (unix seconds)\n"
+              << "  public key:   " << hex_encode(identity.identity_public_key) << " (Ed25519)\n";
+    if (identity_public_key_mldsa65.has_value()) {
+        std::cout << "  public key:   " << hex_encode(*identity_public_key_mldsa65)
+                  << " (ML-DSA-65, post-quantum)\n";
+    } else {
+        std::cout << "  public key:   (ML-DSA-65 not available without unlocking)\n";
+    }
+    std::cout << "  created at:   " << identity.created_at << " (unix seconds)\n"
               << "  key gen:      " << identity.key_generation << '\n';
 }
 
@@ -1296,7 +1304,8 @@ bool handle_client_line(SecureChannel& channel,
             state.journal.reset();
             state.history.reset();
             std::cout << "keystore created and unlocked at " << path << '\n';
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         if (sub == "unlock") {
@@ -1314,7 +1323,8 @@ bool handle_client_line(SecureChannel& channel,
             state.journal.reset();
             state.history.reset();
             std::cout << "keystore unlocked\n";
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         if (sub == "lock") {
@@ -1371,7 +1381,8 @@ bool handle_client_line(SecureChannel& channel,
                 throw std::invalid_argument(
                     "no keystore loaded; pass a PATH or run /keystore create|unlock first");
             }
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         throw std::invalid_argument("usage: /keystore create|unlock|lock|rotate|destroy|show-identity ...");

@@ -90,6 +90,47 @@ void test_create_lock_unlock_round_trip(const std::filesystem::path& dir) {
 }
 
 // ---------------------------------------------------------------------------
+// The ML-DSA-65 sibling identity key: deterministic (re-derives identically
+// across a lock/unlock round trip, matching the Ed25519 one's existing
+// property), distinct from the Ed25519 key, and NOT persisted in the
+// on-disk file at all (confirmed by re-deriving it directly from the master
+// secret via the same key_scope label and comparing) - see
+// keystore.hpp's comment on identity_public_key_mldsa65() for why this
+// keystore's file FORMAT is deliberately untouched by this addition.
+// ---------------------------------------------------------------------------
+
+void test_identity_public_key_mldsa65(const std::filesystem::path& dir) {
+    const auto path = dir / "mldsa65.ks";
+    auto ks = tradep2p::IdentityKeystore::create(path.string(), "correct horse battery staple", "carol");
+
+    const auto mldsa65_pub = ks.identity_public_key_mldsa65();
+    require(mldsa65_pub != tradep2p::MlDsa65PublicKey{},
+            "the ML-DSA-65 identity key must not be all-zero");
+
+    const auto directly_derived = tradep2p::derive_mldsa65_keypair(
+        ks.master_secret(), tradep2p::key_scope::kKeystoreIdentityMlDsa65, "");
+    require(mldsa65_pub == directly_derived.public_key,
+            "identity_public_key_mldsa65() must match direct derivation under the same "
+            "key_scope label and empty identifier");
+
+    ks.lock();
+    auto unlocked = tradep2p::IdentityKeystore::unlock(path.string(), "correct horse battery staple");
+    require(unlocked.identity_public_key_mldsa65() == mldsa65_pub,
+            "the ML-DSA-65 identity key must re-derive identically across a lock/unlock round trip");
+
+    // Distinct algorithms, distinct derivation labels - the two identity
+    // keys must never be confusable, even in principle (different types
+    // already prevent equality comparison, but confirm they're not somehow
+    // derived from the same effective label by checking against a
+    // deliberately-wrong-label derivation too).
+    const auto wrong_label_derivation = tradep2p::derive_mldsa65_keypair(
+        unlocked.master_secret(), tradep2p::key_scope::kMediatorPseudonymMlDsa65, "");
+    require(mldsa65_pub != wrong_label_derivation.public_key,
+            "the keystore identity's ML-DSA-65 key must use its own dedicated key_scope label, "
+            "not collide with an unrelated scope's derivation");
+}
+
+// ---------------------------------------------------------------------------
 // Wrong passphrase is rejected, without narrowing the search space (same
 // exception type/message as any other authentication failure - see
 // test_corrupted_aead_rejected() below for the tampered-file counterpart).
@@ -469,6 +510,10 @@ void test_locked_operations_rejected(const std::filesystem::path& dir) {
     require_throws<std::logic_error>(
         [&] { (void)ks.derive_scoped_keypair(tradep2p::key_scope::kLogin, "svc"); },
         "derive_scoped_keypair() on a locked keystore must throw");
+    require_throws<std::logic_error>(
+        [&] { (void)ks.identity_public_key_mldsa65(); },
+        "identity_public_key_mldsa65() on a locked keystore must throw - it is derived on demand, "
+        "never cached on disk, so there is nothing to read while locked");
     require_throws<std::logic_error>([&] { ks.rotate_service_scoped_key("locked-pass"); },
                                       "rotate_service_scoped_key() on a locked keystore must throw");
 
@@ -521,6 +566,7 @@ int main() {
         dir = make_temp_dir();
 
         test_create_lock_unlock_round_trip(dir);
+        test_identity_public_key_mldsa65(dir);
         test_wrong_passphrase_rejected(dir);
         test_corrupted_aead_rejected(dir);
         test_change_passphrase(dir);

@@ -223,10 +223,20 @@ inline constexpr std::string_view kMediatorPseudonym = "mediator";     // phase 
 // separation rather than coupling two unrelated algorithms to one seed.
 inline constexpr std::string_view kMediatorPseudonymMlDsa65 = "mediator-mldsa65";
 inline constexpr std::string_view kLocalHistory = "local-history";    // phase 3
+// ML-DSA-65 sibling of kLocalHistory, same independent-derivation reasoning
+// as kMediatorPseudonymMlDsa65 above - see journal.hpp's checkpoint suite_id
+// support.
+inline constexpr std::string_view kLocalHistoryMlDsa65 = "local-history-mldsa65";
 // The keystore's own cached, no-passphrase-required "who am I" public key
 // (identifier always ""), distinct from kLogin's later per-service
 // identifiers - see IdentityKeystore::create() in keystore.hpp/.cpp.
 inline constexpr std::string_view kKeystoreIdentity = "keystore-identity"; // phase 2
+// ML-DSA-65 sibling, same independent-derivation reasoning as
+// kMediatorPseudonymMlDsa65 above - see IdentityKeystore::
+// identity_public_key_mldsa65() in keystore.hpp/.cpp. Deliberately NOT
+// cached on disk the way kKeystoreIdentity's public key is (that would
+// require a keystore file format bump) - derived on demand instead.
+inline constexpr std::string_view kKeystoreIdentityMlDsa65 = "keystore-identity-mldsa65";
 // Deliberately no "trade" label: per-trade keys are never derived (phase 5
 // generates them fresh via generate_ed25519_keypair()).
 } // namespace key_scope
