@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
 
 add_library(tradep2p
     src/protocol.cpp
@@ -27,7 +28,14 @@ add_library(tradep2p
     src/login.cpp
     src/disclosure.cpp
 )
-target_include_directories(tradep2p PUBLIC include)
+add_library(tradep2p::tradep2p ALIAS tradep2p)
+# BUILD_INTERFACE/INSTALL_INTERFACE split is required for this target to be
+# install()/export()-able - a bare relative path only resolves correctly
+# for in-tree consumers, and CMake refuses to export it as-is.
+target_include_directories(tradep2p PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 target_link_libraries(tradep2p PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 target_compile_options(tradep2p PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
@@ -156,3 +164,56 @@ target_compile_options(tradep2p_disclosure_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 add_test(NAME tradep2p_disclosure_tests COMMAND tradep2p_disclosure_tests)
+
+# ---------------------------------------------------------------------------
+# Library packaging: makes `tradep2p` consumable by a SEPARATE, external
+# project via find_package(tradep2p) - e.g. a future standalone MCP server
+# that links directly against the protocol/crypto/identity core instead of
+# shelling out to tradep2p_cli or re-parsing its JSON state snapshots.
+# Every binary/test target above already builds against this exact library
+# in-tree; this section only adds the install/export machinery, it changes
+# nothing about how those in-tree targets are built.
+#
+# `cmake --install build --prefix /some/prefix` installs the static library,
+# every public header under include/tradep2p/, and a tradep2pConfig.cmake +
+# tradep2pConfigVersion.cmake pair, so a downstream project's own
+# CMakeLists.txt can do:
+#   find_package(tradep2p REQUIRED)
+#   target_link_libraries(my_tool PRIVATE tradep2p::tradep2p)
+# and get the library, its OpenSSL/Threads public dependencies, and the full
+# header set, without needing to live inside this source tree.
+# ---------------------------------------------------------------------------
+
+install(TARGETS tradep2p
+    EXPORT tradep2pTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(DIRECTORY include/tradep2p
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.hpp"
+)
+install(EXPORT tradep2pTargets
+    FILE tradep2pTargets.cmake
+    NAMESPACE tradep2p::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tradep2p
+)
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/tradep2pConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/tradep2pConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tradep2p
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/tradep2pConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/tradep2pConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/tradep2pConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tradep2p
+)
