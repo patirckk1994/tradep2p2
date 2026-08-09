@@ -26,7 +26,12 @@ Options:
                         every registration stays Pending forever - nothing
                         can ever be approved.
   --admin-port N       port for the admin control channel (default 7445,
-                        only meaningful with --admin-token)
+                        only meaningful with --admin-token). This channel
+                        always binds 127.0.0.1 regardless of --bind, so if
+                        you run more than one registry on the same host
+                        (e.g. a testing and a production instance), each
+                        MUST use a different --admin-port or the second one
+                        to start silently loses the bind (logged, not fatal).
   --dashboard-port N   operator dashboard port (default 8092)
   --no-dashboard        do not launch the operator dashboard
   -h, --help            show this help

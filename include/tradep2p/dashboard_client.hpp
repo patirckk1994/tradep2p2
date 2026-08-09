@@ -139,6 +139,27 @@ struct RoomView {
     // Set when THIS dashboard answered an incoming challenge (proving
     // control of its own recognition key to the counterparty).
     std::string own_recognition_response_signature_hex;
+
+    // A challenge the COUNTERPARTY issued TO us that we have not yet
+    // answered - the reverse direction from recognition_challenge above
+    // (which is one WE issued to them). Populated the moment a
+    // RecognitionChallenge frame arrives, regardless of whether a keystore
+    // is unlocked to auto-answer it, specifically so a caller with no
+    // recognition key provider set (e.g. a hosted webclient session with no
+    // server-held trading key) can still surface these fields to a user who
+    // wants to sign externally (their own keystore, own machine) and submit
+    // just the resulting response via submit_recognition_response() below -
+    // see docs/identity-09-hosted-webclient.md's preference for an external
+    // signer over holding the raw key in an operator-controlled runtime.
+    // Cleared the moment ANY response for this challenge is sent, auto or
+    // external. Bounded by the challenge's own expires_at - the counterparty
+    // (and recognition_tracker_ on their side) will reject a stale one
+    // regardless of what's submitted here.
+    bool has_incoming_recognition_challenge{false};
+    std::string incoming_recognition_challenge_nonce_hex;
+    std::uint16_t incoming_recognition_challenge_suite_id{0};
+    std::uint64_t incoming_recognition_challenge_created_at{0};
+    std::uint64_t incoming_recognition_challenge_expires_at{0};
 };
 
 struct OutgoingFrame {
@@ -187,6 +208,25 @@ public:
     // kRecognitionSuiteEd25519V1.
     void recognize(const std::string& room_text,
                     std::uint16_t suite_id = tradep2p::kRecognitionSuiteMlDsa65V1);
+
+    // Answers an incoming recognition challenge (RoomView's
+    // has_incoming_recognition_challenge above) with an ALREADY-COMPUTED
+    // response, produced entirely outside this process - e.g. a
+    // `tradep2p_cli sign-recognition-response` run against the caller's own
+    // local keystore. This lets a caller answer without ever handing this
+    // process (or, for http_webclient.cpp, this SERVER) the private key -
+    // an external signer, one of the preferences
+    // docs/identity-09-hosted-webclient.md states over holding a raw key in
+    // an operator-controlled runtime. `nonce` must be exactly
+    // sizeof(RecognitionNonce) bytes and must match the currently pending
+    // challenge for this room, or this throws std::invalid_argument (e.g.
+    // stale/already-answered/wrong room) - this method does not itself
+    // verify the signature; an invalid one simply fails to verify on
+    // whichever counterparty receives it, same as always.
+    void submit_recognition_response(const std::string& room_text, std::uint16_t suite_id,
+                                     std::vector<std::uint8_t> nonce,
+                                     std::vector<std::uint8_t> public_key,
+                                     std::vector<std::uint8_t> signature);
 
     // These two callbacks bridge into http_dashboard.cpp's
     // IdentityDashboardState (keystore/history), which this module

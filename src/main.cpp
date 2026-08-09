@@ -369,6 +369,19 @@ bool is_all_zero(const std::array<std::uint8_t, N>& bytes) {
     return std::all_of(bytes.begin(), bytes.end(), [](std::uint8_t b) { return b == 0U; });
 }
 
+template <std::size_t N>
+std::array<std::uint8_t, N> hex_decode(const std::string& text) {
+    if (text.size() != N * 2U) {
+        throw std::invalid_argument("expected " + std::to_string(N * 2U) + " hex characters, got " +
+                                    std::to_string(text.size()));
+    }
+    std::array<std::uint8_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = static_cast<std::uint8_t>(std::stoul(text.substr(i * 2U, 2U), nullptr, 16));
+    }
+    return out;
+}
+
 const char* session_state_name(SessionState state) {
     switch (state) {
         case SessionState::WaitingForPeer: return "waiting_for_peer";
@@ -1488,6 +1501,9 @@ void print_usage(const char* program) {
         << "  " << program
         << " register-node <registry:port> <registry-cert-sha256> <node:port> <node-cert-sha256>\n"
         << "  " << program
+        << " sign-recognition-response <keystore> <passphrase> <mediator-id> <ed25519|ml-dsa-65> "
+           "<room-id-hex> <nonce-hex> <created-at> <expires-at>\n"
+        << "  " << program
         << " mediator <bind:port> <node-cert.pem> <node-key.pem>\n"
         << "  " << program
         << " mediator-registered <bind:port> <node-cert.pem> <node-key.pem> "
@@ -1549,6 +1565,79 @@ int main(int argc, char** argv) {
                 parse_endpoint(argv[2]), ClientTlsPolicy{argv[3]}, node);
             std::cout << "node registered for " << tradep2p::kRegistryTtlSeconds
                       << " seconds\n";
+        } else if (mode == "sign-recognition-response") {
+            // Standalone external-signer mode: opens a LOCAL keystore, signs
+            // ONE incoming recognition challenge, prints the public key and
+            // signature, exits. Built for docs/identity-09-hosted-webclient.md's
+            // preference for an external signer over holding a raw trading
+            // key inside a hosted, operator-controlled process - a hosted
+            // webclient session surfaces a pending challenge's exact
+            // fields (see DashboardClient::submit_recognition_response()'s
+            // comment) and this command reproduces the same signed bytes
+            // (recognition.cpp's encode_recognition_signed_payload) from
+            // your own keystore on your own machine; only the two printed
+            // hex values ever need to reach the hosted page.
+            if (argc != 10) {
+                throw std::invalid_argument("wrong sign-recognition-response argument count");
+            }
+            const std::string keystore_path = argv[2];
+            const std::string passphrase = argv[3];
+            const std::string mediator_id = argv[4];
+            const std::string suite_text = argv[5];
+            const RoomId room_id = tradep2p::room_id_from_hex(argv[6]);
+            const auto nonce = hex_decode<tradep2p::kRecognitionNonceLength>(argv[7]);
+            const std::string created_text = argv[8];
+            const std::string expires_text = argv[9];
+            std::uint64_t created_at = 0;
+            std::uint64_t expires_at = 0;
+            const auto created_result = std::from_chars(
+                created_text.data(), created_text.data() + created_text.size(), created_at);
+            if (created_result.ec != std::errc{} ||
+                created_result.ptr != created_text.data() + created_text.size()) {
+                throw std::invalid_argument("invalid created_at");
+            }
+            const auto expires_result = std::from_chars(
+                expires_text.data(), expires_text.data() + expires_text.size(), expires_at);
+            if (expires_result.ec != std::errc{} ||
+                expires_result.ptr != expires_text.data() + expires_text.size()) {
+                throw std::invalid_argument("invalid expires_at");
+            }
+
+            std::uint16_t suite_id = 0U;
+            if (suite_text == "ed25519") {
+                suite_id = tradep2p::kRecognitionSuiteEd25519V1;
+            } else if (suite_text == "ml-dsa-65") {
+                suite_id = tradep2p::kRecognitionSuiteMlDsa65V1;
+            } else {
+                throw std::invalid_argument("suite must be ed25519 or ml-dsa-65");
+            }
+
+            const auto keystore = tradep2p::IdentityKeystore::unlock(keystore_path, passphrase);
+
+            tradep2p::RecognitionChallengeFields fields;
+            fields.suite_id = suite_id;
+            fields.protocol_version = tradep2p::kProtocolVersion;
+            fields.mediator_id = mediator_id;
+            fields.room_id = room_id;
+            fields.nonce = nonce;
+            fields.created_at = created_at;
+            fields.expires_at = expires_at;
+
+            if (suite_id == tradep2p::kRecognitionSuiteEd25519V1) {
+                const auto keypair = tradep2p::derive_ed25519_keypair(
+                    keystore.master_secret(), tradep2p::key_scope::kMediatorPseudonym, mediator_id);
+                const auto signature = tradep2p::sign_recognition_response(keypair.private_seed, fields);
+                std::cout << "public_key: " << hex_encode(keypair.public_key) << '\n';
+                std::cout << "signature:  " << hex_encode(signature) << '\n';
+            } else {
+                const auto keypair = tradep2p::derive_mldsa65_keypair(
+                    keystore.master_secret(), tradep2p::key_scope::kMediatorPseudonymMlDsa65,
+                    mediator_id);
+                const auto signature =
+                    tradep2p::sign_recognition_response_mldsa65(keypair.private_seed, fields);
+                std::cout << "public_key: " << hex_encode(keypair.public_key) << '\n';
+                std::cout << "signature:  " << hex_encode(signature) << '\n';
+            }
         } else if (mode == "mediator") {
             if (argc != 5) {
                 throw std::invalid_argument("wrong mediator argument count");

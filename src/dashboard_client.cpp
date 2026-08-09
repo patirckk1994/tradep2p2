@@ -178,6 +178,44 @@ void DashboardClient::recognize(const std::string& room_text, std::uint16_t suit
             "sent recognition challenge for room " + canonical);
 }
 
+void DashboardClient::submit_recognition_response(const std::string& room_text,
+                                                   std::uint16_t suite_id,
+                                                   std::vector<std::uint8_t> nonce,
+                                                   std::vector<std::uint8_t> public_key,
+                                                   std::vector<std::uint8_t> signature) {
+    const RoomId room_id = tradep2p::room_id_from_hex(room_text);
+    const std::string canonical = tradep2p::room_id_to_hex(room_id);
+
+    RecognitionResponseMessage response;
+    response.room_id = room_id;
+    if (nonce.size() != response.nonce.size()) {
+        throw std::invalid_argument("nonce must be exactly " +
+                                     std::to_string(response.nonce.size()) + " bytes");
+    }
+    std::copy(nonce.begin(), nonce.end(), response.nonce.begin());
+    response.suite_id = suite_id;
+    response.prover_public_key = std::move(public_key);
+    response.signature = std::move(signature);
+
+    {
+        std::scoped_lock lock(state_mutex_);
+        const auto room_it = rooms_.find(canonical);
+        if (room_it == rooms_.end() || !room_it->second.has_incoming_recognition_challenge) {
+            throw std::invalid_argument("no pending recognition challenge for this room");
+        }
+        if (room_it->second.incoming_recognition_challenge_nonce_hex !=
+            hex_encode_bytes(response.nonce)) {
+            throw std::invalid_argument(
+                "nonce does not match the currently pending challenge for this room - it may "
+                "have already expired or been replaced by a new one");
+        }
+        room_it->second.own_recognition_response_signature_hex = hex_encode_bytes(response.signature);
+        room_it->second.has_incoming_recognition_challenge = false;
+    }
+    enqueue(MessageType::RecognitionResponse, tradep2p::encode_recognition_response(response),
+            "answered recognition challenge for room " + canonical + " (externally signed)");
+}
+
 void DashboardClient::set_recognition_key_provider(RecognitionKeyProvider provider) {
     recognition_key_provider_ = std::move(provider);
 }
@@ -192,6 +230,12 @@ std::string DashboardClient::state_json() const {
     json << "{\"connected\":" << (connected_ ? "true" : "false")
          << ",\"connection_status\":\"" << json_escape(connection_status_)
          << "\",\"client_id\":\"" << json_escape(client_id_) << "\""
+         // Same string passed to sign_recognition_response's
+         // RecognitionChallengeFields.mediator_id - exposed so a caller can
+         // build the exact `tradep2p_cli sign-recognition-response` command
+         // for an incoming_recognition_challenge without needing to already
+         // know how this process was launched.
+         << ",\"mediator_id\":\"" << json_escape(mediator_id_) << "\""
          << ",\"revision\":" << revision_
          << ",\"mediator_fee_asset\":\"" << json_escape(mediator_fee_.asset)
          << "\",\"mediator_fee_amount\":" << mediator_fee_.amount
@@ -294,6 +338,15 @@ std::string DashboardClient::state_json() const {
         }
         json << ",\"own_recognition_response_signature\":\""
              << json_escape(room.own_recognition_response_signature_hex) << "\"";
+        json << ",\"incoming_recognition_challenge\":";
+        if (room.has_incoming_recognition_challenge) {
+            json << "{\"nonce\":\"" << json_escape(room.incoming_recognition_challenge_nonce_hex)
+                 << "\",\"suite_id\":" << room.incoming_recognition_challenge_suite_id
+                 << ",\"created_at\":" << room.incoming_recognition_challenge_created_at
+                 << ",\"expires_at\":" << room.incoming_recognition_challenge_expires_at << "}";
+        } else {
+            json << "null";
+        }
 
         json << ",\"receipts\":[";
         if (const auto receipts_it = room_receipts_.find(room.room_id);
@@ -794,13 +847,24 @@ void DashboardClient::handle_frame(const Frame& frame) {
         const std::string room_id = tradep2p::room_id_to_hex(challenge_to_answer->room_id);
         if (!key.has_value()) {
             // Declining is not evidence of anything (specs.txt SS8.2) - no
-            // keystore unlocked means nothing to prove control with.
+            // keystore unlocked means nothing to prove control with. The
+            // challenge's fields are still retained (not just discarded) so
+            // a caller with no recognition key provider set can offer a
+            // manual external-signing path instead - see
+            // submit_recognition_response()'s comment.
             std::scoped_lock lock(state_mutex_);
             auto& room = rooms_[room_id];
             room.room_id = room_id;
             room.recognition_status = "declined";
+            room.has_incoming_recognition_challenge = true;
+            room.incoming_recognition_challenge_nonce_hex =
+                hex_encode_bytes(challenge_to_answer->nonce);
+            room.incoming_recognition_challenge_suite_id = challenge_to_answer->suite_id;
+            room.incoming_recognition_challenge_created_at = challenge_to_answer->created_at;
+            room.incoming_recognition_challenge_expires_at = challenge_to_answer->expires_at;
             add_event_locked("room " + room_id +
-                             ": no keystore unlocked, declined to answer recognition challenge");
+                             ": no keystore unlocked, declined to auto-answer recognition "
+                             "challenge (can still be answered externally)");
         } else {
             RecognitionChallengeFields fields;
             fields.suite_id = challenge_to_answer->suite_id;
@@ -844,10 +908,17 @@ void DashboardClient::handle_frame(const Frame& frame) {
                 auto& room = rooms_[room_id];
                 room.room_id = room_id;
                 room.recognition_status = "declined";
+                room.has_incoming_recognition_challenge = true;
+                room.incoming_recognition_challenge_nonce_hex =
+                    hex_encode_bytes(challenge_to_answer->nonce);
+                room.incoming_recognition_challenge_suite_id = challenge_to_answer->suite_id;
+                room.incoming_recognition_challenge_created_at = challenge_to_answer->created_at;
+                room.incoming_recognition_challenge_expires_at = challenge_to_answer->expires_at;
                 add_event_locked("room " + room_id +
                                  ": counterparty's recognition challenge named an unsupported "
                                  "suite_id " + std::to_string(challenge_to_answer->suite_id) +
-                                 " - declined");
+                                 " - declined (can still be answered externally if you have a "
+                                 "matching key)");
             } else {
                 {
                     std::scoped_lock lock(state_mutex_);
