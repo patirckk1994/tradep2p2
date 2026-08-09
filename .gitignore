@@ -44,3 +44,8 @@ docs (2)/
 # Local MCP server config (Claude Code) - absolute machine-specific paths,
 # not portable across checkouts.
 /.mcp.json
+
+# Ad-hoc manual testing helper and the throwaway mediator identity/logs it
+# generates - dev convenience only, never project content.
+/dev_throwaway.sh
+/.throwaway/
