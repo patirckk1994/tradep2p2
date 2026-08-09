@@ -100,6 +100,28 @@ bool verify_trade_message(const Ed25519PublicKey& sender_ephemeral_public_key,
     return ed25519_verify(sender_ephemeral_public_key, payload, signature);
 }
 
+MlDsa65Signature sign_trade_message_mldsa65(
+    const MlDsa65PrivateSeed& sender_ephemeral_private_seed_mldsa65, const TradeMessageContext& context) {
+    const std::vector<std::uint8_t> payload = encode_trade_message_context(context);
+    const EvpPkeyPtr key = load_mldsa65_private_key(sender_ephemeral_private_seed_mldsa65);
+    return mldsa65_sign(key.get(), payload);
+}
+
+bool verify_trade_message_mldsa65(const MlDsa65PublicKey& sender_ephemeral_public_key_mldsa65,
+                                  const TradeMessageContext& context,
+                                  const MlDsa65Signature& signature) {
+    const std::vector<std::uint8_t> payload = encode_trade_message_context(context);
+    return mldsa65_verify(sender_ephemeral_public_key_mldsa65, payload, signature);
+}
+
+bool verify_trade_message_hybrid(const Ed25519PublicKey& sender_ephemeral_public_key,
+                                 const MlDsa65PublicKey& sender_ephemeral_public_key_mldsa65,
+                                 const TradeMessageContext& context, const Ed25519Signature& signature,
+                                 const MlDsa65Signature& signature_mldsa65) {
+    return verify_trade_message(sender_ephemeral_public_key, context, signature) &&
+           verify_trade_message_mldsa65(sender_ephemeral_public_key_mldsa65, context, signature_mldsa65);
+}
+
 std::array<std::uint8_t, 32> trade_payload_hash(std::span<const std::uint8_t> encoded_payload) {
     return sha256(encoded_payload);
 }

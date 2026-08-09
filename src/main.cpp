@@ -1092,7 +1092,9 @@ bool handle_client_line(SecureChannel& channel,
         // only in memory for this session (not yet persisted - see
         // ephemeral.hpp's documented scope).
         const auto keypair_it = state.room_ephemeral_keypair.find(canonical_room);
-        if (keypair_it != state.room_ephemeral_keypair.end()) {
+        const auto keypair_mldsa65_it = state.room_ephemeral_keypair_mldsa65.find(canonical_room);
+        if (keypair_it != state.room_ephemeral_keypair.end() &&
+            keypair_mldsa65_it != state.room_ephemeral_keypair_mldsa65.end()) {
             tradep2p::TradeMessageContext context;
             context.mediator_id = state.mediator_id;
             context.room_id = room_id;
@@ -1107,9 +1109,13 @@ bool handle_client_line(SecureChannel& channel,
             context.timestamp = static_cast<std::uint64_t>(std::time(nullptr));
             const auto signature =
                 tradep2p::sign_trade_message(keypair_it->second.private_seed, context);
+            const auto signature_mldsa65 = tradep2p::sign_trade_message_mldsa65(
+                keypair_mldsa65_it->second.private_seed, context);
             std::cout << "  signed with this room's ephemeral trade key (round "
                       << (context.round + 1U) << ", " << (command == "/sent" ? "sent" : "received")
-                      << "): " << hex_encode(signature) << '\n';
+                      << "):\n"
+                      << "    Ed25519:   " << hex_encode(signature) << '\n'
+                      << "    ML-DSA-65: " << hex_encode(signature_mldsa65) << '\n';
         }
         return true;
     }

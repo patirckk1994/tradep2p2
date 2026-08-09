@@ -102,6 +102,57 @@ void test_sign_verify_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid round trip and "both required" - mirrors receipt_tests.cpp's
+// hybrid coverage. Unlike receipt/disclosure, this envelope is never shown
+// to a stranger (see ephemeral.hpp's file comment - it's held only in
+// memory for this session today), but it hybrid-signs with the same
+// per-room dual keypair ack/disclosure already use, so it gets the same
+// "both signatures required" guarantee for consistency.
+// ---------------------------------------------------------------------------
+
+void test_hybrid_sign_verify_round_trip() {
+    const auto sender = tradep2p::generate_ephemeral_trade_keypair();
+    const auto sender_mldsa65 = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    auto context = base_context();
+    context.sender_ephemeral_public_key = sender.public_key;
+
+    const auto signature = tradep2p::sign_trade_message(sender.private_seed, context);
+    const auto signature_mldsa65 =
+        tradep2p::sign_trade_message_mldsa65(sender_mldsa65.private_seed, context);
+    require(tradep2p::verify_trade_message_hybrid(sender.public_key, sender_mldsa65.public_key,
+                                                   context, signature, signature_mldsa65),
+            "two genuine signatures under their own algorithms must hybrid-verify");
+
+    const auto other_mldsa65 = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    require(!tradep2p::verify_trade_message_hybrid(sender.public_key, other_mldsa65.public_key,
+                                                    context, signature, signature_mldsa65),
+            "hybrid verification must fail under an unrelated ML-DSA-65 key");
+}
+
+void test_hybrid_requires_both_signatures() {
+    const auto sender = tradep2p::generate_ephemeral_trade_keypair();
+    const auto sender_mldsa65 = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    auto context = base_context();
+    context.sender_ephemeral_public_key = sender.public_key;
+
+    const auto signature = tradep2p::sign_trade_message(sender.private_seed, context);
+    const auto signature_mldsa65 =
+        tradep2p::sign_trade_message_mldsa65(sender_mldsa65.private_seed, context);
+
+    auto corrupted_ed25519 = signature;
+    corrupted_ed25519[0] ^= 0xFFU;
+    require(!tradep2p::verify_trade_message_hybrid(sender.public_key, sender_mldsa65.public_key,
+                                                    context, corrupted_ed25519, signature_mldsa65),
+            "a genuine ML-DSA-65 signature cannot compensate for a corrupted Ed25519 one");
+
+    auto corrupted_mldsa65 = signature_mldsa65;
+    corrupted_mldsa65[0] ^= 0xFFU;
+    require(!tradep2p::verify_trade_message_hybrid(sender.public_key, sender_mldsa65.public_key,
+                                                    context, signature, corrupted_mldsa65),
+            "a genuine Ed25519 signature cannot compensate for a corrupted ML-DSA-65 one");
+}
+
+// ---------------------------------------------------------------------------
 // Cross-room / cross-round / cross-message-type / cross-version /
 // cross-mediator replay: a valid signature over one context must be
 // rejected when the receiver checks it against any other context.
@@ -193,7 +244,7 @@ void test_encoding_domain_separation() {
             "different mediator id length must change the encoded context");
 
     auto c = a;
-    c.suite_id = 0x0002;
+    c.suite_id = tradep2p::kTradeMessageSuiteEd25519V1; // distinct from base_context()'s hybrid default
     require(tradep2p::encode_trade_message_context(a) != tradep2p::encode_trade_message_context(c),
             "different suite id must change the encoded context");
 }
@@ -243,6 +294,8 @@ int main() {
         test_ephemeral_keys_are_fresh_and_unlinkable();
         test_ephemeral_keys_mldsa65_are_fresh();
         test_sign_verify_round_trip();
+        test_hybrid_sign_verify_round_trip();
+        test_hybrid_requires_both_signatures();
         test_cross_room_replay_rejected();
         test_cross_round_replay_rejected();
         test_cross_message_type_substitution_rejected();
