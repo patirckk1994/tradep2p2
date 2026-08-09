@@ -244,43 +244,72 @@ std::string env_or_empty(const char* name) {
 // issued that run becomes unverifiable against a later restart's key,
 // which is a real, named limitation of running without this option set,
 // not a silent one.
-Ed25519KeyPair load_or_create_mediator_receipt_key(const std::string& path) {
+// Shared by every "mediator identity key that must survive restarts, else
+// everything already signed with it becomes unverifiable" loader below -
+// same plaintext-0600-raw-seed tradeoff, same "unset means a fresh key
+// every restart" honesty, for every one of the mediator's persistent
+// signing identities (receipt Ed25519, receipt ML-DSA-65, auth ML-DSA-65).
+// Only the key type, its generator, and its seed-reload function differ per
+// identity - `label` exists purely so error messages stay identity-specific.
+template <typename KeyPair, typename Seed, std::size_t SeedLength>
+KeyPair load_or_create_mediator_key(const std::string& path, const std::string& label,
+                                     KeyPair (*generate)(), KeyPair (*load_from_seed)(const Seed&)) {
     if (path.empty()) {
-        return generate_mediator_receipt_keypair();
+        return generate();
     }
     const int existing_fd = ::open(path.c_str(), O_RDONLY);
     if (existing_fd >= 0) {
-        std::array<std::uint8_t, kEd25519PrivateSeedLength> raw{};
+        std::array<std::uint8_t, SeedLength> raw{};
         const ssize_t n = ::read(existing_fd, raw.data(), raw.size());
         ::close(existing_fd);
         if (n != static_cast<ssize_t>(raw.size())) {
-            throw std::runtime_error("mediator receipt key file '" + path +
-                                     "' is not exactly " +
-                                     std::to_string(kEd25519PrivateSeedLength) + " bytes");
+            throw std::runtime_error(label + " key file '" + path + "' is not exactly " +
+                                     std::to_string(SeedLength) + " bytes");
         }
         // Re-derives the public key from the loaded seed rather than
         // storing it separately, so the file's only content is the one
         // thing that actually needs protecting.
-        return load_ed25519_keypair(Ed25519PrivateSeed(raw));
+        return load_from_seed(Seed(raw));
     }
 
-    Ed25519KeyPair fresh = generate_mediator_receipt_keypair();
+    KeyPair fresh = generate();
     const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (fd < 0) {
-        throw std::runtime_error("failed to create mediator receipt key file '" + path + "'");
+        throw std::runtime_error("failed to create " + label + " key file '" + path + "'");
     }
     const auto& seed_bytes = fresh.private_seed.bytes();
     const ssize_t written = ::write(fd, seed_bytes.data(), seed_bytes.size());
     ::close(fd);
     if (written != static_cast<ssize_t>(seed_bytes.size())) {
         ::unlink(path.c_str());
-        throw std::runtime_error("failed to write mediator receipt key file '" + path + "'");
+        throw std::runtime_error("failed to write " + label + " key file '" + path + "'");
     }
     return fresh;
 }
 
+Ed25519KeyPair load_or_create_mediator_receipt_key(const std::string& path) {
+    return load_or_create_mediator_key<Ed25519KeyPair, Ed25519PrivateSeed, kEd25519PrivateSeedLength>(
+        path, "mediator receipt", generate_mediator_receipt_keypair, load_ed25519_keypair);
+}
+
 std::string configured_mediator_receipt_key_file() {
     return env_or_empty("TRADEP2P_MEDIATOR_RECEIPT_KEY_FILE");
+}
+
+// The hybrid-signing ML-DSA-65 half of the mediator's receipt identity - see
+// receipt.hpp's file comment. A deliberately SEPARATE key/file from both the
+// Ed25519 receipt key above and the unrelated mediator-auth ML-DSA-65 key
+// below (mediator_auth.hpp already documents why auth stays distinct from
+// receipt-scoped identity); a receipt is only fully verified once BOTH the
+// Ed25519 and this key's signatures check out, so losing continuity on
+// either one independently breaks every previously-issued receipt.
+MlDsa65KeyPair load_or_create_mediator_receipt_mldsa65_key(const std::string& path) {
+    return load_or_create_mediator_key<MlDsa65KeyPair, MlDsa65PrivateSeed, kMlDsa65SeedLength>(
+        path, "mediator receipt ML-DSA-65", generate_mldsa65_keypair, load_mldsa65_keypair);
+}
+
+std::string configured_mediator_receipt_mldsa65_key_file() {
+    return env_or_empty("TRADEP2P_MEDIATOR_RECEIPT_MLDSA65_KEY_FILE");
 }
 
 // See mediator_auth.hpp's file comment. Line-for-line the same tradeoffs as
@@ -291,37 +320,8 @@ std::string configured_mediator_receipt_key_file() {
 // (ML-DSA-65 instead of Ed25519, since this key's whole purpose is to be
 // the mediator's post-quantum auth identity, see mediator_auth.hpp).
 MlDsa65KeyPair load_or_create_mediator_auth_key(const std::string& path) {
-    if (path.empty()) {
-        return generate_mldsa65_keypair();
-    }
-    const int existing_fd = ::open(path.c_str(), O_RDONLY);
-    if (existing_fd >= 0) {
-        std::array<std::uint8_t, kMlDsa65SeedLength> raw{};
-        const ssize_t n = ::read(existing_fd, raw.data(), raw.size());
-        ::close(existing_fd);
-        if (n != static_cast<ssize_t>(raw.size())) {
-            throw std::runtime_error("mediator auth key file '" + path +
-                                     "' is not exactly " +
-                                     std::to_string(kMlDsa65SeedLength) + " bytes");
-        }
-        // Re-derives the public key from the loaded seed rather than storing
-        // it separately, same reasoning as the receipt key loader above.
-        return load_mldsa65_keypair(MlDsa65PrivateSeed(raw));
-    }
-
-    MlDsa65KeyPair fresh = generate_mldsa65_keypair();
-    const int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0) {
-        throw std::runtime_error("failed to create mediator auth key file '" + path + "'");
-    }
-    const auto& seed_bytes = fresh.private_seed.bytes();
-    const ssize_t written = ::write(fd, seed_bytes.data(), seed_bytes.size());
-    ::close(fd);
-    if (written != static_cast<ssize_t>(seed_bytes.size())) {
-        ::unlink(path.c_str());
-        throw std::runtime_error("failed to write mediator auth key file '" + path + "'");
-    }
-    return fresh;
+    return load_or_create_mediator_key<MlDsa65KeyPair, MlDsa65PrivateSeed, kMlDsa65SeedLength>(
+        path, "mediator auth", generate_mldsa65_keypair, load_mldsa65_keypair);
 }
 
 std::uint64_t now_unix_seconds() {
@@ -549,6 +549,8 @@ public:
           mediator_id_(configured_mediator_id(bind_endpoint_)),
           mediator_receipt_keypair_(
               load_or_create_mediator_receipt_key(configured_mediator_receipt_key_file())),
+          mediator_receipt_mldsa65_keypair_(load_or_create_mediator_receipt_mldsa65_key(
+              configured_mediator_receipt_mldsa65_key_file())),
           admin_token_(configured_admin_token()),
           admin_port_(configured_admin_port()),
           require_fee_confirmation_(configured_require_fee_confirmation()),
@@ -865,6 +867,12 @@ private:
         // announced, never a key embedded in the ack itself.
         std::optional<Ed25519PublicKey> ephemeral_key_a;
         std::optional<Ed25519PublicKey> ephemeral_key_b;
+        // The ML-DSA-65 half of each party's dual-algorithm ephemeral
+        // identity (see ephemeral.hpp) - cached the same way and for the
+        // same reason as the Ed25519 halves above, now that receipt acks
+        // and receipts themselves are hybrid-signed/verified.
+        std::optional<MlDsa65PublicKey> ephemeral_key_a_mldsa65;
+        std::optional<MlDsa65PublicKey> ephemeral_key_b_mldsa65;
         // Phase 6: the stage-3 ("penultimate obligations complete")
         // receipt, once issued - kept so the stage-4 ("settlement
         // completed") receipt can chain onto it via
@@ -1607,11 +1615,17 @@ private:
         if (!parsed.has_value()) {
             throw std::invalid_argument("malformed ephemeral trade public key");
         }
+        const auto parsed_mldsa65 = parse_mldsa65_public_key(message.ephemeral_public_key_mldsa65);
+        if (!parsed_mldsa65.has_value()) {
+            throw std::invalid_argument("malformed ephemeral trade public key (ML-DSA-65)");
+        }
         const auto room = find_room_for(client->id, message.room_id);
         const Party party = party_for(*room, client->id);
         {
             std::scoped_lock lock(room->mutex);
             (party == Party::A ? room->ephemeral_key_a : room->ephemeral_key_b) = *parsed;
+            (party == Party::A ? room->ephemeral_key_a_mldsa65 : room->ephemeral_key_b_mldsa65) =
+                *parsed_mldsa65;
         }
         handle_room_relay(client, MessageType::TradeEphemeralKey, message.room_id, payload);
     }
@@ -1643,7 +1657,9 @@ private:
                 throw BenignRejection("unexpected receipt acknowledgement stage");
             }
             const auto& announced_key = party == Party::A ? room->ephemeral_key_a : room->ephemeral_key_b;
-            if (!announced_key.has_value()) {
+            const auto& announced_key_mldsa65 =
+                party == Party::A ? room->ephemeral_key_a_mldsa65 : room->ephemeral_key_b_mldsa65;
+            if (!announced_key.has_value() || !announced_key_mldsa65.has_value()) {
                 throw BenignRejection(
                     "no ephemeral trade key announced for this room yet - cannot verify acknowledgement");
             }
@@ -1654,7 +1670,8 @@ private:
             fields.stage = ReceiptStage::PenultimateObligationsComplete;
             fields.terms_commitment = trade_payload_hash(encode_terms(room->session.terms()));
             fields.timestamp = message.timestamp;
-            if (!verify_receipt_ack(*announced_key, fields, message.signature)) {
+            if (!verify_receipt_ack_hybrid(*announced_key, *announced_key_mldsa65, fields,
+                                          message.signature, message.signature_mldsa65)) {
                 throw std::invalid_argument("receipt acknowledgement signature does not verify");
             }
 
@@ -1779,7 +1796,8 @@ private:
     // comment: reaching either stage 3 or stage 4 already required passing
     // through the ack gate, which itself requires both keys to exist).
     IssuedReceipt issue_receipt(RoomEntry& room, ReceiptStage stage, bool completed) {
-        if (!room.ephemeral_key_a.has_value() || !room.ephemeral_key_b.has_value()) {
+        if (!room.ephemeral_key_a.has_value() || !room.ephemeral_key_b.has_value() ||
+            !room.ephemeral_key_a_mldsa65.has_value() || !room.ephemeral_key_b_mldsa65.has_value()) {
             throw std::runtime_error(
                 "cannot issue a receipt before both parties have announced an ephemeral trade key");
         }
@@ -1789,7 +1807,10 @@ private:
         fields.terms_commitment = trade_payload_hash(encode_terms(room.session.terms()));
         fields.party_a_ephemeral_key = *room.ephemeral_key_a;
         fields.party_b_ephemeral_key = *room.ephemeral_key_b;
+        fields.party_a_ephemeral_key_mldsa65 = *room.ephemeral_key_a_mldsa65;
+        fields.party_b_ephemeral_key_mldsa65 = *room.ephemeral_key_b_mldsa65;
         fields.mediator_public_key = mediator_receipt_keypair_.public_key;
+        fields.mediator_public_key_mldsa65 = mediator_receipt_mldsa65_keypair_.public_key;
         fields.stage = stage;
         fields.completed = completed;
         fields.timestamp = now_unix_seconds();
@@ -1797,12 +1818,15 @@ private:
         fields.previous_stage_hash =
             (stage == ReceiptStage::SettlementCompleted && room.final_ack_receipt.has_value())
                 ? receipt_chain_link_hash(room.final_ack_receipt->fields,
-                                          room.final_ack_receipt->mediator_signature)
+                                          room.final_ack_receipt->mediator_signature,
+                                          room.final_ack_receipt->mediator_signature_mldsa65)
                 : std::array<std::uint8_t, 32>{};
 
         IssuedReceipt issued;
         issued.fields = fields;
         issued.mediator_signature = sign_receipt(mediator_receipt_keypair_.private_seed, fields);
+        issued.mediator_signature_mldsa65 =
+            sign_receipt_mldsa65(mediator_receipt_mldsa65_keypair_.private_seed, fields);
         if (stage == ReceiptStage::PenultimateObligationsComplete) {
             room.final_ack_receipt = issued;
         }
@@ -1818,11 +1842,15 @@ private:
         message.terms_commitment = issued.fields.terms_commitment;
         message.party_a_ephemeral_key = issued.fields.party_a_ephemeral_key;
         message.party_b_ephemeral_key = issued.fields.party_b_ephemeral_key;
+        message.party_a_ephemeral_key_mldsa65 = issued.fields.party_a_ephemeral_key_mldsa65;
+        message.party_b_ephemeral_key_mldsa65 = issued.fields.party_b_ephemeral_key_mldsa65;
         message.mediator_public_key = issued.fields.mediator_public_key;
+        message.mediator_public_key_mldsa65 = issued.fields.mediator_public_key_mldsa65;
         message.timestamp = issued.fields.timestamp;
         message.nonce = issued.fields.nonce;
         message.previous_stage_hash = issued.fields.previous_stage_hash;
         message.mediator_signature = issued.mediator_signature;
+        message.mediator_signature_mldsa65 = issued.mediator_signature_mldsa65;
         return message;
     }
 
@@ -2560,6 +2588,7 @@ private:
     // ack's signature to verify) and its receipt-signing keypair.
     std::string mediator_id_;
     Ed25519KeyPair mediator_receipt_keypair_;
+    MlDsa65KeyPair mediator_receipt_mldsa65_keypair_;
     // Gates admin_control_loop() - see configured_admin_token()'s comment
     // for why an empty token disables the channel entirely.
     std::string admin_token_;

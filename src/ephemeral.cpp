@@ -86,6 +86,8 @@ std::vector<std::uint8_t> encode_trade_message_context(const TradeMessageContext
 
 Ed25519KeyPair generate_ephemeral_trade_keypair() { return generate_ed25519_keypair(); }
 
+MlDsa65KeyPair generate_ephemeral_trade_keypair_mldsa65() { return generate_mldsa65_keypair(); }
+
 Ed25519Signature sign_trade_message(const Ed25519PrivateSeed& sender_ephemeral_private_seed,
                                      const TradeMessageContext& context) {
     const std::vector<std::uint8_t> payload = encode_trade_message_context(context);

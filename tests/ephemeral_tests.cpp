@@ -65,6 +65,25 @@ void test_ephemeral_keys_are_fresh_and_unlinkable() {
 }
 
 // ---------------------------------------------------------------------------
+// The ML-DSA-65 half of a room's ephemeral identity - generated fresh
+// alongside the Ed25519 half (see receipt.hpp/disclosure.hpp's hybrid
+// signing, which needs both), same freshness/unlinkability property.
+// ---------------------------------------------------------------------------
+
+void test_ephemeral_keys_mldsa65_are_fresh() {
+    const auto room_a_key = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    const auto room_b_key = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    require(room_a_key.public_key != room_b_key.public_key,
+            "two ML-DSA-65 ephemeral keys for two rooms must differ");
+
+    const tradep2p::MasterSecret master = tradep2p::generate_master_secret();
+    const auto derived_pseudonym_mldsa65 = tradep2p::derive_mldsa65_keypair(
+        master, tradep2p::key_scope::kMediatorPseudonymMlDsa65, "mediator-a");
+    require(room_a_key.public_key != derived_pseudonym_mldsa65.public_key,
+            "an ML-DSA-65 ephemeral trade key must never coincide with a derived scoped key");
+}
+
+// ---------------------------------------------------------------------------
 // Sign/verify round trip.
 // ---------------------------------------------------------------------------
 
@@ -209,9 +228,11 @@ void test_malformed_ephemeral_key_message_rejected() {
     tradep2p::TradeEphemeralKeyMessage message;
     message.room_id = room_id(5);
     message.ephemeral_public_key.fill(0x33U);
+    message.ephemeral_public_key_mldsa65.fill(0x44U);
     const auto encoded = tradep2p::encode_trade_ephemeral_key(message);
     const auto decoded = tradep2p::decode_trade_ephemeral_key(encoded);
-    require(decoded.room_id == message.room_id && decoded.ephemeral_public_key == message.ephemeral_public_key,
+    require(decoded.room_id == message.room_id && decoded.ephemeral_public_key == message.ephemeral_public_key &&
+                decoded.ephemeral_public_key_mldsa65 == message.ephemeral_public_key_mldsa65,
             "a well-formed TradeEphemeralKey message must round-trip exactly");
 }
 
@@ -220,6 +241,7 @@ void test_malformed_ephemeral_key_message_rejected() {
 int main() {
     try {
         test_ephemeral_keys_are_fresh_and_unlinkable();
+        test_ephemeral_keys_mldsa65_are_fresh();
         test_sign_verify_round_trip();
         test_cross_room_replay_rejected();
         test_cross_round_replay_rejected();

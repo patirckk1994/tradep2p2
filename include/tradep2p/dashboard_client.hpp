@@ -288,12 +288,17 @@ private:
     // Phase 5 - guarded by state_mutex_ alongside rooms_/recognition_
     // tracker_ above. Keyed by room id (hex), same as rooms_.
     std::map<std::string, Ed25519KeyPair> ephemeral_keypairs_;
+    // The ML-DSA-65 half of the same per-room ephemeral identity above - see
+    // main.cpp's identical ClientState::room_ephemeral_keypair_mldsa65 for
+    // why both halves are needed (hybrid receipt-ack/disclosure signing).
+    std::map<std::string, MlDsa65KeyPair> ephemeral_keypairs_mldsa65_;
 
     // Phase 6 - guarded by state_mutex_. mediator_receipt_key_ is this
     // session's trust-on-first-use pin (see main.cpp's identical
     // ClientState::mediator_receipt_key for the same caveat, stated once
     // there rather than duplicated here).
     std::optional<Ed25519PublicKey> mediator_receipt_key_;
+    std::optional<MlDsa65PublicKey> mediator_receipt_key_mldsa65_;
     std::map<std::string, std::vector<IssuedReceipt>> room_receipts_;
 
     std::mutex queue_mutex_;

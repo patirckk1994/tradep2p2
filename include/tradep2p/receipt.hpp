@@ -103,6 +103,16 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kReceiptSuiteEd25519V1 = 0x0001;
+// The only suite issued by any production code today - see specs.txt SS11:
+// "Mediator receipt-signing keys should be hybrid Ed25519+ML-DSA from their
+// first shipped version." Hybrid means BOTH signatures are mandatory, not a
+// switchable choice the way recognition.hpp's suite_id is - receipts and
+// disclosure must stay unforgeable even if just one of the two schemes is
+// later broken, so there is no lone-Ed25519 or lone-ML-DSA-65 issuance path
+// to fall back to. kReceiptSuiteEd25519V1 above is kept only as a historical
+// constant/domain-separation value for tests exercising the Ed25519-only
+// primitives in isolation.
+constexpr std::uint16_t kReceiptSuiteEd25519MlDsa65HybridV1 = 0x0002;
 inline constexpr std::string_view kReceiptAckDomainLabel = "TRADEP2P_RECEIPT_ACK_V1";
 inline constexpr std::string_view kReceiptDomainLabel = "TRADEP2P_RECEIPT_V1";
 constexpr std::size_t kReceiptMaxMediatorIdLength = 256;
@@ -125,7 +135,7 @@ enum class ReceiptStage : std::uint8_t {
 // ephemeral.hpp - never carried redundantly on the wire beyond what's
 // needed to reconstruct these bytes (see protocol.hpp's ReceiptAckMessage).
 struct ReceiptAckFields {
-    std::uint16_t suite_id{kReceiptSuiteEd25519V1};
+    std::uint16_t suite_id{kReceiptSuiteEd25519MlDsa65HybridV1};
     std::uint16_t protocol_version{kProtocolVersion};
     std::string mediator_id;
     RoomId room_id{};
@@ -141,25 +151,47 @@ struct ReceiptAckFields {
 [[nodiscard]] bool verify_receipt_ack(const Ed25519PublicKey& ephemeral_public_key,
                                       const ReceiptAckFields& fields,
                                       const Ed25519Signature& signature);
+[[nodiscard]] MlDsa65Signature sign_receipt_ack_mldsa65(const MlDsa65PrivateSeed& ephemeral_private_seed,
+                                                        const ReceiptAckFields& fields);
+[[nodiscard]] bool verify_receipt_ack_mldsa65(const MlDsa65PublicKey& ephemeral_public_key,
+                                              const ReceiptAckFields& fields,
+                                              const MlDsa65Signature& signature);
+// Both signatures must verify - see the file-wide hybrid note above.
+[[nodiscard]] bool verify_receipt_ack_hybrid(const Ed25519PublicKey& ephemeral_public_key,
+                                             const MlDsa65PublicKey& ephemeral_public_key_mldsa65,
+                                             const ReceiptAckFields& fields,
+                                             const Ed25519Signature& signature,
+                                             const MlDsa65Signature& signature_mldsa65);
 
 // --- The receipt itself (mediator-signed) ------------------------------
 
 struct ReceiptFields {
-    std::uint16_t suite_id{kReceiptSuiteEd25519V1};
+    std::uint16_t suite_id{kReceiptSuiteEd25519MlDsa65HybridV1};
     std::uint16_t protocol_version{kProtocolVersion};
     std::string mediator_id;
     RoomId room_id{};
     std::array<std::uint8_t, 32> terms_commitment{};
     Ed25519PublicKey party_a_ephemeral_key{};
     Ed25519PublicKey party_b_ephemeral_key{};
+    // Each party's ML-DSA-65 ephemeral counterpart (see ephemeral.hpp - a
+    // room's ephemeral identity is dual-algorithm from generation). Carried
+    // here, not just the mediator's own hybrid keys above, because
+    // disclosure.hpp's verify_disclosure_bundle() needs BOTH of a party's
+    // ephemeral public keys to hybrid-verify a disclosure envelope signed
+    // long after this room closed - a future recipient who was never
+    // connected to this room has no other way to learn them.
+    MlDsa65PublicKey party_a_ephemeral_key_mldsa65{};
+    MlDsa65PublicKey party_b_ephemeral_key_mldsa65{};
     Ed25519PublicKey mediator_public_key{};
+    MlDsa65PublicKey mediator_public_key_mldsa65{};
     ReceiptStage stage{ReceiptStage::PenultimateObligationsComplete};
     bool completed{false};
     std::uint64_t timestamp{0};
     std::array<std::uint8_t, kReceiptNonceLength> nonce{};
-    // sha256(encode_receipt_signed_payload(previous) ‖ previous.signature)
-    // of the chain's prior stage, or all-zero for the first receipt in a
-    // room's chain - see receipt_chain_link_hash() below.
+    // sha256(encode_receipt_signed_payload(previous) ‖ previous.signature ‖
+    // previous.signature_mldsa65) of the chain's prior stage, or all-zero
+    // for the first receipt in a room's chain - see receipt_chain_link_hash()
+    // below.
     std::array<std::uint8_t, 32> previous_stage_hash{};
 };
 
@@ -168,17 +200,34 @@ struct ReceiptFields {
                                             const ReceiptFields& fields);
 [[nodiscard]] bool verify_receipt(const Ed25519PublicKey& mediator_public_key,
                                   const ReceiptFields& fields, const Ed25519Signature& signature);
+[[nodiscard]] MlDsa65Signature sign_receipt_mldsa65(const MlDsa65PrivateSeed& mediator_private_seed,
+                                                    const ReceiptFields& fields);
+[[nodiscard]] bool verify_receipt_mldsa65(const MlDsa65PublicKey& mediator_public_key,
+                                          const ReceiptFields& fields,
+                                          const MlDsa65Signature& signature);
+// Both signatures must verify - see the file-wide hybrid note above. This is
+// the function every receipt verifier (verify_receipt_chain below, and every
+// client call site) should actually call; the lone-algorithm functions above
+// exist mainly so tests can exercise each primitive in isolation.
+[[nodiscard]] bool verify_receipt_hybrid(const Ed25519PublicKey& mediator_public_key,
+                                         const MlDsa65PublicKey& mediator_public_key_mldsa65,
+                                         const ReceiptFields& fields,
+                                         const Ed25519Signature& signature,
+                                         const MlDsa65Signature& signature_mldsa65);
 
 // A receipt's chain-link hash - what the NEXT receipt in the same room's
-// chain must carry as its own previous_stage_hash. Binds both the signed
-// fields and the mediator's signature over them, so a later receipt cannot
-// be re-parented onto a same-fields-different-signature forgery.
+// chain must carry as its own previous_stage_hash. Binds the signed fields
+// and BOTH of the mediator's signatures over them, so a later receipt cannot
+// be re-parented onto a same-fields-different-signature forgery under either
+// algorithm.
 [[nodiscard]] std::array<std::uint8_t, 32> receipt_chain_link_hash(
-    const ReceiptFields& fields, const Ed25519Signature& mediator_signature);
+    const ReceiptFields& fields, const Ed25519Signature& mediator_signature,
+    const MlDsa65Signature& mediator_signature_mldsa65);
 
 struct IssuedReceipt {
     ReceiptFields fields;
     Ed25519Signature mediator_signature{};
+    MlDsa65Signature mediator_signature_mldsa65{};
 };
 
 // Thrown by verify_receipt_chain() - a single type covering every violation
@@ -192,7 +241,8 @@ public:
 };
 
 // Verifies a full ordered chain of receipts for ONE room: every entry's
-// mediator signature verifies under `mediator_public_key`; stages strictly
+// mediator signatures (BOTH Ed25519 and ML-DSA-65) verify under
+// `mediator_public_key`/`mediator_public_key_mldsa65`; stages strictly
 // increase from one entry to the next; room_id, terms_commitment, and both
 // parties' ephemeral keys are identical across every entry (a receipt chain
 // describes one room, never a mix); each entry's previous_stage_hash
@@ -201,7 +251,8 @@ public:
 // normally (no return value - the caller already holds `chain`) if the
 // whole chain is internally consistent and genuinely mediator-signed.
 void verify_receipt_chain(const std::vector<IssuedReceipt>& chain,
-                          const Ed25519PublicKey& mediator_public_key);
+                          const Ed25519PublicKey& mediator_public_key,
+                          const MlDsa65PublicKey& mediator_public_key_mldsa65);
 
 // "Don't let it be issued optimistically" (docs/identity-06-receipts.md) is
 // enforced STRUCTURALLY, not by a separate checking function: lobby.cpp

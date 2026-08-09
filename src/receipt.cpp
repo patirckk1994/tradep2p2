@@ -106,6 +106,26 @@ bool verify_receipt_ack(const Ed25519PublicKey& ephemeral_public_key, const Rece
     return ed25519_verify(ephemeral_public_key, encode_receipt_ack_signed_payload(fields), signature);
 }
 
+MlDsa65Signature sign_receipt_ack_mldsa65(const MlDsa65PrivateSeed& ephemeral_private_seed,
+                                          const ReceiptAckFields& fields) {
+    const std::vector<std::uint8_t> payload = encode_receipt_ack_signed_payload(fields);
+    const EvpPkeyPtr key = load_mldsa65_private_key(ephemeral_private_seed);
+    return mldsa65_sign(key.get(), payload);
+}
+
+bool verify_receipt_ack_mldsa65(const MlDsa65PublicKey& ephemeral_public_key,
+                                const ReceiptAckFields& fields, const MlDsa65Signature& signature) {
+    return mldsa65_verify(ephemeral_public_key, encode_receipt_ack_signed_payload(fields), signature);
+}
+
+bool verify_receipt_ack_hybrid(const Ed25519PublicKey& ephemeral_public_key,
+                               const MlDsa65PublicKey& ephemeral_public_key_mldsa65,
+                               const ReceiptAckFields& fields, const Ed25519Signature& signature,
+                               const MlDsa65Signature& signature_mldsa65) {
+    return verify_receipt_ack(ephemeral_public_key, fields, signature) &&
+           verify_receipt_ack_mldsa65(ephemeral_public_key_mldsa65, fields, signature_mldsa65);
+}
+
 std::vector<std::uint8_t> encode_receipt_signed_payload(const ReceiptFields& fields) {
     require_known_stage(fields.stage);
     if (fields.mediator_id.size() > kReceiptMaxMediatorIdLength) {
@@ -120,7 +140,10 @@ std::vector<std::uint8_t> encode_receipt_signed_payload(const ReceiptFields& fie
     writer.bytes(fields.terms_commitment);
     writer.bytes(fields.party_a_ephemeral_key);
     writer.bytes(fields.party_b_ephemeral_key);
+    writer.bytes(fields.party_a_ephemeral_key_mldsa65);
+    writer.bytes(fields.party_b_ephemeral_key_mldsa65);
     writer.bytes(fields.mediator_public_key);
+    writer.bytes(fields.mediator_public_key_mldsa65);
     writer.u8(static_cast<std::uint8_t>(fields.stage));
     writer.u8(fields.completed ? 1U : 0U);
     writer.u64(fields.timestamp);
@@ -139,15 +162,38 @@ bool verify_receipt(const Ed25519PublicKey& mediator_public_key, const ReceiptFi
     return ed25519_verify(mediator_public_key, encode_receipt_signed_payload(fields), signature);
 }
 
-std::array<std::uint8_t, 32> receipt_chain_link_hash(const ReceiptFields& fields,
-                                                      const Ed25519Signature& mediator_signature) {
+MlDsa65Signature sign_receipt_mldsa65(const MlDsa65PrivateSeed& mediator_private_seed,
+                                      const ReceiptFields& fields) {
+    const std::vector<std::uint8_t> payload = encode_receipt_signed_payload(fields);
+    const EvpPkeyPtr key = load_mldsa65_private_key(mediator_private_seed);
+    return mldsa65_sign(key.get(), payload);
+}
+
+bool verify_receipt_mldsa65(const MlDsa65PublicKey& mediator_public_key, const ReceiptFields& fields,
+                            const MlDsa65Signature& signature) {
+    return mldsa65_verify(mediator_public_key, encode_receipt_signed_payload(fields), signature);
+}
+
+bool verify_receipt_hybrid(const Ed25519PublicKey& mediator_public_key,
+                           const MlDsa65PublicKey& mediator_public_key_mldsa65,
+                           const ReceiptFields& fields, const Ed25519Signature& signature,
+                           const MlDsa65Signature& signature_mldsa65) {
+    return verify_receipt(mediator_public_key, fields, signature) &&
+           verify_receipt_mldsa65(mediator_public_key_mldsa65, fields, signature_mldsa65);
+}
+
+std::array<std::uint8_t, 32> receipt_chain_link_hash(
+    const ReceiptFields& fields, const Ed25519Signature& mediator_signature,
+    const MlDsa65Signature& mediator_signature_mldsa65) {
     std::vector<std::uint8_t> bytes = encode_receipt_signed_payload(fields);
     bytes.insert(bytes.end(), mediator_signature.begin(), mediator_signature.end());
+    bytes.insert(bytes.end(), mediator_signature_mldsa65.begin(), mediator_signature_mldsa65.end());
     return sha256(bytes);
 }
 
 void verify_receipt_chain(const std::vector<IssuedReceipt>& chain,
-                          const Ed25519PublicKey& mediator_public_key) {
+                          const Ed25519PublicKey& mediator_public_key,
+                          const MlDsa65PublicKey& mediator_public_key_mldsa65) {
     if (chain.empty()) {
         throw ReceiptChainError("receipt chain is empty");
     }
@@ -160,13 +206,17 @@ void verify_receipt_chain(const std::vector<IssuedReceipt>& chain,
         const ReceiptFields& fields = entry.fields;
         require_known_stage(fields.stage);
 
-        if (!verify_receipt(mediator_public_key, fields, entry.mediator_signature)) {
+        if (!verify_receipt_hybrid(mediator_public_key, mediator_public_key_mldsa65, fields,
+                                   entry.mediator_signature, entry.mediator_signature_mldsa65)) {
             throw ReceiptChainError("receipt signature does not verify");
         }
         if (fields.room_id != first.room_id || fields.terms_commitment != first.terms_commitment ||
             fields.party_a_ephemeral_key != first.party_a_ephemeral_key ||
             fields.party_b_ephemeral_key != first.party_b_ephemeral_key ||
-            fields.mediator_public_key != first.mediator_public_key) {
+            fields.party_a_ephemeral_key_mldsa65 != first.party_a_ephemeral_key_mldsa65 ||
+            fields.party_b_ephemeral_key_mldsa65 != first.party_b_ephemeral_key_mldsa65 ||
+            fields.mediator_public_key != first.mediator_public_key ||
+            fields.mediator_public_key_mldsa65 != first.mediator_public_key_mldsa65) {
             throw ReceiptChainError(
                 "receipt chain mixes entries from different rooms or parties");
         }
@@ -179,7 +229,8 @@ void verify_receipt_chain(const std::vector<IssuedReceipt>& chain,
         }
 
         previous_stage = fields.stage;
-        expected_previous_hash = receipt_chain_link_hash(fields, entry.mediator_signature);
+        expected_previous_hash = receipt_chain_link_hash(fields, entry.mediator_signature,
+                                                          entry.mediator_signature_mldsa65);
     }
 }
 

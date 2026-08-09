@@ -18,7 +18,17 @@ constexpr std::uint16_t kProtocolVersion = 5;
 // fixed-size buffer anywhere), the length field itself is a u32 with far
 // more headroom than either value, and no other hardcoded 4096 duplicates
 // this constant elsewhere in the codebase.
-constexpr std::size_t kMaxFramePayload = 8192;
+//
+// Raised again, 8192->131072: receipts/disclosure went hybrid Ed25519+
+// ML-DSA-65 (both signatures mandatory, see receipt.hpp/disclosure.hpp) -
+// a single ReceiptIssuedMessage now embeds three ML-DSA-65 public keys
+// (mediator + both parties' ephemeral) plus one ML-DSA-65 signature,
+// ~9.5KB, and ReceiptDisclosureMessage inlines up to kDisclosureMaxChainEntries
+// (8) full ReceiptIssuedMessage entries plus its own ML-DSA-65 signature -
+// worst case comfortably under 80KB. 131072 leaves generous headroom above
+// that measured worst case. Same "safe to raise" reasoning as above still
+// applies unchanged (vector-backed, u32 length field).
+constexpr std::size_t kMaxFramePayload = 131072;
 constexpr std::size_t kMaxAssetCodeLength = 16;
 constexpr std::size_t kMaxAddressLength = 256;
 constexpr std::size_t kMaxReasonLength = 128;
@@ -445,10 +455,20 @@ struct RecognitionResponseMessage {
 // --- Phase 5: ephemeral trade identity announcement (see
 // docs/identity-05-ephemeral-trade-identity.md) ---
 constexpr std::size_t kTradeEphemeralPublicKeyLength = 32; // Ed25519
+// A room's ephemeral identity is dual-algorithm from generation (see
+// ephemeral.hpp's generate_ephemeral_trade_keypair_mldsa65()) so
+// receipt.hpp's ack signing and disclosure.hpp's envelope signing can
+// hybrid-sign with both halves of the same per-room identity - the
+// ML-DSA-65 half must be announced on the wire right alongside the
+// existing Ed25519 one, or a counterparty (and later, per receipt.hpp's
+// ReceiptFields, any future disclosure recipient) would have no way to
+// learn it.
+constexpr std::size_t kTradeEphemeralPublicKeyLengthMlDsa65 = 1952; // ML-DSA-65
 
 struct TradeEphemeralKeyMessage {
     RoomId room_id{};
     std::array<std::uint8_t, kTradeEphemeralPublicKeyLength> ephemeral_public_key{};
+    std::array<std::uint8_t, kTradeEphemeralPublicKeyLengthMlDsa65> ephemeral_public_key_mldsa65{};
 };
 
 // --- Phase 6: staged receipts (see docs/identity-06-receipts.md) ---
@@ -459,6 +479,14 @@ struct TradeEphemeralKeyMessage {
 // module that gives these bytes cryptographic meaning.
 constexpr std::size_t kReceiptPublicKeyLength = 32;   // Ed25519
 constexpr std::size_t kReceiptSignatureLength = 64;   // Ed25519
+// Receipts/acks/disclosure are all hybrid (both signatures mandatory, see
+// receipt.hpp's file-wide hybrid note) - every wire message carrying a
+// receipt-family key or signature below carries both algorithms
+// unconditionally, no suite_id branching needed on the wire (unlike
+// recognition's either/or, which is why those fields there are
+// length-prefixed and variable while these stay plain fixed arrays).
+constexpr std::size_t kReceiptPublicKeyLengthMlDsa65 = 1952;  // ML-DSA-65
+constexpr std::size_t kReceiptSignatureLengthMlDsa65 = 3309;  // ML-DSA-65
 constexpr std::size_t kReceiptTermsCommitmentLength = 32; // SHA-256
 constexpr std::size_t kReceiptWireNonceLength = 16;
 constexpr std::size_t kReceiptWireMediatorIdLength = 256; // matches receipt.hpp's kReceiptMaxMediatorIdLength
@@ -468,6 +496,7 @@ struct ReceiptAckMessage {
     std::uint8_t stage{0};
     std::uint64_t timestamp{0};
     std::array<std::uint8_t, kReceiptSignatureLength> signature{};
+    std::array<std::uint8_t, kReceiptSignatureLengthMlDsa65> signature_mldsa65{};
 };
 
 struct ReceiptAckRequiredMessage {
@@ -497,11 +526,15 @@ struct ReceiptIssuedMessage {
     std::array<std::uint8_t, kReceiptTermsCommitmentLength> terms_commitment{};
     std::array<std::uint8_t, kReceiptPublicKeyLength> party_a_ephemeral_key{};
     std::array<std::uint8_t, kReceiptPublicKeyLength> party_b_ephemeral_key{};
+    std::array<std::uint8_t, kReceiptPublicKeyLengthMlDsa65> party_a_ephemeral_key_mldsa65{};
+    std::array<std::uint8_t, kReceiptPublicKeyLengthMlDsa65> party_b_ephemeral_key_mldsa65{};
     std::array<std::uint8_t, kReceiptPublicKeyLength> mediator_public_key{};
+    std::array<std::uint8_t, kReceiptPublicKeyLengthMlDsa65> mediator_public_key_mldsa65{};
     std::uint64_t timestamp{0};
     std::array<std::uint8_t, kReceiptWireNonceLength> nonce{};
     std::array<std::uint8_t, kReceiptTermsCommitmentLength> previous_stage_hash{};
     std::array<std::uint8_t, kReceiptSignatureLength> mediator_signature{};
+    std::array<std::uint8_t, kReceiptSignatureLengthMlDsa65> mediator_signature_mldsa65{};
 };
 
 // --- Phase 8: selective private receipt disclosure (see
@@ -515,6 +548,7 @@ struct ReceiptDisclosureMessage {
     std::uint64_t timestamp{0};
     std::array<std::uint8_t, 16> nonce{};
     std::array<std::uint8_t, kReceiptSignatureLength> signature{};
+    std::array<std::uint8_t, kReceiptSignatureLengthMlDsa65> signature_mldsa65{};
     std::vector<ReceiptIssuedMessage> chain;
 };
 

@@ -113,6 +113,16 @@ struct TradeMessageContext {
 // secret. Call this, and only this, for a room's ephemeral trade identity.
 [[nodiscard]] Ed25519KeyPair generate_ephemeral_trade_keypair();
 
+// The ML-DSA-65 sibling of the room's ephemeral identity above - generated
+// alongside it (never derived from the master secret either, same reasoning
+// applies unchanged), so receipt.hpp's ack signing and disclosure.hpp's
+// envelope signing can hybrid-sign with both halves of the SAME per-room
+// identity. This is a separate keypair value, not a combined struct,
+// matching every other dual-algorithm identity in this codebase (the
+// mediator's receipt and auth keys are likewise two independent KeyPair
+// values, never merged into one type).
+[[nodiscard]] MlDsa65KeyPair generate_ephemeral_trade_keypair_mldsa65();
+
 [[nodiscard]] Ed25519Signature sign_trade_message(const Ed25519PrivateSeed& sender_ephemeral_private_seed,
                                                    const TradeMessageContext& context);
 
