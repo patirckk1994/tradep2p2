@@ -223,10 +223,20 @@ inline constexpr std::string_view kMediatorPseudonym = "mediator";     // phase 
 // separation rather than coupling two unrelated algorithms to one seed.
 inline constexpr std::string_view kMediatorPseudonymMlDsa65 = "mediator-mldsa65";
 inline constexpr std::string_view kLocalHistory = "local-history";    // phase 3
+// ML-DSA-65 sibling of kLocalHistory, same independent-derivation reasoning
+// as kMediatorPseudonymMlDsa65 above - see journal.hpp's checkpoint suite_id
+// support.
+inline constexpr std::string_view kLocalHistoryMlDsa65 = "local-history-mldsa65";
 // The keystore's own cached, no-passphrase-required "who am I" public key
 // (identifier always ""), distinct from kLogin's later per-service
 // identifiers - see IdentityKeystore::create() in keystore.hpp/.cpp.
 inline constexpr std::string_view kKeystoreIdentity = "keystore-identity"; // phase 2
+// ML-DSA-65 sibling, same independent-derivation reasoning as
+// kMediatorPseudonymMlDsa65 above - see IdentityKeystore::
+// identity_public_key_mldsa65() in keystore.hpp/.cpp. Deliberately NOT
+// cached on disk the way kKeystoreIdentity's public key is (that would
+// require a keystore file format bump) - derived on demand instead.
+inline constexpr std::string_view kKeystoreIdentityMlDsa65 = "keystore-identity-mldsa65";
 // Deliberately no "trade" label: per-trade keys are never derived (phase 5
 // generates them fresh via generate_ed25519_keypair()).
 } // namespace key_scope
@@ -357,13 +367,14 @@ inline constexpr std::string_view kKeystoreIdentity = "keystore-identity"; // ph
 // section above, not generic/parameterized: OpenSSL exposes ML-DSA only
 // through its newer provider/EVP_PKEY_CTX API (no EVP_PKEY_new_raw_private_
 // key shortcut, no fixed EVP_PKEY_* NID the way Ed25519 has), so this is a
-// genuinely separate implementation, not a template instantiation. Only the
-// deterministic-from-master-secret path is provided (mirroring
-// derive_ed25519_keypair, used for long-term scoped identities) - no
-// generate_mldsa65_keypair() fresh-random counterpart exists because
-// nothing in this codebase currently needs an ephemeral ML-DSA-65 key (see
-// recognition.hpp: recognition deliberately uses the stable per-mediator
-// pseudonym, never the per-trade ephemeral key).
+// genuinely separate implementation, not a template instantiation. The
+// deterministic-from-master-secret path (mirroring derive_ed25519_keypair,
+// used for long-term scoped client identities) is the primary one - most
+// callers should prefer it. generate_mldsa65_keypair() below is the
+// fresh-random counterpart, added when the mediator's own auth identity
+// (mediator_auth.hpp) needed one: an operator-held key with no master
+// secret to derive from, exactly like generate_mediator_receipt_keypair()'s
+// existing Ed25519 equivalent.
 // ---------------------------------------------------------------------------
 
 // Loads a full (private+public) EVP_PKEY deterministically from a 32-byte
@@ -394,6 +405,20 @@ inline constexpr std::string_view kKeystoreIdentity = "keystore-identity"; // ph
 [[nodiscard]] MlDsa65KeyPair derive_mldsa65_keypair(const MasterSecret& master_secret,
                                                      std::string_view label,
                                                      std::string_view identifier);
+
+// Re-derives the full keypair (private seed + public key) from an
+// already-known 32-byte seed - the ML-DSA-65 counterpart of
+// load_ed25519_keypair(), used the same way: re-expanding a seed loaded
+// back off disk (e.g. lobby.cpp's mediator key loaders) without needing to
+// separately store the public key.
+[[nodiscard]] MlDsa65KeyPair load_mldsa65_keypair(const MlDsa65PrivateSeed& seed);
+
+// Fresh-random keypair: RAND_bytes() fills the 32-byte seed directly (no
+// master secret involved) instead of deriving it, then expands it via
+// load_mldsa65_keypair() above. For a standalone operator-held key (e.g.
+// the mediator's own persistent auth identity) rather than a client's
+// scoped, derivable one.
+[[nodiscard]] MlDsa65KeyPair generate_mldsa65_keypair();
 
 // One-shot EVP_DigestSign/Verify, exactly the same pattern as Ed25519's
 // (ML-DSA is also a "pure" signature scheme with no external prehash, so

@@ -1016,4 +1016,8 @@ const MasterSecret& IdentityKeystore::master_secret() const {
     return *master_secret_;
 }
 
+MlDsa65PublicKey IdentityKeystore::identity_public_key_mldsa65() const {
+    return derive_mldsa65_keypair(master_secret(), key_scope::kKeystoreIdentityMlDsa65, "").public_key;
+}
+
 } // namespace tradep2p

@@ -64,12 +64,19 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kDisclosureSuiteEd25519V1 = 0x0001;
+// The only suite issued by any production code today - both signatures
+// mandatory, same hybrid reasoning as receipt.hpp's
+// kReceiptSuiteEd25519MlDsa65HybridV1 (see that constant's comment):
+// disclosure exists specifically to prove continuity to a stranger who
+// verifies it long after this room closed, so it needs the same "stay
+// unforgeable even if one scheme breaks" property receipts do.
+constexpr std::uint16_t kDisclosureSuiteEd25519MlDsa65HybridV1 = 0x0002;
 inline constexpr std::string_view kDisclosureDomainLabel = "TRADEP2P_RECEIPT_DISCLOSURE_V1";
 constexpr std::size_t kDisclosureMaxMediatorIdLength = 256;
 constexpr std::size_t kDisclosureMaxChainLength = 8;
 
 struct DisclosureFields {
-    std::uint16_t suite_id{kDisclosureSuiteEd25519V1};
+    std::uint16_t suite_id{kDisclosureSuiteEd25519MlDsa65HybridV1};
     std::uint16_t protocol_version{1};
     std::string mediator_id;
     RoomId room_id{}; // the CURRENT negotiation, not the disclosed chain's original room
@@ -95,16 +102,27 @@ struct DisclosureFields {
                                                const DisclosureFields& fields);
 [[nodiscard]] bool verify_disclosure(const Ed25519PublicKey& original_ephemeral_public_key,
                                      const DisclosureFields& fields, const Ed25519Signature& signature);
+[[nodiscard]] MlDsa65Signature sign_disclosure_mldsa65(
+    const MlDsa65PrivateSeed& original_ephemeral_private_seed, const DisclosureFields& fields);
+[[nodiscard]] bool verify_disclosure_mldsa65(const MlDsa65PublicKey& original_ephemeral_public_key,
+                                             const DisclosureFields& fields,
+                                             const MlDsa65Signature& signature);
+// Both signatures must verify - see the file-wide hybrid note above.
+[[nodiscard]] bool verify_disclosure_hybrid(const Ed25519PublicKey& original_ephemeral_public_key,
+                                            const MlDsa65PublicKey& original_ephemeral_public_key_mldsa65,
+                                            const DisclosureFields& fields,
+                                            const Ed25519Signature& signature,
+                                            const MlDsa65Signature& signature_mldsa65);
 
 // Everything a RECIPIENT needs to check about an incoming disclosure,
 // bundled into one call so no caller has to remember every sub-check.
-// Tries the signature against BOTH party_a_ephemeral_key and
-// party_b_ephemeral_key from the chain (whichever party actually disclosed
-// it), since a genuine disclosure is valid under exactly one of the two.
-// Returns a human-readable failure reason on any violation (bad chain,
-// wrong chain hash, bad envelope signature under either chain key,
-// envelope not bound to `expected_recipient_key` or `expected_room_id`) or
-// std::nullopt if everything checks out. Does NOT check whether the
+// Tries the hybrid signature against BOTH party_a_ephemeral_key(_mldsa65)
+// and party_b_ephemeral_key(_mldsa65) from the chain (whichever party
+// actually disclosed it), since a genuine disclosure is valid under exactly
+// one of the two. Returns a human-readable failure reason on any violation
+// (bad chain, wrong chain hash, bad envelope signature under either chain
+// key, envelope not bound to `expected_recipient_key` or `expected_room_id`)
+// or std::nullopt if everything checks out. Does NOT check whether the
 // receipt chain's EMBEDDED mediator_public_key is one the recipient
 // independently trusts - see this file's header comment on why that is a
 // separate, honestly unsolved trust question the caller must handle itself
@@ -112,7 +130,7 @@ struct DisclosureFields {
 // same mediator this negotiation is also on).
 [[nodiscard]] std::optional<std::string> verify_disclosure_bundle(
     const std::vector<IssuedReceipt>& chain, const DisclosureFields& fields,
-    const Ed25519Signature& signature, const RoomId& expected_room_id,
-    const Ed25519PublicKey& expected_recipient_key);
+    const Ed25519Signature& signature, const MlDsa65Signature& signature_mldsa65,
+    const RoomId& expected_room_id, const Ed25519PublicKey& expected_recipient_key);
 
 } // namespace tradep2p

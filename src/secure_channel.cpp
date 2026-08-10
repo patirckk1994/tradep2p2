@@ -514,6 +514,19 @@ SecureChannel SecureChannel::connect_via_socks5(const Endpoint& proxy,
     }
 }
 
+int connect_raw_tcp(const Endpoint& endpoint) { return connect_tcp(endpoint); }
+
+int connect_raw_via_socks5(const Endpoint& proxy, const Endpoint& destination) {
+    int fd = connect_tcp(proxy);
+    try {
+        socks5_connect(fd, destination);
+    } catch (...) {
+        close_fd(fd);
+        throw;
+    }
+    return fd;
+}
+
 void SecureChannel::verify_server_pin(SSL* ssl, const std::string& expected_hex) {
     append_log("verify_server_pin");
     X509* certificate = SSL_get1_peer_certificate(ssl);

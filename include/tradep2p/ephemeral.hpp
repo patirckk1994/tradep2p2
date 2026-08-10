@@ -78,6 +78,16 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kTradeMessageSuiteEd25519V1 = 0x0001;
+// The only suite this module signs with today - hybrid, both signatures
+// mandatory, same reasoning and same shape as receipt.hpp's
+// kReceiptSuiteEd25519MlDsa65HybridV1: this envelope is signed with the
+// room's per-trade ephemeral key, which is already dual-algorithm from
+// generation (see generate_ephemeral_trade_keypair_mldsa65() below - the
+// same keypair receipt-ack and disclosure signing already hybrid-sign
+// with), so there is no separate "which suite did this identity enroll"
+// question the way login.hpp's switchable suite has to answer - both
+// halves of the key always exist together, so both always sign together.
+constexpr std::uint16_t kTradeMessageSuiteEd25519MlDsa65HybridV1 = 0x0002;
 inline constexpr std::string_view kTradeMessageDomainLabel = "TRADEP2P_TRADE_MESSAGE_V1";
 constexpr std::size_t kTradeMessageMaxMediatorIdLength = 256;
 
@@ -90,7 +100,7 @@ constexpr std::size_t kTradeMessageMaxMediatorIdLength = 256;
 // the wire would add nothing a malicious mediator couldn't already fake by
 // relaying whatever string it likes).
 struct TradeMessageContext {
-    std::uint16_t suite_id{kTradeMessageSuiteEd25519V1};
+    std::uint16_t suite_id{kTradeMessageSuiteEd25519MlDsa65HybridV1};
     std::uint16_t protocol_version{kProtocolVersion};
     std::string mediator_id;
     RoomId room_id{};
@@ -113,12 +123,33 @@ struct TradeMessageContext {
 // secret. Call this, and only this, for a room's ephemeral trade identity.
 [[nodiscard]] Ed25519KeyPair generate_ephemeral_trade_keypair();
 
+// The ML-DSA-65 sibling of the room's ephemeral identity above - generated
+// alongside it (never derived from the master secret either, same reasoning
+// applies unchanged), so receipt.hpp's ack signing and disclosure.hpp's
+// envelope signing can hybrid-sign with both halves of the SAME per-room
+// identity. This is a separate keypair value, not a combined struct,
+// matching every other dual-algorithm identity in this codebase (the
+// mediator's receipt and auth keys are likewise two independent KeyPair
+// values, never merged into one type).
+[[nodiscard]] MlDsa65KeyPair generate_ephemeral_trade_keypair_mldsa65();
+
 [[nodiscard]] Ed25519Signature sign_trade_message(const Ed25519PrivateSeed& sender_ephemeral_private_seed,
                                                    const TradeMessageContext& context);
 
 [[nodiscard]] bool verify_trade_message(const Ed25519PublicKey& sender_ephemeral_public_key,
                                         const TradeMessageContext& context,
                                         const Ed25519Signature& signature);
+
+[[nodiscard]] MlDsa65Signature sign_trade_message_mldsa65(
+    const MlDsa65PrivateSeed& sender_ephemeral_private_seed_mldsa65, const TradeMessageContext& context);
+[[nodiscard]] bool verify_trade_message_mldsa65(
+    const MlDsa65PublicKey& sender_ephemeral_public_key_mldsa65, const TradeMessageContext& context,
+    const MlDsa65Signature& signature);
+// Both signatures must verify - see kTradeMessageSuiteEd25519MlDsa65HybridV1's comment above.
+[[nodiscard]] bool verify_trade_message_hybrid(
+    const Ed25519PublicKey& sender_ephemeral_public_key,
+    const MlDsa65PublicKey& sender_ephemeral_public_key_mldsa65, const TradeMessageContext& context,
+    const Ed25519Signature& signature, const MlDsa65Signature& signature_mldsa65);
 
 // sha256 of an already-encoded wire payload (e.g. encode_round_signal()'s
 // output) - the payload_hash convention this envelope binds to, so the

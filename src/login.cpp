@@ -86,9 +86,23 @@ bool verify_login_response(const Ed25519PublicKey& login_public_key, const Login
     return ed25519_verify(login_public_key, encode_login_challenge_signed_payload(fields), signature);
 }
 
+MlDsa65Signature sign_login_response_mldsa65(const MlDsa65PrivateSeed& login_private_seed,
+                                             const LoginChallengeFields& fields) {
+    const std::vector<std::uint8_t> payload = encode_login_challenge_signed_payload(fields);
+    const EvpPkeyPtr key = load_mldsa65_private_key(login_private_seed);
+    return mldsa65_sign(key.get(), payload);
+}
+
+bool verify_login_response_mldsa65(const MlDsa65PublicKey& login_public_key,
+                                   const LoginChallengeFields& fields,
+                                   const MlDsa65Signature& signature) {
+    return mldsa65_verify(login_public_key, encode_login_challenge_signed_payload(fields), signature);
+}
+
 LoginChallengeFields LoginChallengeTracker::issue(const std::string& service_id,
                                                   const std::string& server_identity,
-                                                  const std::string& username, std::uint64_t now) {
+                                                  const std::string& username, std::uint64_t now,
+                                                  std::uint16_t suite_id) {
     if (outstanding_.size() >= kLoginMaxOutstandingChallenges) {
         throw std::invalid_argument("too many outstanding login challenges");
     }
@@ -96,6 +110,7 @@ LoginChallengeFields LoginChallengeTracker::issue(const std::string& service_id,
         now = now_unix_seconds();
     }
     LoginChallengeFields fields;
+    fields.suite_id = suite_id;
     fields.service_id = service_id;
     fields.server_identity = server_identity;
     fields.username = username;

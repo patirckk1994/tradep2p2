@@ -267,6 +267,17 @@ public:
     [[nodiscard]] const Ed25519PublicKey& identity_public_key() const noexcept {
         return identity_public_key_;
     }
+    // The ML-DSA-65 sibling of identity_public_key() above - deliberately
+    // NOT cached on disk the way the Ed25519 one is (that would require a
+    // keystore file format version bump to keep every already-existing
+    // file readable). Derived fresh from the master secret on every call
+    // instead, via the same fixed-empty-identifier, not-key_generation-
+    // folded shape as identity_public_key_'s own derivation - see
+    // key_scope::kKeystoreIdentityMlDsa65's comment. Requires the instance
+    // to be unlocked; throws std::logic_error like master_secret() does
+    // when locked. Unlike identity_public_key(), this cannot be read via
+    // display_public_identity()'s no-passphrase header peek.
+    [[nodiscard]] MlDsa65PublicKey identity_public_key_mldsa65() const;
     [[nodiscard]] std::uint32_t key_generation() const noexcept { return key_generation_; }
     [[nodiscard]] PublicIdentity public_identity() const;
 

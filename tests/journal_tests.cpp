@@ -179,6 +179,78 @@ void test_checkpoint_sign_and_verify(const std::filesystem::path& dir) {
 }
 
 // ---------------------------------------------------------------------------
+// ML-DSA-65 checkpoints (additive, new record kind - see journal.hpp's
+// kJournalCheckpointSuiteMlDsa65V1): sign/verify round trip, wrong-key
+// rejection, and coexistence with an EXISTING Ed25519 checkpoint already in
+// the same log (the whole reason this is a new record kind rather than an
+// extension of the old one - both must keep working side by side).
+// ---------------------------------------------------------------------------
+
+void test_checkpoint_mldsa65_sign_and_verify(const std::filesystem::path& dir) {
+    const auto log_path = (dir / "checkpoint_mldsa65.log").string();
+    const auto head_path = (dir / "checkpoint_mldsa65.head").string();
+    const auto keypair = tradep2p::generate_ed25519_keypair();
+    const auto mldsa65_keypair = tradep2p::generate_mldsa65_keypair();
+    const auto wrong_mldsa65_keypair = tradep2p::generate_mldsa65_keypair();
+
+    auto journal = tradep2p::Journal::open(log_path, head_path, keypair.public_key);
+    journal.append(make_fields(tradep2p::SessionState::WaitingForPeer, 0,
+                               tradep2p::MessageDirection::Outbound, tradep2p::MessageType::JoinOffer,
+                               tradep2p::AcknowledgementState::NotApplicable));
+    journal.append(make_fields(tradep2p::SessionState::WaitingForSent, 0,
+                               tradep2p::MessageDirection::Inbound, tradep2p::MessageType::TradeReady,
+                               tradep2p::AcknowledgementState::NotApplicable));
+    journal.checkpoint_mldsa65(mldsa65_keypair.private_seed);
+
+    require(std::filesystem::exists(head_path), "checkpoint_mldsa65() must create the head-pointer file");
+
+    auto reopened =
+        tradep2p::Journal::open(log_path, head_path, keypair.public_key, mldsa65_keypair.public_key);
+    require(reopened.entries().size() == 2U,
+            "reopening after an ML-DSA-65 checkpoint must still replay all entries");
+
+    // No ML-DSA-65 key supplied at all - must fail closed, not silently skip
+    // verification of a checkpoint it cannot check.
+    require_throws<tradep2p::JournalTamperError>(
+        [&] { (void)tradep2p::Journal::open(log_path, head_path, keypair.public_key); },
+        "opening a log with an ML-DSA-65 checkpoint but no ML-DSA-65 key supplied must be rejected");
+
+    require_throws<tradep2p::JournalTamperError>(
+        [&] {
+            (void)tradep2p::Journal::open(log_path, head_path, keypair.public_key,
+                                          wrong_mldsa65_keypair.public_key);
+        },
+        "opening with the wrong ML-DSA-65 local-history public key must reject the checkpoint "
+        "signature");
+}
+
+void test_checkpoint_ed25519_and_mldsa65_coexist(const std::filesystem::path& dir) {
+    const auto log_path = (dir / "checkpoint_mixed.log").string();
+    const auto head_path = (dir / "checkpoint_mixed.head").string();
+    const auto keypair = tradep2p::generate_ed25519_keypair();
+    const auto mldsa65_keypair = tradep2p::generate_mldsa65_keypair();
+
+    auto journal = tradep2p::Journal::open(log_path, head_path, keypair.public_key);
+    journal.append(make_fields(tradep2p::SessionState::WaitingForPeer, 0,
+                               tradep2p::MessageDirection::Outbound, tradep2p::MessageType::JoinOffer,
+                               tradep2p::AcknowledgementState::NotApplicable));
+    journal.checkpoint(keypair.private_seed); // old kind, kRecordKindCheckpoint
+
+    journal.append(make_fields(tradep2p::SessionState::WaitingForSent, 0,
+                               tradep2p::MessageDirection::Inbound, tradep2p::MessageType::TradeReady,
+                               tradep2p::AcknowledgementState::NotApplicable));
+    journal.checkpoint_mldsa65(mldsa65_keypair.private_seed); // new kind, kRecordKindCheckpointSuiteV1;
+                                                              // head-pointer file now points to THIS
+                                                              // (later) checkpoint, not the earlier one
+
+    auto reopened =
+        tradep2p::Journal::open(log_path, head_path, keypair.public_key, mldsa65_keypair.public_key);
+    require(reopened.entries().size() == 2U,
+            "a log containing both an Ed25519 and a later ML-DSA-65 checkpoint must replay both "
+            "entries and verify both checkpoint kinds when both keys are supplied");
+}
+
+// ---------------------------------------------------------------------------
 // Low-level record splicing helpers, used by the tamper tests below.
 // Mirrors journal.cpp's own outer record framing exactly (see journal.hpp's
 // class comment on Journal): one byte record kind, then a 4-byte big-endian
@@ -641,6 +713,8 @@ int main() {
 
         test_append_and_hash_chain(dir);
         test_checkpoint_sign_and_verify(dir);
+        test_checkpoint_mldsa65_sign_and_verify(dir);
+        test_checkpoint_ed25519_and_mldsa65_coexist(dir);
         test_tamper_modified_entry_detected(dir);
         test_tamper_removed_middle_entry_detected(dir);
         test_tamper_reordered_entries_detected(dir);

@@ -4,6 +4,7 @@
 #include "tradep2p/journal.hpp"
 #include "tradep2p/keystore.hpp"
 #include "tradep2p/lobby.hpp"
+#include "tradep2p/mediator_auth.hpp"
 #include "tradep2p/protocol.hpp"
 #include "tradep2p/receipt.hpp"
 #include "tradep2p/recognition.hpp"
@@ -12,10 +13,12 @@
 #include "tradep2p/secure_channel.hpp"
 
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +45,8 @@ using tradep2p::AbortMessage;
 using tradep2p::CancelOfferMessage;
 using tradep2p::CreateOfferMessage;
 using tradep2p::ClientTlsPolicy;
+using tradep2p::connect_raw_tcp;
+using tradep2p::connect_raw_via_socks5;
 using tradep2p::CounterpartyFingerprint;
 using tradep2p::CounterpartyHistoryEntry;
 using tradep2p::IdentityKeystore;
@@ -271,6 +276,12 @@ struct ClientState {
     // deliberate limitation (specs.txt SS5); a fresh reconnect simply
     // generates and announces a new one.
     std::unordered_map<std::string, tradep2p::Ed25519KeyPair> room_ephemeral_keypair;
+    // The ML-DSA-65 half of the same per-room ephemeral identity above -
+    // see ephemeral.hpp's generate_ephemeral_trade_keypair_mldsa65(). Both
+    // halves are generated together and both must be available for
+    // receipt-ack (sign_receipt_ack_hybrid) and disclosure
+    // (sign_disclosure_hybrid) signing.
+    std::unordered_map<std::string, tradep2p::MlDsa65KeyPair> room_ephemeral_keypair_mldsa65;
     std::unordered_map<std::string, tradep2p::Ed25519PublicKey> room_counterparty_ephemeral_key;
     // room id (hex) -> counterparty's ClientId, for TradeMessageContext's
     // `recipient` field - populated from TradeReadyMessage::peer_id.
@@ -291,6 +302,7 @@ struct ClientState {
     // receipt is a loud, printed warning, not a silent accept.
     std::unordered_map<std::string, std::vector<tradep2p::IssuedReceipt>> room_receipts;
     std::optional<tradep2p::Ed25519PublicKey> mediator_receipt_key;
+    std::optional<tradep2p::MlDsa65PublicKey> mediator_receipt_key_mldsa65;
 };
 
 std::string default_journal_log_path(const std::string& keystore_path) {
@@ -421,11 +433,19 @@ const char* recovery_category_name(tradep2p::RecoveryActionCategory category) {
     return "unknown";
 }
 
-void print_public_identity(const tradep2p::PublicIdentity& identity) {
+void print_public_identity(
+    const tradep2p::PublicIdentity& identity,
+    const std::optional<tradep2p::MlDsa65PublicKey>& identity_public_key_mldsa65 = std::nullopt) {
     std::cout << "  identity id:  " << hex_encode(identity.identity_id) << '\n'
               << "  alias:        " << (identity.alias.empty() ? "(none)" : identity.alias) << '\n'
-              << "  public key:   " << hex_encode(identity.identity_public_key) << '\n'
-              << "  created at:   " << identity.created_at << " (unix seconds)\n"
+              << "  public key:   " << hex_encode(identity.identity_public_key) << " (Ed25519)\n";
+    if (identity_public_key_mldsa65.has_value()) {
+        std::cout << "  public key:   " << hex_encode(*identity_public_key_mldsa65)
+                  << " (ML-DSA-65, post-quantum)\n";
+    } else {
+        std::cout << "  public key:   (ML-DSA-65 not available without unlocking)\n";
+    }
+    std::cout << "  created at:   " << identity.created_at << " (unix seconds)\n"
               << "  key gen:      " << identity.key_generation << '\n';
 }
 
@@ -568,11 +588,15 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         // derived - ephemeral.hpp), so there is no privacy cost to make
         // this the default the way there is for the per-mediator pseudonym.
         auto ephemeral_keypair = tradep2p::generate_ephemeral_trade_keypair();
+        auto ephemeral_keypair_mldsa65 = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
         tradep2p::TradeEphemeralKeyMessage announce;
         announce.room_id = message.room_id;
         announce.ephemeral_public_key = ephemeral_keypair.public_key;
+        announce.ephemeral_public_key_mldsa65 = ephemeral_keypair_mldsa65.public_key;
         state.room_ephemeral_keypair.erase(room);
         state.room_ephemeral_keypair.emplace(room, std::move(ephemeral_keypair));
+        state.room_ephemeral_keypair_mldsa65.erase(room);
+        state.room_ephemeral_keypair_mldsa65.emplace(room, std::move(ephemeral_keypair_mldsa65));
         state.room_counterparty_ephemeral_key.erase(room);
         channel.send_frame(MessageType::TradeEphemeralKey,
                            tradep2p::encode_trade_ephemeral_key(announce));
@@ -633,6 +657,7 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         state.room_parties.erase(room);
         state.current_turns.erase(room);
         state.room_ephemeral_keypair.erase(room);
+        state.room_ephemeral_keypair_mldsa65.erase(room);
         state.room_counterparty_ephemeral_key.erase(room);
         state.room_peer_id.erase(room);
         state.room_terms.erase(room);
@@ -785,8 +810,11 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
                   << ": the mediator requires a receipt acknowledgement before the final "
                      "tranche can be sent (specs.txt SS9.1's withholding fix)\n";
         const auto keypair_it = state.room_ephemeral_keypair.find(room);
+        const auto keypair_mldsa65_it = state.room_ephemeral_keypair_mldsa65.find(room);
         const auto terms_it = state.room_terms.find(room);
-        if (keypair_it == state.room_ephemeral_keypair.end() || terms_it == state.room_terms.end()) {
+        if (keypair_it == state.room_ephemeral_keypair.end() ||
+            keypair_mldsa65_it == state.room_ephemeral_keypair_mldsa65.end() ||
+            terms_it == state.room_terms.end()) {
             std::cout << "  cannot acknowledge: missing this room's ephemeral key or cached "
                          "terms for this session\n";
             break;
@@ -804,11 +832,14 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         fields.timestamp = static_cast<std::uint64_t>(std::time(nullptr));
         const auto signature =
             tradep2p::sign_receipt_ack(keypair_it->second.private_seed, fields);
+        const auto signature_mldsa65 =
+            tradep2p::sign_receipt_ack_mldsa65(keypair_mldsa65_it->second.private_seed, fields);
         tradep2p::ReceiptAckMessage ack;
         ack.room_id = message.room_id;
         ack.stage = static_cast<std::uint8_t>(tradep2p::ReceiptStage::PenultimateObligationsComplete);
         ack.timestamp = fields.timestamp;
         ack.signature = signature;
+        ack.signature_mldsa65 = signature_mldsa65;
         channel.send_frame(MessageType::ReceiptAck, tradep2p::encode_receipt_ack(ack));
         std::cout << "  acknowledged automatically (signed with this room's ephemeral trade "
                      "key)\n";
@@ -825,13 +856,17 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         issued.fields.terms_commitment = message.terms_commitment;
         issued.fields.party_a_ephemeral_key = message.party_a_ephemeral_key;
         issued.fields.party_b_ephemeral_key = message.party_b_ephemeral_key;
+        issued.fields.party_a_ephemeral_key_mldsa65 = message.party_a_ephemeral_key_mldsa65;
+        issued.fields.party_b_ephemeral_key_mldsa65 = message.party_b_ephemeral_key_mldsa65;
         issued.fields.mediator_public_key = message.mediator_public_key;
+        issued.fields.mediator_public_key_mldsa65 = message.mediator_public_key_mldsa65;
         issued.fields.stage = stage;
         issued.fields.completed = message.completed;
         issued.fields.timestamp = message.timestamp;
         issued.fields.nonce = message.nonce;
         issued.fields.previous_stage_hash = message.previous_stage_hash;
         issued.mediator_signature = message.mediator_signature;
+        issued.mediator_signature_mldsa65 = message.mediator_signature_mldsa65;
 
         std::cout << "\nroom " << room << ": receipt issued - stage "
                   << tradep2p::receipt_stage_name(stage) << (message.completed ? " (completed)" : "")
@@ -841,16 +876,20 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         // - see ClientState::mediator_receipt_key's comment.
         if (!state.mediator_receipt_key.has_value()) {
             state.mediator_receipt_key = message.mediator_public_key;
+            state.mediator_receipt_key_mldsa65 = message.mediator_public_key_mldsa65;
             std::cout << "  pinned mediator receipt key for this session: "
                       << hex_encode(*state.mediator_receipt_key) << '\n';
-        } else if (*state.mediator_receipt_key != message.mediator_public_key) {
+        } else if (*state.mediator_receipt_key != message.mediator_public_key ||
+                   *state.mediator_receipt_key_mldsa65 != message.mediator_public_key_mldsa65) {
             std::cout << "  WARNING: this receipt's mediator public key does not match the one "
                          "pinned earlier this session - treating as untrusted\n";
             break;
         }
 
-        if (!tradep2p::verify_receipt(*state.mediator_receipt_key, issued.fields,
-                                      issued.mediator_signature)) {
+        if (!tradep2p::verify_receipt_hybrid(*state.mediator_receipt_key,
+                                             *state.mediator_receipt_key_mldsa65, issued.fields,
+                                             issued.mediator_signature,
+                                             issued.mediator_signature_mldsa65)) {
             std::cout << "  WARNING: receipt signature does not verify - discarding\n";
             break;
         }
@@ -858,7 +897,8 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         auto& chain = state.room_receipts[room];
         chain.push_back(issued);
         try {
-            tradep2p::verify_receipt_chain(chain, *state.mediator_receipt_key);
+            tradep2p::verify_receipt_chain(chain, *state.mediator_receipt_key,
+                                           *state.mediator_receipt_key_mldsa65);
             std::cout << "  receipt chain for this room verifies (" << chain.size()
                       << " stage(s) so far)\n";
         } catch (const tradep2p::ReceiptChainError& error) {
@@ -887,13 +927,17 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
             issued.fields.terms_commitment = wire.terms_commitment;
             issued.fields.party_a_ephemeral_key = wire.party_a_ephemeral_key;
             issued.fields.party_b_ephemeral_key = wire.party_b_ephemeral_key;
+            issued.fields.party_a_ephemeral_key_mldsa65 = wire.party_a_ephemeral_key_mldsa65;
+            issued.fields.party_b_ephemeral_key_mldsa65 = wire.party_b_ephemeral_key_mldsa65;
             issued.fields.mediator_public_key = wire.mediator_public_key;
+            issued.fields.mediator_public_key_mldsa65 = wire.mediator_public_key_mldsa65;
             issued.fields.stage = static_cast<tradep2p::ReceiptStage>(wire.stage);
             issued.fields.completed = wire.completed;
             issued.fields.timestamp = wire.timestamp;
             issued.fields.nonce = wire.nonce;
             issued.fields.previous_stage_hash = wire.previous_stage_hash;
             issued.mediator_signature = wire.mediator_signature;
+            issued.mediator_signature_mldsa65 = wire.mediator_signature_mldsa65;
             chain.push_back(issued);
         }
 
@@ -913,7 +957,8 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         }
 
         const auto failure = tradep2p::verify_disclosure_bundle(
-            chain, fields, message.signature, message.room_id, own_public_key);
+            chain, fields, message.signature, message.signature_mldsa65, message.room_id,
+            own_public_key);
         if (failure.has_value()) {
             std::cout << "  WARNING: disclosure did not verify: " << *failure << '\n';
             break;
@@ -1079,7 +1124,9 @@ bool handle_client_line(SecureChannel& channel,
         // only in memory for this session (not yet persisted - see
         // ephemeral.hpp's documented scope).
         const auto keypair_it = state.room_ephemeral_keypair.find(canonical_room);
-        if (keypair_it != state.room_ephemeral_keypair.end()) {
+        const auto keypair_mldsa65_it = state.room_ephemeral_keypair_mldsa65.find(canonical_room);
+        if (keypair_it != state.room_ephemeral_keypair.end() &&
+            keypair_mldsa65_it != state.room_ephemeral_keypair_mldsa65.end()) {
             tradep2p::TradeMessageContext context;
             context.mediator_id = state.mediator_id;
             context.room_id = room_id;
@@ -1094,9 +1141,13 @@ bool handle_client_line(SecureChannel& channel,
             context.timestamp = static_cast<std::uint64_t>(std::time(nullptr));
             const auto signature =
                 tradep2p::sign_trade_message(keypair_it->second.private_seed, context);
+            const auto signature_mldsa65 = tradep2p::sign_trade_message_mldsa65(
+                keypair_mldsa65_it->second.private_seed, context);
             std::cout << "  signed with this room's ephemeral trade key (round "
                       << (context.round + 1U) << ", " << (command == "/sent" ? "sent" : "received")
-                      << "): " << hex_encode(signature) << '\n';
+                      << "):\n"
+                      << "    Ed25519:   " << hex_encode(signature) << '\n'
+                      << "    ML-DSA-65: " << hex_encode(signature_mldsa65) << '\n';
         }
         return true;
     }
@@ -1184,7 +1235,8 @@ bool handle_client_line(SecureChannel& channel,
         }
         if (state.mediator_receipt_key.has_value()) {
             try {
-                tradep2p::verify_receipt_chain(it->second, *state.mediator_receipt_key);
+                tradep2p::verify_receipt_chain(it->second, *state.mediator_receipt_key,
+                                               *state.mediator_receipt_key_mldsa65);
                 std::cout << "  chain verifies\n";
             } catch (const tradep2p::ReceiptChainError& error) {
                 std::cout << "  chain does NOT verify: " << error.what() << '\n';
@@ -1209,7 +1261,9 @@ bool handle_client_line(SecureChannel& channel,
             throw std::invalid_argument("no receipts held for that source room this session");
         }
         const auto keypair_it = state.room_ephemeral_keypair.find(source_room);
-        if (keypair_it == state.room_ephemeral_keypair.end()) {
+        const auto keypair_mldsa65_it = state.room_ephemeral_keypair_mldsa65.find(source_room);
+        if (keypair_it == state.room_ephemeral_keypair.end() ||
+            keypair_mldsa65_it == state.room_ephemeral_keypair_mldsa65.end()) {
             throw std::invalid_argument("no ephemeral key held for that source room this session");
         }
         if (!state.room_parties.contains(target_room)) {
@@ -1233,6 +1287,8 @@ bool handle_client_line(SecureChannel& channel,
         }
         const auto signature =
             tradep2p::sign_disclosure(keypair_it->second.private_seed, fields);
+        const auto signature_mldsa65 =
+            tradep2p::sign_disclosure_mldsa65(keypair_mldsa65_it->second.private_seed, fields);
 
         tradep2p::ReceiptDisclosureMessage message;
         message.room_id = target_room_id;
@@ -1241,6 +1297,7 @@ bool handle_client_line(SecureChannel& channel,
         message.timestamp = fields.timestamp;
         message.nonce = fields.nonce;
         message.signature = signature;
+        message.signature_mldsa65 = signature_mldsa65;
         for (const auto& issued : chain_it->second) {
             tradep2p::ReceiptIssuedMessage wire;
             wire.room_id = issued.fields.room_id;
@@ -1250,11 +1307,15 @@ bool handle_client_line(SecureChannel& channel,
             wire.terms_commitment = issued.fields.terms_commitment;
             wire.party_a_ephemeral_key = issued.fields.party_a_ephemeral_key;
             wire.party_b_ephemeral_key = issued.fields.party_b_ephemeral_key;
+            wire.party_a_ephemeral_key_mldsa65 = issued.fields.party_a_ephemeral_key_mldsa65;
+            wire.party_b_ephemeral_key_mldsa65 = issued.fields.party_b_ephemeral_key_mldsa65;
             wire.mediator_public_key = issued.fields.mediator_public_key;
+            wire.mediator_public_key_mldsa65 = issued.fields.mediator_public_key_mldsa65;
             wire.timestamp = issued.fields.timestamp;
             wire.nonce = issued.fields.nonce;
             wire.previous_stage_hash = issued.fields.previous_stage_hash;
             wire.mediator_signature = issued.mediator_signature;
+            wire.mediator_signature_mldsa65 = issued.mediator_signature_mldsa65;
             message.chain.push_back(std::move(wire));
         }
         channel.send_frame(MessageType::ReceiptDisclosure,
@@ -1281,7 +1342,8 @@ bool handle_client_line(SecureChannel& channel,
             state.journal.reset();
             state.history.reset();
             std::cout << "keystore created and unlocked at " << path << '\n';
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         if (sub == "unlock") {
@@ -1299,7 +1361,8 @@ bool handle_client_line(SecureChannel& channel,
             state.journal.reset();
             state.history.reset();
             std::cout << "keystore unlocked\n";
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         if (sub == "lock") {
@@ -1356,7 +1419,8 @@ bool handle_client_line(SecureChannel& channel,
                 throw std::invalid_argument(
                     "no keystore loaded; pass a PATH or run /keystore create|unlock first");
             }
-            print_public_identity(state.keystore->public_identity());
+            print_public_identity(state.keystore->public_identity(),
+                                  state.keystore->identity_public_key_mldsa65());
             return true;
         }
         throw std::invalid_argument("usage: /keystore create|unlock|lock|rotate|destroy|show-identity ...");
@@ -1498,6 +1562,126 @@ void run_client(SecureChannel channel, std::string mediator_id) {
     }
 }
 
+// Speaks the mediator auth control channel's plain-text line protocol (see
+// mediator_auth.hpp/lobby.cpp's auth_control_loop()) over an already-
+// connected raw socket - direct or via SOCKS5, the caller (main()'s
+// verify-mediator/verify-mediator-tor modes) has already handled that part.
+// Closes `fd` before returning either way. Returns true (PASS) only when
+// the signature verifies AND the response is still within its TTL AND (if
+// `expect_key_hex` is non-empty) the returned key matches it - a FAIL here
+// is a legitimate negative result, not an error, so this does not throw for
+// any of those three cases; it only throws for genuine protocol/connection
+// failures (can't send, connection closed early, malformed response).
+bool run_verify_mediator(int fd, const std::string& expect_key_hex) {
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { ::close(fd); }
+    } guard{fd};
+
+    const tradep2p::MediatorAuthNonce nonce = tradep2p::generate_mediator_auth_nonce();
+    const std::string request = "AUTH " + hex_encode(nonce) + "\n";
+    {
+        std::size_t offset = 0;
+        while (offset < request.size()) {
+            const ssize_t sent =
+                ::send(fd, request.data() + offset, request.size() - offset, 0);
+            if (sent <= 0) {
+                throw std::runtime_error("failed to send AUTH request to mediator auth port");
+            }
+            offset += static_cast<std::size_t>(sent);
+        }
+    }
+
+    std::string line;
+    char buffer[8192];
+    for (;;) {
+        const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (received <= 0) {
+            throw std::runtime_error(
+                "connection closed before the mediator sent a response");
+        }
+        line.append(buffer, static_cast<std::size_t>(received));
+        if (line.find('\n') != std::string::npos || line.size() > 16384U) {
+            break;
+        }
+    }
+    if (const auto newline = line.find('\n'); newline != std::string::npos) {
+        line.resize(newline);
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+
+    std::istringstream stream(line);
+    std::string status;
+    stream >> status;
+    if (status == "ERR") {
+        std::string reason;
+        std::getline(stream, reason);
+        throw std::runtime_error("mediator auth port returned an error:" + reason);
+    }
+    if (status != "OK") {
+        throw std::runtime_error("malformed response from mediator auth port");
+    }
+
+    std::string mediator_id;
+    std::string public_key_hex;
+    std::string created_text;
+    std::string expires_text;
+    std::string signature_hex;
+    stream >> mediator_id >> public_key_hex >> created_text >> expires_text >> signature_hex;
+    if (mediator_id.empty() || public_key_hex.empty() || created_text.empty() ||
+        expires_text.empty() || signature_hex.empty()) {
+        throw std::runtime_error("malformed response from mediator auth port");
+    }
+
+    std::uint64_t created_at = 0;
+    std::uint64_t expires_at = 0;
+    const auto created_result = std::from_chars(
+        created_text.data(), created_text.data() + created_text.size(), created_at);
+    const auto expires_result = std::from_chars(
+        expires_text.data(), expires_text.data() + expires_text.size(), expires_at);
+    if (created_result.ec != std::errc{} || expires_result.ec != std::errc{}) {
+        throw std::runtime_error("malformed timestamps in mediator auth response");
+    }
+
+    const auto public_key = hex_decode<tradep2p::kMlDsa65PublicKeyLength>(public_key_hex);
+    const auto signature = hex_decode<tradep2p::kMlDsa65SignatureLength>(signature_hex);
+
+    tradep2p::MediatorAuthFields fields;
+    fields.mediator_id = mediator_id;
+    fields.nonce = nonce;
+    fields.created_at = created_at;
+    fields.expires_at = expires_at;
+
+    const bool signature_valid = tradep2p::verify_mediator_auth(public_key, fields, signature);
+    const auto now = static_cast<std::uint64_t>(std::time(nullptr));
+    const bool fresh = expires_at > now;
+
+    std::cout << "mediator_id:     " << mediator_id << '\n';
+    std::cout << "auth public key: " << public_key_hex << '\n';
+    std::cout << "signature:       " << (signature_valid ? "verifies" : "DOES NOT VERIFY") << '\n';
+    std::cout << "freshness:       "
+              << (fresh ? "within TTL"
+                        : "EXPIRED (clock skew, or a replayed old response)")
+              << '\n';
+
+    bool overall = signature_valid && fresh;
+
+    if (!expect_key_hex.empty()) {
+        std::string normalized_expect = expect_key_hex;
+        std::transform(normalized_expect.begin(), normalized_expect.end(),
+                       normalized_expect.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool matches = normalized_expect == public_key_hex;
+        std::cout << "matches --expect-key: " << (matches ? "yes" : "NO") << '\n';
+        overall = overall && matches;
+    }
+
+    std::cout << (overall ? "PASS" : "FAIL") << '\n';
+    return overall;
+}
+
 void run_registry_heartbeat(Endpoint registry,
                             ClientTlsPolicy registry_tls,
                             RegistryNode node,
@@ -1553,7 +1737,11 @@ void print_usage(const char* program) {
         << "  " << program
         << " client <node:port> <node-cert-sha256>\n"
         << "  " << program
-        << " client-tor <proxy:port> <onion:port> <node-cert-sha256>\n";
+        << " client-tor <proxy:port> <onion:port> <node-cert-sha256>\n"
+        << "  " << program
+        << " verify-mediator <host:port> [--expect-key HEX]\n"
+        << "  " << program
+        << " verify-mediator-tor <proxy:port> <onion:port> [--expect-key HEX]\n";
 }
 
 } // namespace
@@ -1747,6 +1935,32 @@ int main(int argc, char** argv) {
             run_client(SecureChannel::connect_via_socks5(
                 parse_endpoint(argv[2]), parse_endpoint(argv[3]),
                 ClientTlsPolicy{argv[4]}), std::string(argv[3]));
+        } else if (mode == "verify-mediator") {
+            if (argc != 3 && argc != 5) {
+                throw std::invalid_argument("wrong verify-mediator argument count");
+            }
+            std::string expect_key;
+            if (argc == 5) {
+                if (std::string_view(argv[3]) != "--expect-key") {
+                    throw std::invalid_argument("expected --expect-key");
+                }
+                expect_key = argv[4];
+            }
+            const int fd = connect_raw_tcp(parse_endpoint(argv[2]));
+            return run_verify_mediator(fd, expect_key) ? EXIT_SUCCESS : EXIT_FAILURE;
+        } else if (mode == "verify-mediator-tor") {
+            if (argc != 4 && argc != 6) {
+                throw std::invalid_argument("wrong verify-mediator-tor argument count");
+            }
+            std::string expect_key;
+            if (argc == 6) {
+                if (std::string_view(argv[4]) != "--expect-key") {
+                    throw std::invalid_argument("expected --expect-key");
+                }
+                expect_key = argv[5];
+            }
+            const int fd = connect_raw_via_socks5(parse_endpoint(argv[2]), parse_endpoint(argv[3]));
+            return run_verify_mediator(fd, expect_key) ? EXIT_SUCCESS : EXIT_FAILURE;
         } else {
             print_usage(argv[0]);
             return EXIT_FAILURE;

@@ -266,6 +266,9 @@ std::string DashboardClient::state_json() const {
          << json_escape(tls_session_.peer_certificate_signature_algorithm) << "\"}"
          << ",\"mediator_receipt_key\":\""
          << (mediator_receipt_key_.has_value() ? hex_encode_bytes(*mediator_receipt_key_) : "")
+         << "\",\"mediator_receipt_key_mldsa65\":\""
+         << (mediator_receipt_key_mldsa65_.has_value() ? hex_encode_bytes(*mediator_receipt_key_mldsa65_)
+                                                        : "")
          << "\",\"offers\":[";
 
     for (std::size_t index = 0; index < offers_.size(); ++index) {
@@ -381,8 +384,8 @@ std::string DashboardClient::state_json() const {
                     json << ',';
                 }
                 first_receipt = false;
-                const auto link_hash =
-                    receipt_chain_link_hash(issued.fields, issued.mediator_signature);
+                const auto link_hash = receipt_chain_link_hash(
+                    issued.fields, issued.mediator_signature, issued.mediator_signature_mldsa65);
                 json << "{\"stage\":\"" << receipt_stage_name(issued.fields.stage) << "\""
                      << ",\"completed\":" << (issued.fields.completed ? "true" : "false")
                      << ",\"suite_id\":" << issued.fields.suite_id
@@ -666,12 +669,16 @@ void DashboardClient::handle_frame(const Frame& frame) {
             // to do by default (unlike phase 4b's opt-in recognition): a
             // freshly random, never-derived key reveals nothing linkable.
             auto ephemeral_keypair = generate_ephemeral_trade_keypair();
+            auto ephemeral_keypair_mldsa65 = generate_ephemeral_trade_keypair_mldsa65();
             room.own_ephemeral_public_key_hex = hex_encode_bytes(ephemeral_keypair.public_key);
             TradeEphemeralKeyMessage announce;
             announce.room_id = message.room_id;
             announce.ephemeral_public_key = ephemeral_keypair.public_key;
+            announce.ephemeral_public_key_mldsa65 = ephemeral_keypair_mldsa65.public_key;
             ephemeral_keypairs_.erase(room_id);
             ephemeral_keypairs_.emplace(room_id, std::move(ephemeral_keypair));
+            ephemeral_keypairs_mldsa65_.erase(room_id);
+            ephemeral_keypairs_mldsa65_.emplace(room_id, std::move(ephemeral_keypair_mldsa65));
             ephemeral_key_to_announce = announce;
 
             rooms_[room_id] = std::move(room);
@@ -775,7 +782,9 @@ void DashboardClient::handle_frame(const Frame& frame) {
             room.room_id = room_id;
             room.receipt_status = "gate_open";
             const auto keypair_it = ephemeral_keypairs_.find(room_id);
-            if (keypair_it == ephemeral_keypairs_.end()) {
+            const auto keypair_mldsa65_it = ephemeral_keypairs_mldsa65_.find(room_id);
+            if (keypair_it == ephemeral_keypairs_.end() ||
+                keypair_mldsa65_it == ephemeral_keypairs_mldsa65_.end()) {
                 add_event_locked("room " + room_id +
                                  ": cannot acknowledge final-receipt gate - no ephemeral key for "
                                  "this room");
@@ -793,6 +802,8 @@ void DashboardClient::handle_frame(const Frame& frame) {
             ack.stage = static_cast<std::uint8_t>(ReceiptStage::PenultimateObligationsComplete);
             ack.timestamp = fields.timestamp;
             ack.signature = sign_receipt_ack(keypair_it->second.private_seed, fields);
+            ack.signature_mldsa65 =
+                sign_receipt_ack_mldsa65(keypair_mldsa65_it->second.private_seed, fields);
             receipt_ack_to_send = ack;
             add_event_locked("room " + room_id + ": final-receipt gate opened, acknowledged");
             break;
@@ -820,21 +831,29 @@ void DashboardClient::handle_frame(const Frame& frame) {
             issued.fields.terms_commitment = message.terms_commitment;
             issued.fields.party_a_ephemeral_key = message.party_a_ephemeral_key;
             issued.fields.party_b_ephemeral_key = message.party_b_ephemeral_key;
+            issued.fields.party_a_ephemeral_key_mldsa65 = message.party_a_ephemeral_key_mldsa65;
+            issued.fields.party_b_ephemeral_key_mldsa65 = message.party_b_ephemeral_key_mldsa65;
             issued.fields.mediator_public_key = message.mediator_public_key;
+            issued.fields.mediator_public_key_mldsa65 = message.mediator_public_key_mldsa65;
             issued.fields.stage = stage;
             issued.fields.completed = message.completed;
             issued.fields.timestamp = message.timestamp;
             issued.fields.nonce = message.nonce;
             issued.fields.previous_stage_hash = message.previous_stage_hash;
             issued.mediator_signature = message.mediator_signature;
+            issued.mediator_signature_mldsa65 = message.mediator_signature_mldsa65;
 
             room.receipt_status = stage == ReceiptStage::SettlementCompleted ? "stage4" : "stage3";
 
             if (!mediator_receipt_key_.has_value()) {
                 mediator_receipt_key_ = message.mediator_public_key;
+                mediator_receipt_key_mldsa65_ = message.mediator_public_key_mldsa65;
             }
             if (*mediator_receipt_key_ != message.mediator_public_key ||
-                !verify_receipt(*mediator_receipt_key_, issued.fields, issued.mediator_signature)) {
+                *mediator_receipt_key_mldsa65_ != message.mediator_public_key_mldsa65 ||
+                !verify_receipt_hybrid(*mediator_receipt_key_, *mediator_receipt_key_mldsa65_,
+                                       issued.fields, issued.mediator_signature,
+                                       issued.mediator_signature_mldsa65)) {
                 room.receipt_chain_verifies = false;
                 add_event_locked("room " + room_id +
                                  ": WARNING - receipt did not verify against the pinned mediator "
@@ -845,7 +864,7 @@ void DashboardClient::handle_frame(const Frame& frame) {
             auto& chain = room_receipts_[room_id];
             chain.push_back(issued);
             try {
-                verify_receipt_chain(chain, *mediator_receipt_key_);
+                verify_receipt_chain(chain, *mediator_receipt_key_, *mediator_receipt_key_mldsa65_);
                 room.receipt_chain_verifies = true;
             } catch (const ReceiptChainError&) {
                 room.receipt_chain_verifies = false;

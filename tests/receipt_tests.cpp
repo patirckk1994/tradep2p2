@@ -36,7 +36,10 @@ struct RoomFixture {
     tradep2p::MediatorSession session;
     tradep2p::Ed25519KeyPair ephemeral_a;
     tradep2p::Ed25519KeyPair ephemeral_b;
+    tradep2p::MlDsa65KeyPair ephemeral_a_mldsa65;
+    tradep2p::MlDsa65KeyPair ephemeral_b_mldsa65;
     tradep2p::Ed25519KeyPair mediator_key;
+    tradep2p::MlDsa65KeyPair mediator_key_mldsa65;
     tradep2p::RoomId room;
 };
 
@@ -49,7 +52,22 @@ RoomFixture make_room(std::uint32_t rounds, tradep2p::FeeTerms fee = {}) {
     session.join(tradep2p::JoinRoomMessage{room, "addr-b"});
     return RoomFixture{std::move(session), tradep2p::generate_ephemeral_trade_keypair(),
                        tradep2p::generate_ephemeral_trade_keypair(),
-                       tradep2p::generate_mediator_receipt_keypair(), room};
+                       tradep2p::generate_ephemeral_trade_keypair_mldsa65(),
+                       tradep2p::generate_ephemeral_trade_keypair_mldsa65(),
+                       tradep2p::generate_mediator_receipt_keypair(),
+                       tradep2p::generate_mldsa65_keypair(), room};
+}
+
+// Hybrid-signs `fields` with the fixture's mediator keypair (both halves) -
+// the shape every production receipt has (see lobby.cpp's issue_receipt()).
+tradep2p::IssuedReceipt sign_full_receipt(const RoomFixture& fixture,
+                                          const tradep2p::ReceiptFields& fields) {
+    tradep2p::IssuedReceipt issued;
+    issued.fields = fields;
+    issued.mediator_signature = tradep2p::sign_receipt(fixture.mediator_key.private_seed, fields);
+    issued.mediator_signature_mldsa65 =
+        tradep2p::sign_receipt_mldsa65(fixture.mediator_key_mldsa65.private_seed, fields);
+    return issued;
 }
 
 // Drives one full leg (Sent then Received) for the current sender.
@@ -68,7 +86,10 @@ tradep2p::ReceiptFields terms_commitment_fields(const RoomFixture& fixture, trad
     fields.terms_commitment = tradep2p::trade_payload_hash(tradep2p::encode_terms(fixture.session.terms()));
     fields.party_a_ephemeral_key = fixture.ephemeral_a.public_key;
     fields.party_b_ephemeral_key = fixture.ephemeral_b.public_key;
+    fields.party_a_ephemeral_key_mldsa65 = fixture.ephemeral_a_mldsa65.public_key;
+    fields.party_b_ephemeral_key_mldsa65 = fixture.ephemeral_b_mldsa65.public_key;
     fields.mediator_public_key = fixture.mediator_key.public_key;
+    fields.mediator_public_key_mldsa65 = fixture.mediator_key_mldsa65.public_key;
     fields.stage = stage;
     fields.completed = stage == tradep2p::ReceiptStage::SettlementCompleted;
     fields.timestamp = 1000;
@@ -112,6 +133,62 @@ void test_receipt_ack_sign_verify_and_domain_separation() {
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid ack/receipt: both signatures required to verify - a genuine
+// signature under one algorithm paired with a corrupted signature under the
+// other must still fail. This is the property that makes "hybrid" different
+// from recognition.hpp's switchable suite_id (either algorithm alone is
+// enough there).
+// ---------------------------------------------------------------------------
+
+void test_receipt_ack_hybrid_requires_both_signatures() {
+    const auto prover = tradep2p::generate_ephemeral_trade_keypair();
+    const auto prover_mldsa65 = tradep2p::generate_ephemeral_trade_keypair_mldsa65();
+    tradep2p::ReceiptAckFields fields;
+    fields.mediator_id = "mediator-a";
+    fields.room_id = room_id(6);
+    fields.stage = tradep2p::ReceiptStage::PenultimateObligationsComplete;
+    fields.terms_commitment.fill(0x22U);
+    fields.timestamp = 6000;
+
+    const auto signature = tradep2p::sign_receipt_ack(prover.private_seed, fields);
+    const auto signature_mldsa65 =
+        tradep2p::sign_receipt_ack_mldsa65(prover_mldsa65.private_seed, fields);
+    require(tradep2p::verify_receipt_ack_hybrid(prover.public_key, prover_mldsa65.public_key, fields,
+                                                signature, signature_mldsa65),
+            "two genuine signatures under their own algorithms must hybrid-verify");
+
+    auto corrupted_ed25519 = signature;
+    corrupted_ed25519[0] ^= 0xFFU;
+    require(!tradep2p::verify_receipt_ack_hybrid(prover.public_key, prover_mldsa65.public_key, fields,
+                                                 corrupted_ed25519, signature_mldsa65),
+            "a genuine ML-DSA-65 signature cannot compensate for a corrupted Ed25519 one");
+
+    auto corrupted_mldsa65 = signature_mldsa65;
+    corrupted_mldsa65[0] ^= 0xFFU;
+    require(!tradep2p::verify_receipt_ack_hybrid(prover.public_key, prover_mldsa65.public_key, fields,
+                                                 signature, corrupted_mldsa65),
+            "a genuine Ed25519 signature cannot compensate for a corrupted ML-DSA-65 one");
+}
+
+void test_receipt_sign_verify_hybrid_round_trip() {
+    const auto fixture = make_room(1);
+    const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
+    const auto issued = sign_full_receipt(fixture, stage3);
+    require(tradep2p::verify_receipt_hybrid(fixture.mediator_key.public_key,
+                                            fixture.mediator_key_mldsa65.public_key, issued.fields,
+                                            issued.mediator_signature,
+                                            issued.mediator_signature_mldsa65),
+            "a genuinely dual-signed receipt must hybrid-verify");
+
+    const auto other_mediator = tradep2p::generate_mediator_receipt_keypair();
+    require(!tradep2p::verify_receipt_hybrid(other_mediator.public_key,
+                                             fixture.mediator_key_mldsa65.public_key, issued.fields,
+                                             issued.mediator_signature,
+                                             issued.mediator_signature_mldsa65),
+            "hybrid verification must fail under an unrelated Ed25519 key");
+}
+
+// ---------------------------------------------------------------------------
 // Staged-receipt chain: valid chain verifies; a later-stage receipt without
 // a valid previous-stage hash is rejected; non-monotonic stages rejected;
 // signature tampering rejected.
@@ -120,33 +197,33 @@ void test_receipt_ack_sign_verify_and_domain_separation() {
 void test_receipt_chain_valid() {
     const auto fixture = make_room(1);
     const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
-    const auto stage3_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage3);
-    const auto link = tradep2p::receipt_chain_link_hash(stage3, stage3_sig);
+    const auto issued3 = sign_full_receipt(fixture, stage3);
+    const auto link = tradep2p::receipt_chain_link_hash(stage3, issued3.mediator_signature,
+                                                        issued3.mediator_signature_mldsa65);
 
     auto stage4 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::SettlementCompleted, link);
-    const auto stage4_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage4);
+    const auto issued4 = sign_full_receipt(fixture, stage4);
 
-    const std::vector<tradep2p::IssuedReceipt> chain = {
-        {stage3, stage3_sig},
-        {stage4, stage4_sig},
-    };
-    tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key); // must not throw
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3, issued4};
+    tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                   fixture.mediator_key_mldsa65.public_key); // must not throw
 }
 
 void test_receipt_chain_bad_previous_hash_rejected() {
     const auto fixture = make_room(1);
     const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
-    const auto stage3_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage3);
+    const auto issued3 = sign_full_receipt(fixture, stage3);
 
     std::array<std::uint8_t, 32> wrong_link{};
     wrong_link.fill(0xEEU);
     auto stage4 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::SettlementCompleted, wrong_link);
-    const auto stage4_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage4);
+    const auto issued4 = sign_full_receipt(fixture, stage4);
 
-    const std::vector<tradep2p::IssuedReceipt> chain = {{stage3, stage3_sig}, {stage4, stage4_sig}};
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3, issued4};
     bool threw = false;
     try {
-        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key);
+        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                       fixture.mediator_key_mldsa65.public_key);
     } catch (const tradep2p::ReceiptChainError&) {
         threw = true;
     }
@@ -156,17 +233,19 @@ void test_receipt_chain_bad_previous_hash_rejected() {
 void test_receipt_chain_non_monotonic_stage_rejected() {
     const auto fixture = make_room(1);
     const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
-    const auto stage3_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage3);
-    const auto link = tradep2p::receipt_chain_link_hash(stage3, stage3_sig);
+    const auto issued3 = sign_full_receipt(fixture, stage3);
+    const auto link = tradep2p::receipt_chain_link_hash(stage3, issued3.mediator_signature,
+                                                        issued3.mediator_signature_mldsa65);
 
     // Same stage repeated (not strictly increasing).
     auto repeated = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete, link);
-    const auto repeated_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, repeated);
+    const auto issued_repeated = sign_full_receipt(fixture, repeated);
 
-    const std::vector<tradep2p::IssuedReceipt> chain = {{stage3, stage3_sig}, {repeated, repeated_sig}};
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3, issued_repeated};
     bool threw = false;
     try {
-        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key);
+        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                       fixture.mediator_key_mldsa65.public_key);
     } catch (const tradep2p::ReceiptChainError&) {
         threw = true;
     }
@@ -176,36 +255,62 @@ void test_receipt_chain_non_monotonic_stage_rejected() {
 void test_receipt_chain_tampered_signature_rejected() {
     const auto fixture = make_room(1);
     const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
-    auto stage3_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage3);
-    stage3_sig[0] ^= 0xFFU;
+    auto issued3 = sign_full_receipt(fixture, stage3);
+    issued3.mediator_signature[0] ^= 0xFFU;
 
-    const std::vector<tradep2p::IssuedReceipt> chain = {{stage3, stage3_sig}};
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3};
     bool threw = false;
     try {
-        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key);
+        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                       fixture.mediator_key_mldsa65.public_key);
     } catch (const tradep2p::ReceiptChainError&) {
         threw = true;
     }
     require(threw, "a tampered mediator signature must be rejected");
 }
 
+// A hybrid receipt with a genuine Ed25519 signature but a TAMPERED ML-DSA-65
+// signature must also be rejected - the actual "both required" guarantee,
+// not just "either works" (mirrors test_receipt_chain_tampered_signature_
+// rejected above, which only tampers the Ed25519 half).
+void test_receipt_chain_tampered_mldsa65_signature_rejected() {
+    const auto fixture = make_room(1);
+    const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
+    auto issued3 = sign_full_receipt(fixture, stage3);
+    issued3.mediator_signature_mldsa65[0] ^= 0xFFU;
+
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3};
+    bool threw = false;
+    try {
+        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                       fixture.mediator_key_mldsa65.public_key);
+    } catch (const tradep2p::ReceiptChainError&) {
+        threw = true;
+    }
+    require(threw,
+            "a genuine Ed25519 signature paired with a tampered ML-DSA-65 signature must still "
+            "be rejected - hybrid verification requires BOTH to hold");
+}
+
 void test_receipt_chain_mixed_room_rejected() {
     const auto fixture = make_room(1);
     const auto other_fixture = make_room(1);
     const auto stage3 = terms_commitment_fields(fixture, tradep2p::ReceiptStage::PenultimateObligationsComplete);
-    const auto stage3_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage3);
-    const auto link = tradep2p::receipt_chain_link_hash(stage3, stage3_sig);
+    const auto issued3 = sign_full_receipt(fixture, stage3);
+    const auto link = tradep2p::receipt_chain_link_hash(stage3, issued3.mediator_signature,
+                                                        issued3.mediator_signature_mldsa65);
 
     // Second entry claims to continue the chain but is actually for a
     // DIFFERENT room's fixture (different ephemeral keys/terms commitment).
     auto stage4 = terms_commitment_fields(other_fixture, tradep2p::ReceiptStage::SettlementCompleted, link);
     stage4.room_id = fixture.room; // room id matches, but party keys don't
-    const auto stage4_sig = tradep2p::sign_receipt(fixture.mediator_key.private_seed, stage4);
+    const auto issued4 = sign_full_receipt(fixture, stage4);
 
-    const std::vector<tradep2p::IssuedReceipt> chain = {{stage3, stage3_sig}, {stage4, stage4_sig}};
+    const std::vector<tradep2p::IssuedReceipt> chain = {issued3, issued4};
     bool threw = false;
     try {
-        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key);
+        tradep2p::verify_receipt_chain(chain, fixture.mediator_key.public_key,
+                                       fixture.mediator_key_mldsa65.public_key);
     } catch (const tradep2p::ReceiptChainError&) {
         threw = true;
     }
@@ -342,10 +447,12 @@ void test_malformed_wire_messages_rejected() {
     ack.stage = static_cast<std::uint8_t>(tradep2p::ReceiptStage::PenultimateObligationsComplete);
     ack.timestamp = 42;
     ack.signature.fill(0x05U);
+    ack.signature_mldsa65.fill(0x06U);
     const auto encoded_ack = tradep2p::encode_receipt_ack(ack);
     const auto decoded_ack = tradep2p::decode_receipt_ack(encoded_ack);
     require(decoded_ack.room_id == ack.room_id && decoded_ack.stage == ack.stage &&
-                decoded_ack.timestamp == ack.timestamp && decoded_ack.signature == ack.signature,
+                decoded_ack.timestamp == ack.timestamp && decoded_ack.signature == ack.signature &&
+                decoded_ack.signature_mldsa65 == ack.signature_mldsa65,
             "a well-formed ReceiptAck message must round-trip exactly");
 }
 
@@ -354,10 +461,13 @@ void test_malformed_wire_messages_rejected() {
 int main() {
     try {
         test_receipt_ack_sign_verify_and_domain_separation();
+        test_receipt_ack_hybrid_requires_both_signatures();
+        test_receipt_sign_verify_hybrid_round_trip();
         test_receipt_chain_valid();
         test_receipt_chain_bad_previous_hash_rejected();
         test_receipt_chain_non_monotonic_stage_rejected();
         test_receipt_chain_tampered_signature_rejected();
+        test_receipt_chain_tampered_mldsa65_signature_rejected();
         test_receipt_chain_mixed_room_rejected();
         test_withholding_final_ack_blocks_final_tranche();
         test_withholding_gate_before_fee_leg();

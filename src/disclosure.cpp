@@ -77,7 +77,8 @@ std::vector<std::uint8_t> encode_disclosure_signed_payload(const DisclosureField
 std::array<std::uint8_t, 32> disclosed_chain_hash(const std::vector<IssuedReceipt>& chain) {
     Writer writer;
     for (const auto& entry : chain) {
-        writer.bytes(receipt_chain_link_hash(entry.fields, entry.mediator_signature));
+        writer.bytes(receipt_chain_link_hash(entry.fields, entry.mediator_signature,
+                                             entry.mediator_signature_mldsa65));
     }
     return sha256(writer.take());
 }
@@ -93,9 +94,31 @@ bool verify_disclosure(const Ed25519PublicKey& original_ephemeral_public_key,
                           signature);
 }
 
+MlDsa65Signature sign_disclosure_mldsa65(const MlDsa65PrivateSeed& original_ephemeral_private_seed,
+                                         const DisclosureFields& fields) {
+    const std::vector<std::uint8_t> payload = encode_disclosure_signed_payload(fields);
+    const EvpPkeyPtr key = load_mldsa65_private_key(original_ephemeral_private_seed);
+    return mldsa65_sign(key.get(), payload);
+}
+
+bool verify_disclosure_mldsa65(const MlDsa65PublicKey& original_ephemeral_public_key,
+                               const DisclosureFields& fields, const MlDsa65Signature& signature) {
+    return mldsa65_verify(original_ephemeral_public_key, encode_disclosure_signed_payload(fields),
+                          signature);
+}
+
+bool verify_disclosure_hybrid(const Ed25519PublicKey& original_ephemeral_public_key,
+                              const MlDsa65PublicKey& original_ephemeral_public_key_mldsa65,
+                              const DisclosureFields& fields, const Ed25519Signature& signature,
+                              const MlDsa65Signature& signature_mldsa65) {
+    return verify_disclosure(original_ephemeral_public_key, fields, signature) &&
+           verify_disclosure_mldsa65(original_ephemeral_public_key_mldsa65, fields, signature_mldsa65);
+}
+
 std::optional<std::string> verify_disclosure_bundle(const std::vector<IssuedReceipt>& chain,
                                                      const DisclosureFields& fields,
                                                      const Ed25519Signature& signature,
+                                                     const MlDsa65Signature& signature_mldsa65,
                                                      const RoomId& expected_room_id,
                                                      const Ed25519PublicKey& expected_recipient_key) {
     if (chain.empty()) {
@@ -105,7 +128,8 @@ std::optional<std::string> verify_disclosure_bundle(const std::vector<IssuedRece
         return "disclosed receipt chain exceeds the maximum allowed length";
     }
     try {
-        verify_receipt_chain(chain, chain.front().fields.mediator_public_key);
+        verify_receipt_chain(chain, chain.front().fields.mediator_public_key,
+                             chain.front().fields.mediator_public_key_mldsa65);
     } catch (const ReceiptChainError& error) {
         return std::string("disclosed receipt chain does not verify: ") + error.what();
     }
@@ -118,10 +142,12 @@ std::optional<std::string> verify_disclosure_bundle(const std::vector<IssuedRece
     if (fields.recipient_ephemeral_key != expected_recipient_key) {
         return "disclosure envelope is not bound to this recipient";
     }
-    const bool valid_under_party_a =
-        verify_disclosure(chain.front().fields.party_a_ephemeral_key, fields, signature);
-    const bool valid_under_party_b =
-        verify_disclosure(chain.front().fields.party_b_ephemeral_key, fields, signature);
+    const bool valid_under_party_a = verify_disclosure_hybrid(
+        chain.front().fields.party_a_ephemeral_key,
+        chain.front().fields.party_a_ephemeral_key_mldsa65, fields, signature, signature_mldsa65);
+    const bool valid_under_party_b = verify_disclosure_hybrid(
+        chain.front().fields.party_b_ephemeral_key,
+        chain.front().fields.party_b_ephemeral_key_mldsa65, fields, signature, signature_mldsa65);
     if (!valid_under_party_a && !valid_under_party_b) {
         return "disclosure envelope signature does not match either party's key in the chain";
     }

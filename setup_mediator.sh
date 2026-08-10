@@ -75,6 +75,22 @@ Options:
                         the admin-channel option above (--admin-fee-token)
                         gives an out-of-process alternative with no such
                         risk.
+  --auth-port N        enables a public, unauthenticated port where ANY
+                        caller can ask this mediator to sign a fresh nonce
+                        with a persistent ML-DSA-65 identity key - proof of
+                        continuity for a returning client who already knows
+                        this mediator's key from prior trade history (see
+                        `tradep2p_cli verify-mediator`). Nothing this
+                        channel returns is sensitive, so unlike --admin-port
+                        there is no token - leave unset to disable the
+                        channel entirely (the default).
+  --auth-key-file PATH  where the mediator auth key's 32-byte seed is
+                        stored (created on first run if missing). Leave
+                        unset and a fresh key is generated every restart -
+                        every proof issued that run becomes unverifiable
+                        against a later restart's key, a real, named
+                        limitation of running without this set, not a
+                        silent one. Only meaningful with --auth-port.
   --registry HOST:PORT registry endpoint to register with (defaults to this
                         project's own registry - see REGISTRY_ENDPOINT in
                         --init-config output; pass an empty string to run
@@ -120,6 +136,8 @@ ADMIN_TOKEN=""
 ADMIN_FEE_TOKEN=""
 ADMIN_PORT="7444"
 FEE_PLUGIN_PATH=""
+AUTH_PORT=""
+AUTH_KEY_FILE=""
 # Defaults to this project's own registry - registration there starts
 # Pending (invisible to every other client) until its operator approves it,
 # so pointing here by default carries no discoverability risk. Reachable
@@ -178,6 +196,8 @@ while [[ $# -gt 0 ]]; do
         --admin-fee-token) ADMIN_FEE_TOKEN="$2"; shift 2 ;;
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
         --fee-plugin-path) FEE_PLUGIN_PATH="$2"; shift 2 ;;
+        --auth-port) AUTH_PORT="$2"; shift 2 ;;
+        --auth-key-file) AUTH_KEY_FILE="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
         --registry-pin) REGISTRY_PIN="$2"; shift 2 ;;
         --registry-proxy) REGISTRY_PROXY="$2"; shift 2 ;;
@@ -224,6 +244,12 @@ ADMIN_FEE_TOKEN="$ADMIN_FEE_TOKEN"
 # plugins/README.md before setting this - a crashing/hanging plugin takes
 # the whole mediator process down with it.
 FEE_PLUGIN_PATH="$FEE_PLUGIN_PATH"
+
+# Leave AUTH_PORT empty to disable the mediator auth control channel
+# entirely (default). Unlike ADMIN_TOKEN, nothing this channel returns is
+# sensitive - there is no token to keep secret here.
+AUTH_PORT="$AUTH_PORT"
+AUTH_KEY_FILE="$AUTH_KEY_FILE"
 
 # Leave REGISTRY_ENDPOINT empty to run standalone, unregistered.
 REGISTRY_ENDPOINT="$REGISTRY_ENDPOINT"
@@ -319,6 +345,9 @@ fi
 if [[ -n "$FEE_PLUGIN_PATH" ]]; then
     echo "  fee plugin:        $FEE_PLUGIN_PATH (in-process, polling pending fees)"
 fi
+if [[ -n "$AUTH_PORT" ]]; then
+    echo "  mediator auth:     ${MEDIATOR_BIND%:*}:$AUTH_PORT (unauthenticated, see --auth-port)"
+fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     if [[ -n "$REGISTRY_PROXY" ]]; then
         echo "  registry:          $REGISTRY_ENDPOINT via SOCKS5 $REGISTRY_PROXY (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
@@ -369,6 +398,12 @@ if [[ -n "$ADMIN_TOKEN" ]]; then
 fi
 if [[ -n "$FEE_PLUGIN_PATH" ]]; then
     export TRADEP2P_FEE_PLUGIN_PATH="$FEE_PLUGIN_PATH"
+fi
+if [[ -n "$AUTH_PORT" ]]; then
+    export TRADEP2P_MEDIATOR_AUTH_PORT="$AUTH_PORT"
+    if [[ -n "$AUTH_KEY_FILE" ]]; then
+        export TRADEP2P_MEDIATOR_AUTH_KEY_FILE="$AUTH_KEY_FILE"
+    fi
 fi
 
 if [[ -n "$REGISTRY_ENDPOINT" && -n "$REGISTRY_PROXY" ]]; then

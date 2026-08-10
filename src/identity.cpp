@@ -435,6 +435,30 @@ MlDsa65KeyPair derive_mldsa65_keypair(const MasterSecret& master_secret,
     return pair;
 }
 
+MlDsa65KeyPair load_mldsa65_keypair(const MlDsa65PrivateSeed& seed) {
+    const EvpPkeyPtr key = load_mldsa65_private_key(seed);
+    MlDsa65KeyPair pair;
+    pair.private_seed = MlDsa65PrivateSeed(seed.bytes());
+    std::size_t pub_len = pair.public_key.size();
+    if (EVP_PKEY_get_octet_string_param(key.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                         pair.public_key.data(), pair.public_key.size(),
+                                         &pub_len) != 1 ||
+        pub_len != kMlDsa65PublicKeyLength) {
+        throw_openssl_error("failed to derive ML-DSA-65 public key from seed");
+    }
+    return pair;
+}
+
+MlDsa65KeyPair generate_mldsa65_keypair() {
+    std::array<std::uint8_t, kMlDsa65SeedLength> seed_bytes{};
+    if (RAND_bytes(seed_bytes.data(), static_cast<int>(seed_bytes.size())) != 1) {
+        throw_openssl_error("failed to generate ML-DSA-65 seed");
+    }
+    const MlDsa65PrivateSeed seed(seed_bytes);
+    OPENSSL_cleanse(seed_bytes.data(), seed_bytes.size());
+    return load_mldsa65_keypair(seed);
+}
+
 MlDsa65Signature mldsa65_sign(EVP_PKEY* private_key, std::span<const std::uint8_t> message) {
     if (private_key == nullptr) {
         throw std::invalid_argument("mldsa65_sign: null private key");

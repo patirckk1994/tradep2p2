@@ -79,6 +79,16 @@ constexpr std::size_t kJournalHashLength = 32; // SHA-256
 constexpr std::size_t kJournalTradeIdLength = 16;
 constexpr std::size_t kJournalMaxMediatorIdLength = 256;
 
+// Checkpoint suites - additive, not hybrid (unlike receipt.hpp's mandatory-
+// both scheme): journal data is never shown to a stranger who'd need to
+// verify it years later, so it doesn't need that property - see
+// Journal::checkpoint_mldsa65()'s comment. kJournalCheckpointSuiteEd25519V1
+// is implicit for every checkpoint record written before this suite_id
+// concept existed (the original kRecordKindCheckpoint record kind, still
+// produced unchanged by checkpoint() below).
+constexpr std::uint16_t kJournalCheckpointSuiteEd25519V1 = 0x0001;
+constexpr std::uint16_t kJournalCheckpointSuiteMlDsa65V1 = 0x0002;
+
 using JournalHash = std::array<std::uint8_t, kJournalHashLength>;
 using TradeId = std::array<std::uint8_t, kJournalTradeIdLength>;
 
@@ -213,10 +223,14 @@ public:
     // JournalTamperError / JournalRollbackError as appropriate; a
     // successful return means the entire existing chain (if non-empty) is
     // internally consistent and its checkpoints are genuinely signed by the
-    // holder of the matching private key.
-    [[nodiscard]] static Journal open(const std::string& log_path,
-                                      const std::string& head_path,
-                                      const Ed25519PublicKey& local_history_public_key);
+    // holder of the matching private key. `local_history_public_key_mldsa65`
+    // is required only if the log actually contains an ML-DSA-65 checkpoint
+    // (see checkpoint_mldsa65()) - if one is found with no key provided to
+    // verify it against, that is JournalTamperError, not silently skipped.
+    [[nodiscard]] static Journal open(
+        const std::string& log_path, const std::string& head_path,
+        const Ed25519PublicKey& local_history_public_key,
+        const std::optional<MlDsa65PublicKey>& local_history_public_key_mldsa65 = std::nullopt);
 
     // Appends one new entry: computes its hash-chain link, writes it to
     // `log_path` (single `write()` of the fully-framed record, then
@@ -233,6 +247,17 @@ public:
     // std::logic_error if the journal has no entries yet (nothing to
     // checkpoint).
     void checkpoint(const Ed25519PrivateSeed& local_history_private_key);
+
+    // The ML-DSA-65 sibling of checkpoint() above - same durability shape
+    // (main-log record, then atomic head-pointer replace), writing a NEW
+    // record kind (see journal.cpp's kRecordKindCheckpointSuiteV1) rather
+    // than extending the original kRecordKindCheckpoint body, since that
+    // body has no room to grow without breaking already-written records.
+    // This is an ADDITIVE sibling, not a hybrid/both-required combination
+    // like receipt.hpp's - journal data is purely local and never shown to
+    // a stranger who'd need it to stay unforgeable across a future quantum
+    // break, so it doesn't need that stronger property.
+    void checkpoint_mldsa65(const MlDsa65PrivateSeed& local_history_private_key_mldsa65);
 
     [[nodiscard]] const std::vector<JournalEntry>& entries() const noexcept { return entries_; }
 

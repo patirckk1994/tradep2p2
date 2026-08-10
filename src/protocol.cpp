@@ -1194,6 +1194,7 @@ std::vector<std::uint8_t> encode_trade_ephemeral_key(const TradeEphemeralKeyMess
     Writer writer;
     writer.fixed_id(message.room_id);
     writer.fixed_id(message.ephemeral_public_key);
+    writer.fixed_id(message.ephemeral_public_key_mldsa65);
     return writer.take();
 }
 
@@ -1203,6 +1204,7 @@ TradeEphemeralKeyMessage decode_trade_ephemeral_key(std::span<const std::uint8_t
     message.room_id = reader.fixed_id<32U>();
     validate_room_id(message.room_id);
     message.ephemeral_public_key = reader.fixed_id<kTradeEphemeralPublicKeyLength>();
+    message.ephemeral_public_key_mldsa65 = reader.fixed_id<kTradeEphemeralPublicKeyLengthMlDsa65>();
     reader.require_finished();
     return message;
 }
@@ -1216,6 +1218,7 @@ std::vector<std::uint8_t> encode_receipt_ack(const ReceiptAckMessage& message) {
     writer.u8(message.stage);
     writer.u64(message.timestamp);
     writer.fixed_id(message.signature);
+    writer.fixed_id(message.signature_mldsa65);
     return writer.take();
 }
 
@@ -1227,6 +1230,7 @@ ReceiptAckMessage decode_receipt_ack(std::span<const std::uint8_t> bytes) {
     message.stage = reader.u8();
     message.timestamp = reader.u64();
     message.signature = reader.fixed_id<kReceiptSignatureLength>();
+    message.signature_mldsa65 = reader.fixed_id<kReceiptSignatureLengthMlDsa65>();
     reader.require_finished();
     return message;
 }
@@ -1241,11 +1245,15 @@ std::vector<std::uint8_t> encode_receipt_issued(const ReceiptIssuedMessage& mess
     writer.fixed_id(message.terms_commitment);
     writer.fixed_id(message.party_a_ephemeral_key);
     writer.fixed_id(message.party_b_ephemeral_key);
+    writer.fixed_id(message.party_a_ephemeral_key_mldsa65);
+    writer.fixed_id(message.party_b_ephemeral_key_mldsa65);
     writer.fixed_id(message.mediator_public_key);
+    writer.fixed_id(message.mediator_public_key_mldsa65);
     writer.u64(message.timestamp);
     writer.fixed_id(message.nonce);
     writer.fixed_id(message.previous_stage_hash);
     writer.fixed_id(message.mediator_signature);
+    writer.fixed_id(message.mediator_signature_mldsa65);
     return writer.take();
 }
 
@@ -1264,11 +1272,15 @@ ReceiptIssuedMessage decode_receipt_issued(std::span<const std::uint8_t> bytes) 
     message.terms_commitment = reader.fixed_id<kReceiptTermsCommitmentLength>();
     message.party_a_ephemeral_key = reader.fixed_id<kReceiptPublicKeyLength>();
     message.party_b_ephemeral_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.party_a_ephemeral_key_mldsa65 = reader.fixed_id<kReceiptPublicKeyLengthMlDsa65>();
+    message.party_b_ephemeral_key_mldsa65 = reader.fixed_id<kReceiptPublicKeyLengthMlDsa65>();
     message.mediator_public_key = reader.fixed_id<kReceiptPublicKeyLength>();
+    message.mediator_public_key_mldsa65 = reader.fixed_id<kReceiptPublicKeyLengthMlDsa65>();
     message.timestamp = reader.u64();
     message.nonce = reader.fixed_id<kReceiptWireNonceLength>();
     message.previous_stage_hash = reader.fixed_id<kReceiptTermsCommitmentLength>();
     message.mediator_signature = reader.fixed_id<kReceiptSignatureLength>();
+    message.mediator_signature_mldsa65 = reader.fixed_id<kReceiptSignatureLengthMlDsa65>();
     reader.require_finished();
     return message;
 }
@@ -1319,6 +1331,7 @@ std::vector<std::uint8_t> encode_receipt_disclosure(const ReceiptDisclosureMessa
     writer.u64(message.timestamp);
     writer.fixed_id(message.nonce);
     writer.fixed_id(message.signature);
+    writer.fixed_id(message.signature_mldsa65);
     if (message.chain.size() > std::numeric_limits<std::uint8_t>::max()) {
         throw std::invalid_argument("disclosed receipt chain has too many entries to encode");
     }
@@ -1349,6 +1362,7 @@ ReceiptDisclosureMessage decode_receipt_disclosure(std::span<const std::uint8_t>
     message.timestamp = reader.u64();
     message.nonce = reader.fixed_id<16U>();
     message.signature = reader.fixed_id<kReceiptSignatureLength>();
+    message.signature_mldsa65 = reader.fixed_id<kReceiptSignatureLengthMlDsa65>();
     const auto count = reader.u8();
     if (count > kDisclosureMaxChainEntries) {
         throw std::runtime_error("disclosed receipt chain exceeds the maximum allowed length");
