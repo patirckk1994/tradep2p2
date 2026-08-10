@@ -617,9 +617,12 @@ mechanisms in §7-9.2.** It remains a documented future direction:
   artifact in existence.
 - Blind tokens address linkability only. They contribute nothing to Sybil
   resistance (§12) and must never be presented as though they do.
-- **No standardized post-quantum blind signature scheme exists** — see
-  §11.5 for why, and the mitigation (epoch scoping) that applies regardless
-  of whether this layer is ever built.
+- **No standardized post-quantum blind signature scheme exists, and no
+  candidate construction has a public reference implementation this
+  project could build against** — see the post-quantum posture section
+  below for the specific candidates, why none is used here yet, and the
+  mitigation (epoch scoping) that applies regardless of whether this layer
+  is ever built.
 
 ---
 
@@ -638,7 +641,7 @@ mechanisms in §7-9.2.** It remains a documented future direction:
 | 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
 | 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
 | 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
-| — | Post-quantum migration (§11) | **Implemented** — TLS hybrid key exchange, TLS server-certificate signatures (ML-DSA-65), receipts/disclosure/ephemeral messages (mandatory Ed25519+ML-DSA-65 hybrid), login/journal/keystore (additive ML-DSA-65-default suite); only §9.3's blind signatures remain structurally unimplementable | `secure_channel.cpp`, `receipt.hpp/cpp`, `disclosure.hpp/cpp`, `ephemeral.hpp/cpp`, `login.hpp/cpp`, `journal.hpp/cpp`, `keystore.hpp/cpp`, `setup_mediator.sh`, `setup_registry.sh` |
+| — | Post-quantum migration (§11) | **Implemented** — TLS hybrid key exchange, TLS server-certificate signatures (ML-DSA-65), receipts/disclosure/ephemeral messages (mandatory Ed25519+ML-DSA-65 hybrid), login/journal/keystore (additive ML-DSA-65-default suite); only §9.3's blind signatures remain unimplemented (candidate constructions now exist but lack maturity/review — see §9.3) | `secure_channel.cpp`, `receipt.hpp/cpp`, `disclosure.hpp/cpp`, `ephemeral.hpp/cpp`, `login.hpp/cpp`, `journal.hpp/cpp`, `keystore.hpp/cpp`, `setup_mediator.sh`, `setup_registry.sh` |
 
 Twelve ctest binaries currently pass end-to-end against phases 1-9:
 `tradep2p_unit_tests`, `tradep2p_identity_tests`, `tradep2p_keystore_tests`,
@@ -783,22 +786,47 @@ reissue of the verifier.
 ChaCha20-Poly1305, SHA-256, Argon2id, HMAC/checkpoint authentication all
 face only Grover's quadratic speedup — do not touch them.
 
-**§9.3's blind signatures have no post-quantum answer, and this is
-structural, not a gap awaiting research.** ML-DSA's rejection-sampling
+**§9.3's blind signatures have no standardized post-quantum answer, and
+ML-DSA specifically cannot provide one.** ML-DSA's rejection-sampling
 abort-and-retry structure is precisely what makes it fast, and precisely
 what destroys the algebraic structure blinding requires — it cannot be
-blinded. No standardized post-quantum blind signature scheme exists.
-Signing the mediator's classical blind-signature key with ML-DSA does
-**not** harden the scheme; it authenticates which key is the mediator's,
-which does nothing to stop a quantum adversary from breaking that key's
-underlying (classical) hardness assumption directly. The asymmetry that
-lowers this risk's urgency: a broken blind-signature scheme lets an
-attacker mint fake tokens, but does not retroactively deanonymize anyone —
-a token blinded today does not later reveal which room produced it. The
-failure is Sybil-flavored, and §12 already concedes this system has no
-Sybil resistance. The recommended mitigation if/when §9.3 is built: rotate
-the blind-signing key per epoch and expire tokens with their epoch, so a
-future break only forges tokens for an epoch already closed.
+blinded. Signing the mediator's classical blind-signature key with ML-DSA
+does **not** harden the scheme; it authenticates which key is the
+mediator's, which does nothing to stop a quantum adversary from breaking
+that key's underlying (classical) hardness assumption directly.
+
+This is not, however, a closed research question anymore. Non-ML-DSA
+lattice constructions built specifically to be blindable now exist:
+Beullens, Lyubashevsky, Nguyen & Seiler, *Lattice-Based Blind Signatures:
+Short, Efficient, and Round-Optimal* (ePrint 2023/077, CCS 2023 — 22KB
+signatures, ~2.5 years of published cryptanalysis exposure as of this
+writing) and BRaccoon (ePrint 2026/1084, May 2026 — signatures
+syntactically identical to a standard scheme, but only weeks old with
+essentially no independent scrutiny yet). Neither is NIST-standardized,
+neither has a public reference implementation this project could build
+against or differentially test, and the field's track record argues for
+caution: the Parallel ROS attack (PKC 2024) broke the ℓ-concurrent
+unforgeability of three blind-signature schemes — including a
+lattice-based one, BLAZE+ — that had already cleared peer review and
+looked sound for a year. Implementing either construction here would mean
+hand-writing novel constant-time lattice arithmetic with no reference
+vectors to test against, for a system that mediates real settlement
+flows — a correctness/side-channel risk this project is not staffed to
+carry without independent cryptographic review. **Still not implemented,
+still not scheduled**; revisit only once one of: a NIST-adjacent
+standardization track opens for blind signatures, the Beullens et al.
+line accumulates several more years without a break the way ML-KEM/ML-DSA
+have, or a vetted, testable open-source implementation appears.
+
+The asymmetry that lowers this risk's urgency regardless of which
+construction (if any) is eventually chosen: a broken blind-signature
+scheme lets an attacker mint fake tokens, but does not retroactively
+deanonymize anyone — a token blinded today does not later reveal which
+room produced it. The failure is Sybil-flavored, and §12 already concedes
+this system has no Sybil resistance. The recommended mitigation if/when
+§9.3 is built, independent of scheme choice: rotate the blind-signing key
+per epoch and expire tokens with their epoch, so a future break only
+forges tokens for an epoch already closed.
 
 **One field to add now, cheaply, regardless of scheduling:** a `suite_id`
 inside every signed object's payload (receipts, journal entries, login
