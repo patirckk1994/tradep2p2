@@ -180,10 +180,24 @@ public:
     // and must be the SAME string http_dashboard.cpp passes as this
     // process's history mediator_id, or a recognized fingerprint would be
     // recorded under one label and looked up under another.
+    // registry/registry_tls/registry_proxy are all optional (default
+    // nullopt): when registry is unset, this client never touches a
+    // registry at all, exactly as before this parameter existed. When set,
+    // it periodically polls that registry's public, unauthenticated-beyond-
+    // pinning RegistryList (the same query the `nodes`/`nodes-tor` CLI
+    // commands make) and surfaces the result via state_json() - a
+    // read-only "what does this one registry currently see" snapshot, not
+    // a live connection, and not this client's own network mesh view
+    // (it has none - see specs.txt SS1.3's gossip subsection for why a
+    // single registry's listing already may include gossip-relayed
+    // entries tagged with their source).
     DashboardClient(Endpoint mediator,
                     ClientTlsPolicy tls_policy,
                     std::optional<Endpoint> socks_proxy,
-                    std::string mediator_id);
+                    std::string mediator_id,
+                    std::optional<Endpoint> registry = std::nullopt,
+                    std::optional<ClientTlsPolicy> registry_tls = std::nullopt,
+                    std::optional<Endpoint> registry_proxy = std::nullopt);
     ~DashboardClient();
 
     DashboardClient(const DashboardClient&) = delete;
@@ -269,6 +283,7 @@ private:
     void session_loop(SecureChannel& channel);
     void flush_outgoing(SecureChannel& channel);
     void handle_frame(const Frame& frame);
+    void registry_poll_loop();
 
     Endpoint mediator_;
     ClientTlsPolicy tls_policy_;
@@ -276,6 +291,17 @@ private:
     std::string mediator_id_;
     std::atomic<bool> stop_{false};
     std::thread worker_;
+
+    // Optional registry visibility (see the constructor's comment) - a
+    // second, independent background thread from worker_ above, since
+    // polling a registry has nothing to do with this client's own mediator
+    // connection and must not be gated on it being up. registry_.has_value()
+    // is this feature's on/off switch, checked once in start().
+    std::optional<Endpoint> registry_;
+    std::optional<ClientTlsPolicy> registry_tls_;
+    std::optional<Endpoint> registry_proxy_;
+    std::atomic<bool> registry_poll_running_{false};
+    std::thread registry_poll_thread_;
 
     mutable std::mutex state_mutex_;
     bool connected_{false};
@@ -288,6 +314,14 @@ private:
     // they're only ever incremented, never read-modify-written together
     // with the rest of this locked state.
     std::optional<std::chrono::steady_clock::time_point> connected_since_;
+    // Registry visibility snapshot - last successful/attempted poll only,
+    // overwritten wholesale each cycle (registry_poll_loop() owns the write
+    // side, state_json() the read side, both under state_mutex_). Empty
+    // registry_nodes_ with an empty registry_poll_error_ just means no poll
+    // has completed yet, not that the registry is empty.
+    std::vector<RegistryNode> registry_nodes_;
+    std::string registry_poll_error_;
+    std::optional<std::chrono::steady_clock::time_point> registry_polled_at_;
     // Crypto telemetry: this connection's live TLS session summary (§ note
     // on TlsSessionInfo - display only, the trust decision already happened
     // inside SecureChannel::make_client() before this session even exists).

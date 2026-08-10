@@ -517,7 +517,15 @@ void print_usage(const char* program) {
         << "Options:\n"
         << "  --listen HOST        HTTP bind address (default 127.0.0.1)\n"
         << "  --port PORT          HTTP port (default 8080)\n"
-        << "  --server-state FILE  read local mediator snapshot JSON\n";
+        << "  --server-state FILE  read local mediator snapshot JSON\n"
+        << "  --registry HOST:PORT      optional: periodically poll this registry's\n"
+        << "                            public listing and show it in the Registry\n"
+        << "                            visibility panel (requires --registry-pin).\n"
+        << "                            Never this client's own network mesh view -\n"
+        << "                            just what that one registry currently sees.\n"
+        << "  --registry-pin HEX        the registry's certificate SHA-256 pin\n"
+        << "                            (required with --registry).\n"
+        << "  --registry-proxy HOST:PORT  SOCKS5 proxy for an .onion --registry\n";
 }
 
 } // namespace
@@ -563,6 +571,9 @@ int main(int argc, char** argv) {
         std::string listen_host = "127.0.0.1";
         int http_port = 8080;
         std::string server_state_file;
+        std::optional<Endpoint> registry;
+        std::optional<std::string> registry_pin;
+        std::optional<Endpoint> registry_proxy;
         for (int index = option_index; index < argc; ++index) {
             const std::string argument = argv[index];
             if (argument == "--listen" && index + 1 < argc) {
@@ -571,6 +582,12 @@ int main(int argc, char** argv) {
                 http_port = static_cast<int>(parse_port(argv[++index]));
             } else if (argument == "--server-state" && index + 1 < argc) {
                 server_state_file = argv[++index];
+            } else if (argument == "--registry" && index + 1 < argc) {
+                registry = parse_endpoint(argv[++index]);
+            } else if (argument == "--registry-pin" && index + 1 < argc) {
+                registry_pin = argv[++index];
+            } else if (argument == "--registry-proxy" && index + 1 < argc) {
+                registry_proxy = parse_endpoint(argv[++index]);
             } else if (argument == "--help") {
                 print_usage(argv[0]);
                 return EXIT_SUCCESS;
@@ -579,8 +596,18 @@ int main(int argc, char** argv) {
                                             argument);
             }
         }
+        if (registry.has_value() != registry_pin.has_value()) {
+            throw std::invalid_argument("--registry and --registry-pin must be given together");
+        }
+        if (registry_proxy.has_value() && !registry.has_value()) {
+            throw std::invalid_argument("--registry-proxy requires --registry");
+        }
 
-        DashboardClient client(mediator, tls, proxy, mediator_id_text);
+        DashboardClient client(mediator, tls, proxy, mediator_id_text, registry,
+                               registry_pin.has_value()
+                                   ? std::optional<ClientTlsPolicy>(ClientTlsPolicy{*registry_pin})
+                                   : std::nullopt,
+                               registry_proxy);
         const std::string token = random_token();
 
         IdentityDashboardState identity_state;
