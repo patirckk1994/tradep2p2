@@ -1119,6 +1119,11 @@ std::string app_html(const std::string& username, const std::string& csrf_token,
 <button class="danger" id="logout">Log out</button></div>
 </div>
 <div id="notice" class="notice"></div>
+<div class="row" style="margin-bottom:14px">
+<button type="button" id="tab-btn-trading" class="primary">Trading</button>
+<button type="button" id="tab-btn-chart">Chart</button>
+</div>
+<div id="tab-trading">
 <section class="panel">
 <h2>Trading identity</h2>
 <p class="muted">A separate, optional identity used only for counterparty
@@ -1206,6 +1211,30 @@ login screen for how the resulting login works.</p>
 </form>
 </section>
 </div>
+<div id="tab-chart" style="display:none">
+<section class="panel">
+<h2>Price chart</h2>
+<p class="muted">The mediator's own retained price history for trades it has settled
+between two assets - not a market price oracle, just what this one mediator happened
+to settle, self-reported by the parties like everything else in this protocol.</p>
+<form id="chart-form" class="row">
+<label>Asset A<input id="chart-asset-a" maxlength="16" placeholder="QRL"></label>
+<label>Asset B<input id="chart-asset-b" maxlength="16" placeholder="BTC"></label>
+<label>Interval
+<select id="chart-interval">
+<option value="300">5 minutes</option>
+<option value="3600" selected>1 hour</option>
+<option value="21600">6 hours</option>
+<option value="86400">1 day</option>
+</select>
+</label>
+<div style="padding-bottom:12px"><button type="submit" class="primary">Load</button></div>
+</form>
+<div id="chart-status" class="muted">enter an asset pair and press Load</div>
+<canvas id="chart-canvas" width="900" height="360" style="width:100%;max-width:900px;background:var(--bg-deep);border:1px solid var(--line)"></canvas>
+</section>
+</div>
+</div>
 <script>
 const TOKEN="__CSRF_TOKEN__";
 const esc=(v)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1227,6 +1256,9 @@ function renderEvents(events){document.getElementById('events').innerHTML=(event
 async function refreshIdentity(){try{const r=await fetch('/api/identity/state',{cache:'no-store'});const s=await r.json();const el=document.getElementById('identity-status');if(!s.loaded){el.innerHTML='<span class="muted">No trading identity yet. Enter your password and click Enable / unlock to create one.</span>';return}el.innerHTML=`<div class="server-grid"><div class="metric"><b>Status</b>${s.unlocked?'unlocked':'locked'}</div><div class="metric"><b>Key generation</b>${esc(s.key_generation)}</div></div><p class="muted mono-break">identity id: ${esc(s.identity_id)}<br>public key: ${esc(s.public_key)}${copyBtn(s.public_key)}</p>`}catch(e){document.getElementById('identity-status').textContent='identity status error: '+e.message}}
 async function refreshHistory(){try{const r=await fetch('/api/history/list',{cache:'no-store'});const s=await r.json();const tbody=document.getElementById('history-rows');const status=document.getElementById('history-status');if(!s.unlocked){status.textContent='requires an unlocked trading identity';tbody.innerHTML='<tr><td colspan="7" class="muted">locked</td></tr>';return}status.textContent=s.entries.length+' record(s) for this mediator';tbody.innerHTML=s.entries.length?s.entries.map(en=>`<tr><td class="mono-break" title="${esc(en.fingerprint)}">${esc(short(en.fingerprint))}</td><td>${esc(en.mediator_id)}</td><td>${esc(en.first_seen)} / ${esc(en.last_seen)}</td><td>${esc(en.encounter_count)}</td><td>${en.locally_blocked?'<b class="error">BLOCKED</b>':esc(en.display_category)}</td><td>${esc(en.notes.length)}</td><td><div class="row"><button data-block="${esc(en.fingerprint)}" data-blocked="${en.locally_blocked?1:0}">${en.locally_blocked?'Unblock':'Block'}</button></div></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No counterparty records yet.</td></tr>';tbody.querySelectorAll('[data-block]').forEach(b=>b.onclick=async()=>{try{const path=b.dataset.blocked==='1'?'/api/history/unblock':'/api/history/block';await post(path,{fingerprint:b.dataset.block});notice('history updated');refreshHistory()}catch(e){notice(e.message,true)}})}catch(e){document.getElementById('history-status').textContent='history error: '+e.message}}
 async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});if(r.status===401){location.reload();return}const s=await r.json();currentMediatorId=s.mediator_id||'';const c=document.getElementById('connection');c.textContent=s.connection_status;c.className='status '+(s.connected?'connected':'disconnected');const fee=s.mediator_fee_amount>0?(' &middot; mediator fee: '+esc(s.mediator_fee_amount)+' '+esc(s.mediator_fee_asset)):'';document.getElementById('identity').innerHTML=(s.client_id?'anonymous mediator client '+esc(s.client_id):'not connected to a mediator yet')+fee;renderOffers(s.offers||[]);renderRooms(s.rooms||[]);renderEvents(s.events||[])}catch(e){notice('refresh failed: '+e.message,true)}}
+let lastCandleTicks=[];
+function drawCandles(ticks,intervalSeconds){const canvas=document.getElementById('chart-canvas');const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);if(!ticks.length){ctx.fillStyle='#888';ctx.font='14px sans-serif';ctx.fillText('no trades yet for this pair',10,24);return}const buckets=new Map();for(const t of ticks){const price=t.quote_amount/t.base_amount;const bucketTime=Math.floor(t.t/intervalSeconds)*intervalSeconds;let b=buckets.get(bucketTime);if(!b){b={t:bucketTime,o:price,h:price,l:price,c:price};buckets.set(bucketTime,b)}else{b.h=Math.max(b.h,price);b.l=Math.min(b.l,price);b.c=price}}const candles=[...buckets.values()].sort((a,b)=>a.t-b.t);const minP=Math.min(...candles.map(c=>c.l));const maxP=Math.max(...candles.map(c=>c.h));const pad=(maxP-minP)*0.1||maxP*0.1||1;const lo=minP-pad,hi=maxP+pad;const W=canvas.width,H=canvas.height;const cw=W/candles.length;const y=(p)=>H-((p-lo)/(hi-lo))*H;candles.forEach((c,i)=>{const x=i*cw+cw/2;const up=c.c>=c.o;ctx.strokeStyle=up?'#33cc99':'#e05555';ctx.fillStyle=up?'#33cc99':'#e05555';ctx.beginPath();ctx.moveTo(x,y(c.h));ctx.lineTo(x,y(c.l));ctx.stroke();const bodyTop=y(Math.max(c.o,c.c)),bodyBot=y(Math.min(c.o,c.c));ctx.fillRect(x-cw*0.35,bodyTop,Math.max(1,cw*0.7),Math.max(1,bodyBot-bodyTop))})}
+async function loadChart(){const a=document.getElementById('chart-asset-a').value.trim();const b=document.getElementById('chart-asset-b').value.trim();if(!a||!b){notice('enter both assets first',true);return}try{const r=await fetch('/api/candles?asset_a='+encodeURIComponent(a)+'&asset_b='+encodeURIComponent(b),{cache:'no-store'});const s=await r.json();lastCandleTicks=s.ticks||[];document.getElementById('chart-status').textContent=lastCandleTicks.length+' trade(s) for '+esc(s.base||a)+'/'+esc(s.quote||b)+' (mediator\'s own settled trades only)';drawCandles(lastCandleTicks,parseInt(document.getElementById('chart-interval').value,10))}catch(e){notice('chart load failed: '+e.message,true)}}
 document.getElementById('offer-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/offers/create',d);notice('offer request queued')}catch(err){notice(err.message,true)}};
 document.getElementById('refresh-offers').onclick=async()=>{try{await post('/api/offers/refresh');notice('offer refresh queued')}catch(e){notice(e.message,true)}};
 document.getElementById('refresh-history').onclick=()=>refreshHistory();
@@ -1237,7 +1269,12 @@ document.getElementById('ks-lock').onclick=async()=>{try{await post('/api/keysto
 document.getElementById('ks-export-reveal').onclick=()=>{document.getElementById('ks-export-form').style.display='block'};
 document.getElementById('ks-export-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));if(!d.ks_export_confirm)throw new Error('confirm the checkbox first');const r=await fetch('/api/keystore/export',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-TradeP2P-Token':TOKEN},body:new URLSearchParams({password:d.ks_export_password,confirm:'yes-export-my-encrypted-keystore'})});if(!r.ok){const body=await r.json().catch(()=>({error:'export failed'}));throw new Error(body.error||('HTTP '+r.status))}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='trading-identity.keystore';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);notice('keystore exported');e.target.reset();e.target.style.display='none'}catch(err){notice(err.message,true)}};
 document.getElementById('note-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));if(!d.note_fp||!d.note_text)throw new Error('fingerprint and note text are both required');await post('/api/history/note',{fingerprint:d.note_fp,text:d.note_text});notice('note added');e.target.reset();refreshHistory()}catch(err){notice(err.message,true)}};
+document.getElementById('chart-form').onsubmit=async(e)=>{e.preventDefault();await loadChart()};
+document.getElementById('chart-interval').onchange=()=>drawCandles(lastCandleTicks,parseInt(document.getElementById('chart-interval').value,10));
+document.getElementById('tab-btn-trading').onclick=()=>{document.getElementById('tab-trading').style.display='';document.getElementById('tab-chart').style.display='none';document.getElementById('tab-btn-trading').className='primary';document.getElementById('tab-btn-chart').className=''};
+document.getElementById('tab-btn-chart').onclick=()=>{document.getElementById('tab-trading').style.display='none';document.getElementById('tab-chart').style.display='';document.getElementById('tab-btn-trading').className='';document.getElementById('tab-btn-chart').className='primary'};
 refresh();refreshIdentity();refreshHistory();setInterval(refresh,1000);
+setInterval(()=>{if(document.getElementById('tab-chart').style.display!=='none'&&document.getElementById('chart-asset-a').value.trim()&&document.getElementById('chart-asset-b').value.trim())loadChart()},5000);
 </script>
 </body>
 </html>)HTML";
@@ -1688,6 +1725,31 @@ int main(int argc, char** argv) {
             response.set_header("Cache-Control", "no-store");
             response.set_content(session->client->state_json(),
                                  "application/json; charset=utf-8");
+        });
+
+        // Fire-then-return-cached, same pattern as every other polled
+        // endpoint here: sends GetCandles on the live mediator connection,
+        // then immediately returns whatever this session's DashboardClient
+        // currently has cached for the pair (possibly stale or empty on
+        // the first call - the browser's own 5s poll picks up the
+        // mediator's reply once it lands). Public market data, no
+        // additional authorization beyond the normal session.
+        server.Get("/api/candles", [&](const httplib::Request& request,
+                                       httplib::Response& response) {
+            const auto session = require_session(request, response);
+            if (!session) {
+                return;
+            }
+            response.set_header("Cache-Control", "no-store");
+            try {
+                const std::string asset_a = required_param(request, "asset_a");
+                const std::string asset_b = required_param(request, "asset_b");
+                session->client->request_candles(asset_a, asset_b);
+                response.set_content(session->client->candles_json(asset_a, asset_b),
+                                     "application/json; charset=utf-8");
+            } catch (const std::exception& error) {
+                set_json_result(response, false, error.what(), 400);
+            }
         });
 
         // Deliberately unauthenticated-by-default (404, not 401/403, when

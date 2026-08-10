@@ -191,6 +191,12 @@ public:
     void start();
 
     void refresh_offers();
+    // Fire-and-forget, like refresh_offers() - sends GetCandles and returns
+    // immediately. The mediator's CandleData reply (if any) lands
+    // asynchronously on the worker thread and is picked up by the next
+    // candles_json() call for this pair - same eventually-consistent-via-
+    // polling model this whole class already uses for offers_/rooms_.
+    void request_candles(const std::string& asset_a, const std::string& asset_b);
     void create_offer(const TradeTerms& terms, const std::string& address);
     void join_offer(const std::string& room_text, const std::string& address);
     void cancel_offer(const std::string& room_text);
@@ -242,6 +248,14 @@ public:
     void set_recognition_outcome_handler(RecognitionOutcomeHandler handler);
 
     [[nodiscard]] std::string state_json() const;
+    // Whatever CandleData this session currently has cached for this pair
+    // (see candles_ below) - `{"ok":true,"ticks":[]}` if request_candles()
+    // hasn't been called yet, or its reply hasn't landed yet. Never blocks
+    // on a fresh reply; a caller wanting up-to-date data should call
+    // request_candles() first and expect the freshest data on a LATER call
+    // to this, once the worker thread has processed the reply.
+    [[nodiscard]] std::string candles_json(const std::string& asset_a,
+                                           const std::string& asset_b) const;
 
 private:
     void enqueue(MessageType type,
@@ -273,6 +287,11 @@ private:
     FeeTerms mediator_fee_;
     std::vector<OfferView> offers_;
     std::map<std::string, RoomView> rooms_;
+    // The mediator's most recently received CandleData per pair, keyed
+    // "base/quote" (same key shape as lobby.cpp's price_history_) - see
+    // request_candles()/candles_json(). Guarded by state_mutex_ alongside
+    // offers_/rooms_ above.
+    std::map<std::string, CandleDataMessage> candles_;
     std::deque<std::string> events_;
     std::uint64_t revision_{0U};
 

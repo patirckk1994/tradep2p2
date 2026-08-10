@@ -368,10 +368,15 @@ void validate_registry_node(const RegistryNode& node, bool require_ttl) {
     }
 }
 
+// Upper bound must be kept equal to the highest-valued MessageType enumerator
+// (see protocol.hpp) - both secure_channel.cpp send and receive paths call
+// this on every frame, so forgetting to raise it after adding a new message
+// type fails that type with "unknown message type" on the very first send,
+// found the hard way while adding GetCandles/CandleData.
 void validate_message_type(MessageType type) {
     const auto value = static_cast<std::uint16_t>(type);
     if (value < static_cast<std::uint16_t>(MessageType::Welcome) ||
-        value > static_cast<std::uint16_t>(MessageType::FeeConfirmationPending)) {
+        value > static_cast<std::uint16_t>(MessageType::CandleData)) {
         throw std::invalid_argument("unknown message type");
     }
 }
@@ -541,6 +546,77 @@ OfferListMessage decode_offer_list(std::span<const std::uint8_t> bytes) {
     if (message.has_more &&
         (message.offers.empty() || message.next_cursor != message.offers.back().room_id)) {
         throw std::runtime_error("invalid next offer cursor");
+    }
+    reader.require_finished();
+    return message;
+}
+
+std::vector<std::uint8_t> encode_get_candles(const GetCandlesMessage& message) {
+    validate_asset(message.asset_a);
+    validate_asset(message.asset_b);
+    Writer writer;
+    writer.short_string(message.asset_a, kMaxAssetCodeLength);
+    writer.short_string(message.asset_b, kMaxAssetCodeLength);
+    return writer.take();
+}
+
+GetCandlesMessage decode_get_candles(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    GetCandlesMessage message;
+    message.asset_a = reader.short_string(kMaxAssetCodeLength);
+    message.asset_b = reader.short_string(kMaxAssetCodeLength);
+    validate_asset(message.asset_a);
+    validate_asset(message.asset_b);
+    reader.require_finished();
+    return message;
+}
+
+namespace {
+void validate_trade_tick(const TradeTick& tick) {
+    if (tick.base_amount == 0U || tick.quote_amount == 0U) {
+        throw std::invalid_argument("trade tick amounts must be nonzero");
+    }
+}
+} // namespace
+
+std::vector<std::uint8_t> encode_candle_data(const CandleDataMessage& message) {
+    validate_asset(message.base_asset);
+    validate_asset(message.quote_asset);
+    if (message.ticks.size() > kMaxCandleTicksPerPair) {
+        throw std::invalid_argument("candle series exceeds protocol limit");
+    }
+    Writer writer;
+    writer.short_string(message.base_asset, kMaxAssetCodeLength);
+    writer.short_string(message.quote_asset, kMaxAssetCodeLength);
+    writer.u16(static_cast<std::uint16_t>(message.ticks.size()));
+    for (const auto& tick : message.ticks) {
+        validate_trade_tick(tick);
+        writer.u64(tick.timestamp);
+        writer.u64(tick.base_amount);
+        writer.u64(tick.quote_amount);
+    }
+    return writer.take();
+}
+
+CandleDataMessage decode_candle_data(std::span<const std::uint8_t> bytes) {
+    Reader reader(bytes);
+    CandleDataMessage message;
+    message.base_asset = reader.short_string(kMaxAssetCodeLength);
+    message.quote_asset = reader.short_string(kMaxAssetCodeLength);
+    validate_asset(message.base_asset);
+    validate_asset(message.quote_asset);
+    const auto count = static_cast<std::size_t>(reader.u16());
+    if (count > kMaxCandleTicksPerPair) {
+        throw std::runtime_error("candle series exceeds protocol limit");
+    }
+    message.ticks.reserve(count);
+    for (std::size_t i = 0U; i < count; ++i) {
+        TradeTick tick;
+        tick.timestamp = reader.u64();
+        tick.base_amount = reader.u64();
+        tick.quote_amount = reader.u64();
+        validate_trade_tick(tick);
+        message.ticks.push_back(tick);
     }
     reader.require_finished();
     return message;

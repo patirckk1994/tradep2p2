@@ -172,6 +172,10 @@ void print_client_help() {
         << "      publish an open room; your address receives BUY_SYMBOL\n"
         << "  /offers [AFTER_ROOM_ID] [LIMIT]\n"
         << "      list up to 32 open rooms; use the printed cursor for the next page\n"
+        << "  /candles ASSET_A ASSET_B\n"
+        << "      the mediator's own retained price history for trades it settled between\n"
+        << "      these two assets (order doesn't matter) - not a market price oracle, just\n"
+        << "      what this one mediator happened to settle\n"
         << "  /join ROOM_ID RECEIVE_ADDRESS\n"
         << "      take an offer; your address receives SELL_SYMBOL\n"
         << "  /cancel ROOM_ID\n"
@@ -525,6 +529,21 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         const auto message = tradep2p::decode_offer_cancelled(frame.payload);
         std::cout << "offer cancelled: "
                   << tradep2p::room_id_to_hex(message.room_id) << '\n';
+        break;
+    }
+    case MessageType::CandleData: {
+        const auto message = tradep2p::decode_candle_data(frame.payload);
+        std::cout << "price history " << message.base_asset << "/" << message.quote_asset
+                  << ": " << message.ticks.size() << " trade(s) (mediator's own settled "
+                     "trades only, not a market price oracle)\n";
+        for (const auto& tick : message.ticks) {
+            const double price = static_cast<double>(tick.quote_amount) /
+                                  static_cast<double>(tick.base_amount);
+            std::cout << "  t=" << tick.timestamp << "  price=" << price << ' '
+                      << message.quote_asset << '/' << message.base_asset
+                      << "  (" << tick.base_amount << ' ' << message.base_asset << " <-> "
+                      << tick.quote_amount << ' ' << message.quote_asset << ")\n";
+        }
         break;
     }
     case MessageType::TradeReady: {
@@ -957,6 +976,19 @@ bool handle_client_line(SecureChannel& channel,
         }
         channel.send_frame(
             MessageType::ListOffers, tradep2p::encode_list_offers(request));
+        return true;
+    }
+    if (command == "/candles") {
+        tradep2p::GetCandlesMessage request;
+        std::string extra;
+        if (!(stream >> request.asset_a >> request.asset_b)) {
+            throw std::invalid_argument("usage: /candles ASSET_A ASSET_B");
+        }
+        if (stream >> extra) {
+            throw std::invalid_argument("invalid /candles syntax");
+        }
+        channel.send_frame(
+            MessageType::GetCandles, tradep2p::encode_get_candles(request));
         return true;
     }
     if (command == "/offer") {

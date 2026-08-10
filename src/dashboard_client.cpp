@@ -29,6 +29,15 @@ std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
     }
     return out;
 }
+
+// Mirrors lobby.cpp's canonical_pair() (a separate translation unit's
+// private helper, not shared) - both must agree on ordering, since this is
+// purely how candles_ is keyed locally, not anything sent over the wire
+// (the mediator's own CandleDataMessage.base_asset/quote_asset is the
+// actual source of truth for which asset is base).
+std::string candle_pair_key(const std::string& asset_a, const std::string& asset_b) {
+    return asset_a <= asset_b ? asset_a + "/" + asset_b : asset_b + "/" + asset_a;
+}
 } // namespace
 
 std::string json_escape(const std::string& text) {
@@ -109,6 +118,14 @@ void DashboardClient::refresh_offers() {
     enqueue(MessageType::ListOffers,
             tradep2p::encode_list_offers(ListOffersMessage{}),
             "requested open-offer list");
+}
+
+void DashboardClient::request_candles(const std::string& asset_a, const std::string& asset_b) {
+    GetCandlesMessage request;
+    request.asset_a = asset_a;
+    request.asset_b = asset_b;
+    enqueue(MessageType::GetCandles, tradep2p::encode_get_candles(request),
+            "requested price history for " + asset_a + "/" + asset_b);
 }
 
 void DashboardClient::create_offer(const TradeTerms& terms, const std::string& address) {
@@ -411,6 +428,31 @@ std::string DashboardClient::state_json() const {
     return json.str();
 }
 
+std::string DashboardClient::candles_json(const std::string& asset_a,
+                                          const std::string& asset_b) const {
+    std::scoped_lock lock(state_mutex_);
+    const auto it = candles_.find(candle_pair_key(asset_a, asset_b));
+    std::ostringstream json;
+    json << "{\"ok\":true";
+    if (it == candles_.end()) {
+        json << ",\"base\":\"\",\"quote\":\"\",\"ticks\":[]}";
+        return json.str();
+    }
+    const auto& data = it->second;
+    json << ",\"base\":\"" << json_escape(data.base_asset)
+         << "\",\"quote\":\"" << json_escape(data.quote_asset) << "\",\"ticks\":[";
+    for (std::size_t index = 0; index < data.ticks.size(); ++index) {
+        if (index != 0U) {
+            json << ',';
+        }
+        const auto& tick = data.ticks[index];
+        json << "{\"t\":" << tick.timestamp << ",\"base_amount\":" << tick.base_amount
+             << ",\"quote_amount\":" << tick.quote_amount << "}";
+    }
+    json << "]}";
+    return json.str();
+}
+
 void DashboardClient::enqueue(MessageType type,
                               std::vector<std::uint8_t> payload,
                               std::string description) {
@@ -588,6 +630,14 @@ void DashboardClient::handle_frame(const Frame& frame) {
             }
             add_event_locked("open-offer list updated: " + std::to_string(offers_.size()) +
                              " offer(s)");
+            break;
+        }
+        case MessageType::CandleData: {
+            const auto message = tradep2p::decode_candle_data(frame.payload);
+            const std::string key = candle_pair_key(message.base_asset, message.quote_asset);
+            add_event_locked("price history updated for " + key + ": " +
+                             std::to_string(message.ticks.size()) + " trade(s)");
+            candles_[key] = std::move(message);
             break;
         }
         case MessageType::OfferCancelled: {

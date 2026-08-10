@@ -152,6 +152,16 @@ in code the operator chose to run — a plugin's confirmation carries
 exactly the trust a human operator's manual confirmation did, no more, no
 less.
 
+The mediator also retains a small, bounded per-pair history of completed
+trades' implied prices (`quote_amount / base_amount`, keyed by whichever
+two assets a trade named, canonicalized so `A/B` and `B/A` rooms share one
+series) purely so a client can draw a price chart (`GetCandles`/
+`CandleData`, `lobby.cpp`'s `price_history_`) — explicitly **not** a market
+price oracle: it reflects only trades this one mediator happened to
+settle, self-reported by the parties like every other number here. The
+mediator never verifies amounts against any external truth for this any
+more than it does for settlement itself.
+
 ### 2.2 What this achieves, and what it doesn't
 
 **Acknowledgements are claims, not proofs.** When a party signals `sent`,

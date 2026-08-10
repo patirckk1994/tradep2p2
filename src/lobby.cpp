@@ -62,6 +62,12 @@ constexpr std::size_t kMaxPendingInvites = 256U;
 constexpr std::size_t kMaxInvitesPerClient = 16U;
 constexpr std::size_t kMaxQueuedFrames = 128U;
 constexpr int kConnectionIoTimeoutSeconds = 30;
+// price_history_'s per-pair series is already bounded by
+// kMaxCandleTicksPerPair (protocol.hpp); this bounds the number of
+// distinct pairs tracked at once, since asset codes are arbitrary
+// client-supplied strings with no registry to cap their variety. Evicts
+// the least-recently-traded pair on overflow - see record_completed_trade().
+constexpr std::size_t kMaxTrackedPairs = 500U;
 
 struct QueuedFrame {
     MessageType type{};
@@ -441,6 +447,16 @@ std::string configured_mediator_id(const Endpoint& bind_endpoint) {
         return override_value;
     }
     return bind_endpoint.host + ":" + std::to_string(bind_endpoint.port);
+}
+
+// TradeTerms has no canonical base/quote concept - asset_a/asset_b are
+// whichever order the room's creator happened to type. This merges a
+// room's "A/B" and another room's "B/A" into the same price_history_
+// series rather than silently splitting one real pair into two -
+// lexicographically smaller asset code is always base.
+std::pair<std::string, std::string> canonical_pair(const std::string& asset_a,
+                                                    const std::string& asset_b) {
+    return asset_a <= asset_b ? std::pair{asset_a, asset_b} : std::pair{asset_b, asset_a};
 }
 
 } // namespace
@@ -952,6 +968,9 @@ private:
             handle_room_relay(client, MessageType::ReceiptDisclosure,
                               decode_receipt_disclosure(frame.payload).room_id, frame.payload);
             return;
+        case MessageType::GetCandles:
+            handle_get_candles(client, decode_get_candles(frame.payload));
+            return;
         default:
             throw std::invalid_argument("message type is not accepted from clients");
         }
@@ -1038,6 +1057,75 @@ private:
             throw std::logic_error("encoded offer page exceeds frame limit");
         }
         client->enqueue(MessageType::OfferList, std::move(encoded));
+    }
+
+    // Public market data - the mediator's own retained price history for
+    // one asset pair (see price_history_/record_completed_trade()). No
+    // room/party check, same trust level as handle_list_offers() above:
+    // this reflects only trades this one mediator happened to settle,
+    // self-reported by the parties like everything else here - never an
+    // external price truth.
+    void handle_get_candles(const std::shared_ptr<Client>& client,
+                            const GetCandlesMessage& request) {
+        const auto [base, quote] = canonical_pair(request.asset_a, request.asset_b);
+        CandleDataMessage response;
+        response.base_asset = base;
+        response.quote_asset = quote;
+        {
+            std::scoped_lock lock(price_history_mutex_);
+            const auto it = price_history_.find(base + "/" + quote);
+            if (it != price_history_.end()) {
+                response.ticks.assign(it->second.begin(), it->second.end());
+            }
+        }
+
+        auto encoded = encode_candle_data(response);
+        if (encoded.size() > kMaxFramePayload) {
+            throw std::logic_error("encoded candle data exceeds frame limit");
+        }
+        client->enqueue(MessageType::CandleData, std::move(encoded));
+    }
+
+    // Called once a room genuinely completes (see handle_sent()/
+    // handle_received()/handle_confirm_fee()), always with room->session.
+    // terms() - fixed at room construction and never mutated afterward
+    // (mediator.hpp), so safe to read here without room->mutex, always
+    // after that lock has already been released (never held together with
+    // price_history_mutex_). Always the real trade's own TradeTerms, never
+    // a fee leg's amount/asset.
+    void record_completed_trade(const TradeTerms& terms) {
+        const auto [base, quote] = canonical_pair(terms.asset_a, terms.asset_b);
+        const bool swapped = terms.asset_a != base;
+        TradeTick tick;
+        tick.timestamp = now_unix_seconds();
+        tick.base_amount = swapped ? terms.total_b : terms.total_a;
+        tick.quote_amount = swapped ? terms.total_a : terms.total_b;
+
+        const std::string key = base + "/" + quote;
+        std::scoped_lock lock(price_history_mutex_);
+        auto it = price_history_.find(key);
+        if (it == price_history_.end()) {
+            if (price_history_.size() >= kMaxTrackedPairs) {
+                // Evict whichever tracked pair went longest without a new
+                // trade - a linear scan is fine at this bound
+                // (kMaxTrackedPairs), no need for a real LRU structure.
+                auto oldest = price_history_.begin();
+                for (auto candidate = price_history_.begin();
+                     candidate != price_history_.end(); ++candidate) {
+                    if (oldest->second.empty() ||
+                        (!candidate->second.empty() &&
+                         candidate->second.back().timestamp < oldest->second.back().timestamp)) {
+                        oldest = candidate;
+                    }
+                }
+                price_history_.erase(oldest);
+            }
+            it = price_history_.emplace(key, std::deque<TradeTick>{}).first;
+        }
+        it->second.push_back(tick);
+        while (it->second.size() > kMaxCandleTicksPerPair) {
+            it->second.pop_front();
+        }
     }
 
     void handle_join_offer(const std::shared_ptr<Client>& client,
@@ -1335,6 +1423,11 @@ private:
         }
 
         if (complete) {
+            // terms() is fixed at room construction and never mutated
+            // afterward (mediator.hpp) - safe to read here with room->mutex
+            // already released, and always the real trade's own terms,
+            // never the fee leg's.
+            record_completed_trade(room->session.terms());
             persist_room_remove(room->id);
             erase_room(room->id, room);
             if (completion_receipt.has_value()) {
@@ -1403,6 +1496,7 @@ private:
             completion_receipt = issue_receipt(*room, ReceiptStage::SettlementCompleted, true);
         }
 
+        record_completed_trade(room->session.terms());
         persist_room_remove(room->id);
         erase_room(room->id, room);
         if (completion_receipt.has_value()) {
@@ -1505,6 +1599,7 @@ private:
         }
 
         if (complete) {
+            record_completed_trade(room->session.terms());
             persist_room_remove(room->id);
             erase_room(room->id, room);
             if (completion_receipt.has_value()) {
@@ -2559,6 +2654,13 @@ private:
     int (*fee_plugin_check_)(const tradep2p_fee_check_request*){nullptr};
     std::atomic<bool> fee_plugin_running_{false};
     std::thread fee_plugin_thread_;
+    // Bounded per-pair completed-trade price history - see
+    // record_completed_trade()/handle_get_candles(). Key is "base/quote"
+    // (canonical_pair()'s output joined with '/'); never persisted to
+    // disk, so this resets on every mediator restart like everything else
+    // that isn't explicitly opted into persistence in this file.
+    std::unordered_map<std::string, std::deque<TradeTick>> price_history_;
+    mutable std::mutex price_history_mutex_;
     std::atomic<std::size_t> pending_handshakes_{0U};
     std::mutex hub_mutex_;
     std::unordered_map<std::string, std::shared_ptr<Client>> clients_;

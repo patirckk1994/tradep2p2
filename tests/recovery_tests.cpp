@@ -168,6 +168,12 @@ void test_message_type_bounds() {
     // Optional fee-confirmation gate added FeeConfirmationPending(38) - see
     // mediator.hpp's SessionState::WaitingForFeeConfirmation.
     tradep2p::validate_message_type(tradep2p::MessageType::FeeConfirmationPending);
+    // The mediator's retained price history added GetCandles(39)/
+    // CandleData(40) as the new contiguous top of the range - see
+    // tests/protocol_tests.cpp's test_candle_serialization() for their own
+    // encode/decode coverage.
+    tradep2p::validate_message_type(tradep2p::MessageType::GetCandles);
+    tradep2p::validate_message_type(tradep2p::MessageType::CandleData);
 
     // Anything past the new upper bound must still be rejected - this is
     // the mechanism that lets an OLDER build (or, symmetrically, a build
@@ -177,7 +183,7 @@ void test_message_type_bounds() {
     // never wrapped or reinterpreted.
     bool threw = false;
     try {
-        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(39));
+        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(41));
     } catch (const std::invalid_argument&) {
         threw = true;
     }
