@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -280,6 +281,13 @@ private:
     bool connected_{false};
     std::string connection_status_{"connecting"};
     std::string client_id_;
+    // Network telemetry - set() on every successful connect, reset() on
+    // disconnect (see set_disconnected()); state_json() uses it to report
+    // the current session's uptime. Cumulative across reconnects: the
+    // frame/byte counters below, which live outside state_mutex_ since
+    // they're only ever incremented, never read-modify-written together
+    // with the rest of this locked state.
+    std::optional<std::chrono::steady_clock::time_point> connected_since_;
     // Crypto telemetry: this connection's live TLS session summary (§ note
     // on TlsSessionInfo - display only, the trust decision already happened
     // inside SecureChannel::make_client() before this session even exists).
@@ -322,6 +330,20 @@ private:
 
     std::mutex queue_mutex_;
     std::deque<OutgoingFrame> outgoing_;
+
+    // Network telemetry: cumulative since process start, across reconnects.
+    // Every send_frame()/receive_frame() call this client makes is counted
+    // at its call site (worker_loop's welcome + initial ListOffers,
+    // session_loop's receive loop, flush_outgoing's send loop) - plain
+    // atomics rather than state_mutex_ since these are increment-only and
+    // read together with connected_since_ (under state_mutex_) only for
+    // display in state_json(), never modified as part of any of the locked
+    // state transitions above.
+    std::atomic<std::uint64_t> frames_sent_total_{0U};
+    std::atomic<std::uint64_t> frames_received_total_{0U};
+    std::atomic<std::uint64_t> payload_bytes_sent_total_{0U};
+    std::atomic<std::uint64_t> payload_bytes_received_total_{0U};
+    std::atomic<std::uint64_t> connection_count_{0U};
 };
 
 } // namespace tradep2p::dashboard

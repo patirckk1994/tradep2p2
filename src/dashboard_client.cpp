@@ -427,7 +427,35 @@ std::string DashboardClient::state_json() const {
         }
         json << '"' << json_escape(events_[index]) << '"';
     }
-    json << "]}";
+    json << "]";
+
+    // Network telemetry - see the frames_*_total_/payload_bytes_*_total_
+    // members' comment: cumulative since process start, across reconnects.
+    // header_bytes is derived here (frame count * kFrameHeaderSize) rather
+    // than tracked separately, since the header is a fixed size and this is
+    // the one place it's reported.
+    std::uint64_t connection_seconds = 0U;
+    if (connected_since_.has_value()) {
+        connection_seconds = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - *connected_since_)
+                .count());
+    }
+    const std::uint64_t frames_sent = frames_sent_total_.load();
+    const std::uint64_t frames_received = frames_received_total_.load();
+    const std::uint64_t payload_bytes_sent = payload_bytes_sent_total_.load();
+    const std::uint64_t payload_bytes_received = payload_bytes_received_total_.load();
+    const std::uint64_t header_bytes =
+        (frames_sent + frames_received) * static_cast<std::uint64_t>(kFrameHeaderSize);
+    json << ",\"traffic\":{"
+         << "\"frames_sent\":" << frames_sent
+         << ",\"frames_received\":" << frames_received
+         << ",\"payload_bytes_sent\":" << payload_bytes_sent
+         << ",\"payload_bytes_received\":" << payload_bytes_received
+         << ",\"header_bytes\":" << header_bytes
+         << ",\"connection_count\":" << connection_count_.load()
+         << ",\"connection_seconds\":" << connection_seconds
+         << "}}";
     return json.str();
 }
 
@@ -509,6 +537,7 @@ void DashboardClient::set_disconnected(const std::string& reason) {
         std::scoped_lock lock(state_mutex_);
         connected_ = false;
         connection_status_ = reason;
+        connected_since_.reset();
         add_event_locked(reason);
     }
     {
@@ -525,6 +554,8 @@ void DashboardClient::worker_loop() {
                 : SecureChannel::connect_direct(mediator_, tls_policy_);
             channel.set_timeout(30U);
             const Frame welcome_frame = channel.receive_frame();
+            ++frames_received_total_;
+            payload_bytes_received_total_ += welcome_frame.payload.size();
             if (welcome_frame.type != MessageType::Welcome) {
                 throw std::runtime_error("mediator did not send a welcome message");
             }
@@ -533,6 +564,7 @@ void DashboardClient::worker_loop() {
                 std::scoped_lock lock(state_mutex_);
                 connected_ = true;
                 connection_status_ = "connected";
+                connected_since_ = std::chrono::steady_clock::now();
                 client_id_ = tradep2p::client_id_to_hex(welcome.client_id);
                 mediator_fee_ = welcome.fee;
                 tls_session_ = channel.session_info();
@@ -540,8 +572,11 @@ void DashboardClient::worker_loop() {
                 rooms_.clear();
                 add_event_locked("connected as anonymous client " + client_id_);
             }
-            channel.send_frame(MessageType::ListOffers,
-                               tradep2p::encode_list_offers(ListOffersMessage{}));
+            ++connection_count_;
+            const auto list_offers_payload = tradep2p::encode_list_offers(ListOffersMessage{});
+            channel.send_frame(MessageType::ListOffers, list_offers_payload);
+            ++frames_sent_total_;
+            payload_bytes_sent_total_ += list_offers_payload.size();
             session_loop(channel);
         } catch (const std::exception& error) {
             if (!stop_.load()) {
@@ -571,12 +606,16 @@ void DashboardClient::session_loop(SecureChannel& channel) {
         }
         if (pending || (descriptor.revents & POLLIN) != 0) {
             do {
-                handle_frame(channel.receive_frame());
+                Frame frame = channel.receive_frame();
+                ++frames_received_total_;
+                payload_bytes_received_total_ += frame.payload.size();
+                handle_frame(frame);
             } while (channel.has_pending_input());
         }
     }
     try {
         channel.send_frame(MessageType::Disconnect, {});
+        ++frames_sent_total_;
     } catch (...) {
     }
 }
@@ -589,6 +628,8 @@ void DashboardClient::flush_outgoing(SecureChannel& channel) {
     }
     for (const auto& frame : frames) {
         channel.send_frame(frame.type, frame.payload);
+        ++frames_sent_total_;
+        payload_bytes_sent_total_ += frame.payload.size();
         std::scoped_lock lock(state_mutex_);
         add_event_locked(frame.description);
     }

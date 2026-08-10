@@ -134,6 +134,13 @@ From the browser you can:
 - mark a transfer as externally verified and received;
 - abort a room;
 - see a local event stream;
+- see network telemetry for your own connection to the mediator: frames and
+  payload bytes sent/received, exact framing overhead (each frame has a fixed
+  20-byte header — `kFrameHeaderSize` — so overhead is computed exactly, not
+  estimated), average throughput this session, and connections since launch.
+  This is traffic to your one connected mediator only — this client has no
+  view of the wider mediator/registry mesh, so there's no "network health"
+  metric here, just an honest account of your own connection;
 - optionally see privacy-reduced mediator metrics and active-room state;
 - manage a local keystore, counterparty history, and (once you've traded)
   mediator-signed receipts — see
