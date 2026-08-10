@@ -1500,10 +1500,16 @@ void run_client(SecureChannel channel, std::string mediator_id) {
 
 void run_registry_heartbeat(Endpoint registry,
                             ClientTlsPolicy registry_tls,
-                            RegistryNode node) {
+                            RegistryNode node,
+                            std::optional<Endpoint> socks_proxy = std::nullopt) {
     for (;;) {
         try {
-            tradep2p::register_node_once(registry, registry_tls, node);
+            if (socks_proxy.has_value()) {
+                tradep2p::register_node_once_via_socks5(*socks_proxy, registry, registry_tls,
+                                                        node);
+            } else {
+                tradep2p::register_node_once(registry, registry_tls, node);
+            }
             std::this_thread::sleep_for(std::chrono::seconds(60));
         } catch (const std::exception& error) {
             std::cerr << "registry heartbeat failed: " << error.what() << '\n';
@@ -1540,6 +1546,10 @@ void print_usage(const char* program) {
         << "  " << program
         << " mediator-registered <bind:port> <node-cert.pem> <node-key.pem> "
            "<registry:port> <registry-cert-sha256> <advertised-node:port> <node-cert-sha256>\n"
+        << "  " << program
+        << " mediator-registered-tor <proxy:port> <bind:port> <node-cert.pem> <node-key.pem> "
+           "<registry-onion:port> <registry-cert-sha256> <advertised-node:port> "
+           "<node-cert-sha256>\n"
         << "  " << program
         << " client <node:port> <node-cert-sha256>\n"
         << "  " << program
@@ -1690,11 +1700,39 @@ int main(int argc, char** argv) {
                 advertised.port,
                 tradep2p::certificate_pin_from_hex(argv[8]),
                 0U};
-            std::thread(run_registry_heartbeat, registry, registry_tls, node).detach();
+            std::thread(run_registry_heartbeat, registry, registry_tls, node, std::nullopt)
+                .detach();
 
             LobbyServer server(
                 parse_endpoint(argv[2]),
                 ServerTlsIdentity{argv[3], argv[4]});
+            server.run();
+        } else if (mode == "mediator-registered-tor") {
+            // Same as mediator-registered, but the registry connection (both
+            // the initial registration and every 60s heartbeat) goes through
+            // a SOCKS5 proxy instead of a direct connection - for an
+            // onion-only registry a mediator cannot otherwise dial. The
+            // mediator's own inbound listener is unaffected either way; only
+            // the outbound registry leg is proxied, exactly like
+            // client-tor only proxies the connection to the mediator, not
+            // anything else.
+            if (argc != 10) {
+                throw std::invalid_argument("wrong mediator-registered-tor argument count");
+            }
+            const Endpoint proxy = parse_endpoint(argv[2]);
+            const Endpoint registry = parse_endpoint(argv[6]);
+            const ClientTlsPolicy registry_tls{argv[7]};
+            const Endpoint advertised = parse_endpoint(argv[8]);
+            const RegistryNode node{
+                advertised.host,
+                advertised.port,
+                tradep2p::certificate_pin_from_hex(argv[9]),
+                0U};
+            std::thread(run_registry_heartbeat, registry, registry_tls, node, proxy).detach();
+
+            LobbyServer server(
+                parse_endpoint(argv[3]),
+                ServerTlsIdentity{argv[4], argv[5]});
             server.run();
         } else if (mode == "client") {
             if (argc != 4) {

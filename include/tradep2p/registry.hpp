@@ -27,6 +27,15 @@ void register_node_once(const Endpoint& registry,
                         const ClientTlsPolicy& registry_tls,
                         const RegistryNode& node);
 
+// Same as register_node_once(), reached through a SOCKS5 proxy (e.g. Tor)
+// instead of a direct connection - the registry-side counterpart of
+// list_registered_nodes_via_socks5() below, needed so a mediator can
+// register with an onion-only registry it cannot otherwise dial directly.
+void register_node_once_via_socks5(const Endpoint& proxy,
+                                   const Endpoint& registry,
+                                   const ClientTlsPolicy& registry_tls,
+                                   const RegistryNode& node);
+
 [[nodiscard]] RegistryNodesMessage list_registered_nodes(
     const Endpoint& registry,
     const ClientTlsPolicy& registry_tls);
