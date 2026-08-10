@@ -608,16 +608,27 @@ or hostname is supplied through the command line. Registrations expire after
 300 seconds. Every listed mediator carries its own SHA-256 certificate pin,
 which clients still verify when connecting.
 
-**Registration is currently unauthenticated** — anything with an unclaimed
-`host:port` can list itself, and the registry has no way to confirm the
-registrant actually controls that endpoint. This was already true for the
-base trading protocol; it matters more now that the identity layer exists,
-since a squatted mediator can issue syntactically valid, correctly-signed
-receipts for trades that never involved real value. The client-side
-trust-on-first-use pinning described under
-[receipts](#6-mediator-signed-receipts-and-the-withholding-fix) is the
-practical mitigation available today, not a substitute for fixing this
-(`specs.txt` §15).
+**Registration itself is still unauthenticated** — anything with an
+unclaimed `host:port` can register, and the registry has no cryptographic
+way to confirm the registrant actually controls that endpoint. What *has*
+changed: a new registration starts `Pending` and stays invisible to every
+caller until an operator explicitly approves it (`--admin-token`,
+`LISTPENDING`/`APPROVE`/`REJECT` below) — so nothing reaches you without a
+human deciding so first, even though that approval itself doesn't
+cryptographically prove endpoint control either (an operator who approves
+without actually checking gains nothing over the old fully-open default).
+The client-side trust-on-first-use pinning described under
+[receipts](#6-mediator-signed-receipts-and-the-withholding-fix) remains the
+real mitigation, not a substitute for closing this properly (`specs.txt`
+§1.3).
+
+**Approving pending registrations.** Set `--admin-token`
+(`setup_registry.sh`) or `TRADEP2P_REGISTRY_ADMIN_TOKEN` directly to enable
+a loopback-only admin channel, then either drive it with the raw line
+protocol (`LISTPENDING <token>`, `APPROVE <token> HOST PORT`, `REJECT
+<token> HOST PORT`) or use `tradep2p-registry-dashboard`'s Pending panel
+(pass it the same `--admin-token`/`--admin-port`), which shows the same
+listing with Approve/Reject buttons.
 
 Start a registry:
 
@@ -649,6 +660,38 @@ export TRADEP2P_REGISTRY_STATE_FILE="$PWD/logs/registry-state.json"
 ./build/tradep2p_cli registry 0.0.0.0:7555 registry.cert.pem registry.key.pem &
 ./build/tradep2p-registry-dashboard "$PWD/logs/registry-state.json" --port 8092
 ```
+
+### Federating registries
+
+A single registry is a single point of failure for discovery — if it goes
+down, nothing using only it can find a mediator anymore. Gossip federation
+lets a registry pull from a small list of peer registries so no one of them
+is a hard dependency, without any new wire protocol: a registry becomes a
+*client* of its peers, periodically issuing the same `RegistryList` request
+`nodes`/`nodes-tor` already make, and caching what comes back separately
+from (and without ever counting against) its own direct-registration
+capacity.
+
+```sh
+./setup_registry.sh \
+  --gossip-peer "peer-one.example:7555|PEER_ONE_PIN" \
+  --gossip-peer "peer-two.onion:7555|PEER_TWO_PIN|1" \
+  --gossip-proxy 127.0.0.1:9050
+```
+
+Each `--gossip-peer` is `HOST:PORT|PIN`, optionally followed by `|1` to
+auto-trust that peer's own approval outright (its already-approved entries
+merge into your listings immediately, tagged with that peer as their
+source) — omit it (the default, as with `peer-one` above) and a
+peer-learned entry sits `Pending` here too, needing your own
+`--admin-token` approval first, exactly like a direct registration.
+`--gossip-proxy` is one shared SOCKS5 proxy used for any peer whose host
+ends in `.onion` (like `peer-two` above) — required if any peer is
+onion-only, unused otherwise. **Single-hop only**: this registry never
+re-shares what it learns from a peer with anyone else — reach is exactly
+your configured peers' own direct registrations, nothing further, and
+choosing to configure a peer at all is the real trust decision this rests
+on, not something gossip re-verifies on its own.
 
 ### Tutorial: finding a mediator through someone else's registry
 

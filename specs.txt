@@ -85,14 +85,48 @@ threads, not an unbounded surface.
 
 ### 1.3 Registry and discovery
 
-The registry is an unauthenticated directory today: a `RegistryRegister`
-message names a `host:port` and a certificate pin, and it is accepted and
-listed to every `RegistryList` caller as long as that endpoint isn't
-already registered under a *different* pin. This prevents an unauthenticated
-refresh from silently hijacking a live entry's pin, but does **not** prove
-the registrant controls the endpoint it's claiming, and does not prevent
-initial squatting on an unclaimed address. This is a known, open gap — see
-§10.
+Registration itself is still unauthenticated: a `RegistryRegister` message
+names a `host:port` and a certificate pin, accepted as long as that endpoint
+isn't already registered under a *different* pin (prevents an
+unauthenticated refresh from silently hijacking a live entry's pin, but does
+**not** prove the registrant controls the endpoint it's claiming, and does
+not prevent initial squatting on an unclaimed address). What changed since
+this was first written: a new registration now starts `Pending` and is
+invisible to every `RegistryList` caller and the public state snapshot
+until an operator explicitly `APPROVE`s it over a loopback admin channel
+(`TRADEP2P_REGISTRY_ADMIN_TOKEN`, `LISTPENDING`/`APPROVE`/`REJECT` -
+`registry.cpp`). This does not cryptographically close the underlying gap
+(an operator who approves carelessly, without actually checking the
+endpoint, gains nothing over the old unauthenticated-by-default behavior),
+but it does mean nothing reaches a real caller without a human (or, per
+gossip federation below, an explicitly-configured trust relationship)
+deciding so first, rather than automatically. `kMaxRegistryNodes` (16)
+caps a single registry's own direct registrations - deliberately small,
+this is meant to stay a personally-curated list, not scale-up
+infrastructure.
+
+**Gossip federation** (`registry.cpp`'s `gossip_loop()`) lets a registry
+pull from a small, explicitly-configured list of peer registries
+(`TRADEP2P_REGISTRY_GOSSIP_PEERS`) so no single registry is a hard
+dependency for discovery. Deliberately minimal: no new wire protocol - a
+registry becomes a *client* of its peers, periodically issuing the exact
+same `RegistryList` request `nodes`/`nodes-tor` already make, and caching
+what comes back in a separate, independently-bounded pool
+(`gossip_entries_`, `kMaxGossipCachedNodes`) so peering can never crowd out
+an operator's own direct-registration capacity. Single-hop only: a
+registry re-shares only its own directly-registered, approved entries with
+its peers, never anything it learned from elsewhere - reach is exactly
+your configured peers' own direct registrations, never further, and there
+is no hop-count, flooding, or amplification risk to reason about as a
+result. Trust relay is per-peer and operator-chosen, not a network-wide
+default: `auto_trust` merges a peer's already-approved entries in directly
+(tagged with `source_registry` so a caller can tell "this registry
+personally vetted this" from "this registry is relaying it from a peer it
+trusts"); its absence (the default) means a peer-learned entry sits
+`Pending` here too, needing this registry's own admin to separately
+approve it, exactly like a direct registration would. Choosing to
+configure a peer at all is the actual trust decision this design rests
+on - gossip re-verifies nothing on its own.
 
 ### 1.4 Offer book and room lifecycle
 
