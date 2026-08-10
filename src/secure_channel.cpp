@@ -564,7 +564,7 @@ void SecureChannel::send_frame(MessageType type,
         throw std::invalid_argument("frame payload exceeds hard limit");
     }
 
-    std::array<std::uint8_t, 20> header{};
+    std::array<std::uint8_t, kFrameHeaderSize> header{};
     header[0] = 'T';
     header[1] = 'P';
     header[2] = '2';
@@ -605,7 +605,7 @@ Frame SecureChannel::receive_frame() {
         throw std::logic_error("channel is closed");
     }
 
-    std::array<std::uint8_t, 20> header{};
+    std::array<std::uint8_t, kFrameHeaderSize> header{};
     ssl_read_exact(ssl_, header);
 
     if (header[0] != 'T' || header[1] != 'P' ||

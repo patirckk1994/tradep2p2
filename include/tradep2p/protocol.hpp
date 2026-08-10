@@ -11,6 +11,12 @@
 namespace tradep2p {
 
 constexpr std::uint16_t kProtocolVersion = 5;
+// Wire size of SecureChannel's per-frame header (4-byte magic, 2-byte
+// version, 2-byte type, 8-byte sequence, 4-byte length - see
+// SecureChannel::send_frame/receive_frame). Named here so anything counting
+// on-wire overhead (e.g. dashboard traffic telemetry) references the same
+// constant the framing code itself uses, rather than duplicating the literal.
+constexpr std::size_t kFrameHeaderSize = 20;
 // Raised from 4096: an ML-DSA-65 (post-quantum) recognition response needs
 // a 1952-byte public key + a 3309-byte signature (>5.2KB) alone, which the
 // old cap couldn't fit. Confirmed safe to raise: the receive-side buffer is

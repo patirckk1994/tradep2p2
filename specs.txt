@@ -69,12 +69,19 @@ SHA-256 certificate pinning. No client certificates are requested. Optional
 SOCKS5 transport supports onion (Tor) endpoints for both mediator and
 client.
 
-Framing is a fixed 20-byte header (magic, protocol version, message type,
-per-connection sequence number, payload length) followed by up to 4096
-bytes of payload — a hard cap enforced on both send and receive. Sequence
-numbers are per-connection and reset on every new TLS connection, so they
-cannot serve as a cross-session nonce for anything outside that one
-connection.
+Framing is a fixed 20-byte header (`kFrameHeaderSize`; magic, protocol
+version, message type, per-connection sequence number, payload length)
+followed by up to `kMaxFramePayload` (131072) bytes of payload — a hard cap
+enforced on both send and receive. Sequence numbers are per-connection and
+reset on every new TLS connection, so they cannot serve as a cross-session
+nonce for anything outside that one connection.
+
+`tradep2p-dashboard`'s network telemetry panel counts frames and payload
+bytes sent/received over its one mediator connection and reports the exact
+framing overhead (frame count × `kFrameHeaderSize`, since the header is a
+fixed size, not estimated). This is a local accounting of this client's own
+traffic only — it is not, and does not attempt to be, a measure of the
+wider mediator/registry mesh, which this client has no visibility into.
 
 Connection admission is bounded, not unbounded thread-per-connection as it
 might first appear: in-flight TLS handshakes are capped
