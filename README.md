@@ -570,18 +570,36 @@ precise about which is covered:
   standardized post-quantum signature, instead of RSA/ECDSA.
 
 The application-layer signed objects — recognition, receipts, disclosure,
-login — are Ed25519 by default, and mostly still Ed25519-only. **Counterparty
-recognition** (phase 4b — [§4](#4-counterparty-recognition)) is the one exception: it now supports
-an optional `ML-DSA-65` suite alongside Ed25519, selected per-challenge
-(`/recognize ROOM_ID ml-dsa-65` on the CLI). A prover answers under
-whichever suite the challenge named — never a suite of its own choosing —
-and the wire frame cap was raised from 4096 to 8192 bytes to fit an
-ML-DSA-65 public key (1952 bytes) and signature (3309 bytes), which don't
-fit the old limit. Receipts, disclosure, and login remain classical-only for
-now — explicitly out of scope for this change, not overlooked; receipts in
-particular matter more than most keys here since they're meant to stay
-verifiable for years, so that's the natural next candidate. Full posture and
-reasoning: `specs.txt` §11.
+ephemeral trade messages, login — have all been migrated to include
+`ML-DSA-65` (FIPS 204) alongside Ed25519, though not all identically: the
+wire frame cap was raised from 4096 to 8192 bytes across the board to fit
+an ML-DSA-65 public key (1952 bytes) and signature (3309 bytes), which
+don't fit the old limit.
+
+- **Counterparty recognition** (phase 4b — [§4](#4-counterparty-recognition))
+  supports an optional `ML-DSA-65` suite alongside Ed25519, selected
+  per-challenge (`/recognize ROOM_ID ml-dsa-65` on the CLI). A prover
+  answers under whichever suite the challenge named — never a suite of its
+  own choosing.
+- **Mediator receipts and selective disclosure** are hybrid and
+  *mandatory*, not a switchable suite: every receipt is signed by the
+  mediator with both Ed25519 and ML-DSA-65, and a receiving client must
+  verify both signatures for a receipt to count as valid. This is
+  deliberately the strictest of the migrations — receipts are meant to
+  stay verifiable for years, so downgrading to "either signature will do"
+  would quietly reintroduce the classical break the migration exists to
+  close.
+- **Per-trade ephemeral message signing** (address exchange, `/sent`,
+  `/received`) is likewise hybrid and mandatory — both parties sign with
+  both an Ed25519 and an ML-DSA-65 ephemeral keypair generated fresh per
+  room, and a counterparty must verify both.
+- **Login, journal checkpoints, and keystore identity** use an additive
+  suite instead: `ML-DSA-65` is the new default, with Ed25519 retained as
+  an explicit legacy option — lower urgency than receipts (single-shot,
+  locally verified, not long-lived third-party evidence), so a switchable
+  suite was the right tradeoff rather than mandatory hybrid.
+
+Full posture and reasoning: `specs.txt` §11.
 
 ## Semi-centralized node registry
 
@@ -828,9 +846,6 @@ directory.
   loses that room's signing key (already-issued receipts remain valid and
   disclosable regardless, since verifying them needs only the embedded
   public key);
-- mediator receipt-signing keys are classical Ed25519 only, not yet
-  post-quantum (unlike the TLS transport's key exchange and certificate
-  authentication, which already are);
 - unlinkable aggregate disclosure (blind-signed completion tokens) is
   documented future work, not implemented — no pairing-friendly curve
   support in this dependency set, and naive blind Schnorr over Ed25519 is

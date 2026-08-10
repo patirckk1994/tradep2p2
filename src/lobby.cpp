@@ -597,12 +597,12 @@ public:
           require_fee_confirmation_(configured_require_fee_confirmation()),
           fee_position_(configured_fee_position()),
           fee_persist_file_(configured_fee_persist_file()),
-          fee_plugin_path_(configured_fee_plugin_path()),
           mediator_auth_port_(configured_mediator_auth_port()),
           mediator_auth_keypair_(
               mediator_auth_port_.has_value()
                   ? load_or_create_mediator_auth_key(configured_mediator_auth_key_file())
-                  : MlDsa65KeyPair{}) {}
+                  : MlDsa65KeyPair{}),
+          fee_plugin_path_(configured_fee_plugin_path()) {}
 
     ~Impl() {
         snapshot_running_.store(false);

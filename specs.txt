@@ -631,14 +631,15 @@ mechanisms in §7-9.2.** It remains a documented future direction:
 | 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
 | 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
 | 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
-| — | Post-quantum migration (§11) | **Partially implemented** — TLS hybrid key exchange done, TLS server-certificate signatures now ML-DSA-65 (setup scripts); receipt-signing hybrid Ed25519+ML-DSA is now unblocked (phase 6 has landed) but still not implemented | `secure_channel.cpp`, `setup_mediator.sh`, `setup_registry.sh` |
+| — | Post-quantum migration (§11) | **Implemented** — TLS hybrid key exchange, TLS server-certificate signatures (ML-DSA-65), receipts/disclosure/ephemeral messages (mandatory Ed25519+ML-DSA-65 hybrid), login/journal/keystore (additive ML-DSA-65-default suite); only §9.3's blind signatures remain structurally unimplementable | `secure_channel.cpp`, `receipt.hpp/cpp`, `disclosure.hpp/cpp`, `ephemeral.hpp/cpp`, `login.hpp/cpp`, `journal.hpp/cpp`, `keystore.hpp/cpp`, `setup_mediator.sh`, `setup_registry.sh` |
 
-Eleven ctest binaries currently pass end-to-end against phases 1-9:
+Twelve ctest binaries currently pass end-to-end against phases 1-9:
 `tradep2p_unit_tests`, `tradep2p_identity_tests`, `tradep2p_keystore_tests`,
 `tradep2p_journal_tests`, `tradep2p_recovery_tests`,
 `tradep2p_history_tests`, `tradep2p_recognition_tests`,
 `tradep2p_ephemeral_tests`, `tradep2p_receipt_tests`,
-`tradep2p_login_tests`, `tradep2p_disclosure_tests`. CLI (`tradep2p_cli`)
+`tradep2p_login_tests`, `tradep2p_disclosure_tests`,
+`tradep2p_mediator_auth_tests`. CLI (`tradep2p_cli`)
 and dashboard (`tradep2p-dashboard`, `tradep2p-mediator-dashboard`) wiring
 for phases 2-6 has been exercised live over real TLS connections through an
 actual mediator process, not only unit-tested — including: phase 5's
@@ -691,11 +692,13 @@ piece of work.
 ## 11. Post-quantum posture
 
 *The urgent, key-exchange half is implemented (`secure_channel.cpp`'s
-`harden_context()`). The receipt-signing hybrid (Ed25519+ML-DSA) is no
-longer gated on anything unbuilt - receipts (§9.1) shipped - but remains
-itself unimplemented; §9.3's blind signatures remain structurally future
-work regardless of scheduling (see below). This section states the posture
-so it isn't lost.*
+`harden_context()`). The application-layer signature migration described
+below as "the honest next post-quantum item" has since shipped: receipts,
+selective disclosure, and per-trade ephemeral message signing are now
+mandatory Ed25519+ML-DSA-65 hybrid, and login/journal/keystore identity use
+an additive ML-DSA-65-default suite. §9.3's blind signatures remain
+structurally future work regardless of scheduling (see below). This section
+states the posture so it isn't lost.*
 
 Migration splits into three groups with very different urgency:
 
@@ -737,21 +740,37 @@ certificate) is already algorithm-agnostic. Confirmed with a live handshake
 in this environment (`openssl s_server`/`s_client -groups
 X25519MLKEM768:...` against an ML-DSA-65 cert reports `Peer signature type:
 mldsa65`) and exercised through the real mediator/client binaries. **Mediator-
-signed receipts (§9.1) are the second exception**, because they are
-designed to stay verifiable for years. When a cryptographically relevant
-quantum computer arrives, an Ed25519-only receipt corpus becomes forgeable
-wholesale, retroactively. Mediator receipt-signing keys should be hybrid
-Ed25519+ML-DSA from their first shipped version, not migrated later — this
-remains unimplemented; receipts (§9.1, phase 6) now exist and issue real
-mediator signatures (`receipt.hpp`'s `generate_mediator_receipt_keypair()`
-is Ed25519-only today), so this is no longer blocked on anything, it is
-simply not yet done - the honest next post-quantum item. Identity/
-login/ephemeral keys carry low urgency by comparison — ML-DSA keygen takes
-a 32-byte seed, so the existing HKDF-derived key hierarchy (§5) does not
-need to change shape to support a hybrid pair later. Phase 4b's recognition
-challenge already carries a `suite_id` field (`recognition.hpp`,
-`kRecognitionSuiteEd25519V1 = 0x0001`) for exactly this reason — a future
-hybrid suite is an additive `suite_id`, not a reissue of the verifier.
+signed receipts and selective disclosure (§9.1, §9.2) are the second
+exception**, because they are designed to stay verifiable for years - when a
+cryptographically relevant quantum computer arrives, an Ed25519-only
+receipt corpus becomes forgeable wholesale, retroactively. This is now
+implemented, and mandatory rather than a switchable suite
+(`kReceiptSuiteEd25519MlDsa65HybridV1 = 0x0002`): every receipt is signed
+by the mediator with both `sign_receipt()` and `sign_receipt_mldsa65()`,
+and `verify_receipt_hybrid()` requires both signatures to pass - a receipt
+with only a valid Ed25519 signature does not verify. Deliberately not a
+switchable `suite_id` the way recognition (below) is: downgrading a
+long-lived receipt to "either signature will do" would quietly
+reintroduce the exact classical break this migration exists to close.
+Selective disclosure (§9.2) inherits the same hybrid-mandatory treatment,
+since a disclosed chain is only as trustworthy as the receipts inside it.
+**Per-trade ephemeral message signing (§5) is the third exception**, for
+the same "long-lived evidence" reason once a room's messages might be
+disclosed later - also implemented as mandatory hybrid: each party
+generates both an Ed25519 and an ML-DSA-65 ephemeral keypair per room, and
+verification requires both.
+
+Identity/login/journal/keystore keys carry lower urgency by comparison -
+single-shot or locally-verified, not long-lived third-party evidence like
+receipts - so these use an additive suite instead of mandatory hybrid:
+ML-DSA-65 is the new default, Ed25519 retained as an explicit legacy
+option, mirroring recognition's own `suite_id` pattern rather than
+receipts'. ML-DSA keygen takes a 32-byte seed, so the existing
+HKDF-derived key hierarchy (§5) did not need to change shape to support
+this. Phase 4b's recognition challenge already carries a `suite_id` field
+(`recognition.hpp`, `kRecognitionSuiteEd25519V1 = 0x0001`) for exactly
+this reason — a hybrid or additive suite is an additive `suite_id`, not a
+reissue of the verifier.
 
 **Symmetric and hash primitives need nothing.** AES-256-GCM,
 ChaCha20-Poly1305, SHA-256, Argon2id, HMAC/checkpoint authentication all
