@@ -471,12 +471,16 @@ CLI-only for now).
 
 **Security tier (`tradep2p-dashboard` only, `specs.txt` §8.6):** two
 checkboxes in the identity panel, both off by default. "Persistent
-identity" auto-fires recognition in every room instead of a manual click
-per room — correlation is the point here, not a side effect, for a user who
-wants a counterparty to be able to recognize them and build reputation.
-"Global" goes further and reuses the *same* pseudonym across every mediator
-you connect through, not just one (a new key-derivation scope, same HKDF
-mechanism as everything else — not new cryptography). A third, disabled
+identity" lets you answer a challenge with the same key at all — leave it
+off and every challenge is declined automatically, indistinguishable from
+not having a keystore. Proactively announcing yourself to a counterparty is
+still the same manual "Recognize counterparty" click as always; correlation
+is the point here, not a side effect, for a user who wants a counterparty
+to be able to recognize them and build reputation, but it stays a per-room
+choice, not a standing policy. "Global" goes further and reuses the *same*
+pseudonym across every mediator you connect through, not just one (a new
+key-derivation scope, same HKDF mechanism as everything else — not new
+cryptography). A third, disabled
 checkbox documents blind-signature unlinkable credentials as not
 implemented rather than omitting them silently.
 

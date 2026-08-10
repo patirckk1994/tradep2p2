@@ -564,17 +564,19 @@ user pick their own point on it. `tradep2p-dashboard`'s identity panel
 exposes this directly, off by default:
 
 - **Persistent identity** (`IdentityDashboardState::persistent_identity_
-  enabled`) — automatically proves the same recognition key (§8.2) in every
-  room instead of requiring a manual per-room click, and gates the
-  auto-*answer* path the same way. Before this flag existed, an unlocked
-  keystore alone was sufficient to auto-answer any incoming challenge,
-  regardless of whether the user had ever opted into being recognized —
-  meaning unlocking a keystore for an unrelated feature (journal/receipts)
-  silently exposed a persistent identity to anyone who challenged it. That
-  gap is now closed: declining because this flag is off is indistinguishable
-  on the wire from declining because no keystore is unlocked at all, so
-  §8.4's "no key presented" framing still holds for a user who leaves this
-  off.
+  enabled`) — gates the auto-*answer* path: with it off, an incoming
+  recognition challenge is always declined, no matter what. Before this flag
+  existed, an unlocked keystore alone was sufficient to auto-answer any
+  incoming challenge, regardless of whether the user had ever opted into
+  being recognized — meaning unlocking a keystore for an unrelated feature
+  (journal/receipts) silently exposed a persistent identity to anyone who
+  challenged it. That gap is now closed: declining because this flag is off
+  is indistinguishable on the wire from declining because no keystore is
+  unlocked at all, so §8.4's "no key presented" framing still holds for a
+  user who leaves this off. Proactively announcing yourself remains exactly
+  what it always was — a manual, per-room "Recognize counterparty" click
+  (§8.2) — this flag does not auto-fire it; it only ever governs whether the
+  key you already chose to reveal is available to reveal at all.
 - **Global** (`global_identity_enabled`) — reuses *one* recognition
   pseudonym across every mediator the user connects through, instead of
   §8.2's default per-mediator scoping. A new key-scope label
