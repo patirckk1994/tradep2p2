@@ -1790,7 +1790,7 @@ int main(int argc, char** argv) {
                 node_endpoint.host,
                 node_endpoint.port,
                 tradep2p::certificate_pin_from_hex(argv[5]),
-                0U};
+                0U, {}};
             tradep2p::register_node_once(
                 parse_endpoint(argv[2]), ClientTlsPolicy{argv[3]}, node);
             std::cout << "node registered for " << tradep2p::kRegistryTtlSeconds
@@ -1887,7 +1887,7 @@ int main(int argc, char** argv) {
                 advertised.host,
                 advertised.port,
                 tradep2p::certificate_pin_from_hex(argv[8]),
-                0U};
+                0U, {}};
             std::thread(run_registry_heartbeat, registry, registry_tls, node, std::nullopt)
                 .detach();
 
@@ -1915,7 +1915,7 @@ int main(int argc, char** argv) {
                 advertised.host,
                 advertised.port,
                 tradep2p::certificate_pin_from_hex(argv[9]),
-                0U};
+                0U, {}};
             std::thread(run_registry_heartbeat, registry, registry_tls, node, proxy).detach();
 
             LobbyServer server(

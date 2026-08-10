@@ -122,13 +122,31 @@ void test_candle_serialization() {
 void test_registry_serialization() {
     tradep2p::RegistryNodesMessage original;
     original.nodes.push_back(tradep2p::RegistryNode{
-        "node.example", 7443U, pin_fixture(), 120U});
+        "node.example", 7443U, pin_fixture(), 120U, ""});
+    original.nodes.push_back(tradep2p::RegistryNode{
+        "gossiped.example", 7444U, pin_fixture(), 90U, "peer-registry.example:7555"});
     const auto decoded = tradep2p::decode_registry_nodes(
         tradep2p::encode_registry_nodes(original));
-    require(decoded.nodes.size() == 1U, "registry node count failed");
+    require(decoded.nodes.size() == 2U, "registry node count failed");
     require(decoded.nodes[0].host == "node.example", "registry host failed");
     require(decoded.nodes[0].certificate_pin == pin_fixture(),
             "registry pin failed");
+    require(decoded.nodes[0].source_registry.empty(),
+            "a direct registration must round-trip an empty source_registry");
+    require(decoded.nodes[1].source_registry == "peer-registry.example:7555",
+            "a gossip-learned node must round-trip its source_registry");
+
+    // source_registry only ever means something in a listing - a
+    // RegistryRegisterMessage (registration request) must reject a
+    // registrant trying to set it themselves.
+    bool threw = false;
+    try {
+        tradep2p::RegistryNode node{"node.example", 7443U, pin_fixture(), 0U, "spoofed.example:1"};
+        (void)tradep2p::encode_registry_register(tradep2p::RegistryRegisterMessage{node});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "a registration request must reject a non-empty source_registry");
 }
 
 void acknowledge_current_turn(tradep2p::MediatorSession& session) {

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <optional>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -125,18 +126,115 @@ std::uint16_t configured_registry_admin_port() {
     return port;
 }
 
+// A peer registry this registry pulls from - see Impl::gossip_loop().
+// Single-hop only: this registry re-shares only its own directly-registered,
+// approved entries with ITS OWN callers, never anything it learned from a
+// peer via this mechanism - see gossip_entries_'s comment for why.
+// Choosing to configure a peer at all IS the trust decision; auto_trust
+// only controls how much of that trust extends to what the peer vouches
+// for.
+struct RegistryPeer {
+    Endpoint registry;
+    ClientTlsPolicy registry_tls;
+    // Set for a peer reachable only over Tor (host ends in ".onion") -
+    // reuses list_registered_nodes_via_socks5() instead of the direct
+    // variant, via the single shared TRADEP2P_REGISTRY_GOSSIP_PROXY.
+    std::optional<Endpoint> proxy;
+    bool auto_trust{false};
+};
+
+std::uint16_t parse_gossip_port(const std::string& value) {
+    std::size_t used = 0U;
+    const auto parsed = std::stoul(value, &used, 10);
+    if (used != value.size() || parsed == 0U || parsed > 65535U) {
+        throw std::invalid_argument("invalid TRADEP2P_REGISTRY_GOSSIP_PEERS port");
+    }
+    return static_cast<std::uint16_t>(parsed);
+}
+
+Endpoint parse_gossip_endpoint(const std::string& text) {
+    const auto separator = text.rfind(':');
+    if (separator == std::string::npos || separator == 0U || separator + 1U >= text.size()) {
+        throw std::invalid_argument("TRADEP2P_REGISTRY_GOSSIP_PEERS entry must be host:port|pin[|trust]");
+    }
+    return Endpoint{text.substr(0U, separator), parse_gossip_port(text.substr(separator + 1U))};
+}
+
+// Format: "host:port|pinhex|trust,host:port|pinhex|trust,..." - "trust"
+// literally "1" means auto_trust (matches this project's existing "1" for
+// true convention, e.g. TRADEP2P_FEE_REQUIRE_CONFIRMATION), anything else
+// (including an omitted third field) means require-local-approval, the
+// safer default. Any peer whose host ends in ".onion" is reached through
+// TRADEP2P_REGISTRY_GOSSIP_PROXY (one shared proxy for every onion peer,
+// same "single shared proxy" convention setup_mediator.sh's own
+// --registry-proxy already established) - unset while an onion peer is
+// configured fails loudly at startup rather than silently trying (and
+// failing) a direct connection to an address that can never resolve.
+std::vector<RegistryPeer> configured_registry_gossip_peers() {
+    const char* peers_value = std::getenv("TRADEP2P_REGISTRY_GOSSIP_PEERS");
+    if (peers_value == nullptr || *peers_value == '\0') {
+        return {};
+    }
+    std::optional<Endpoint> shared_proxy;
+    if (const char* proxy_value = std::getenv("TRADEP2P_REGISTRY_GOSSIP_PROXY");
+        proxy_value != nullptr && *proxy_value != '\0') {
+        shared_proxy = parse_gossip_endpoint(proxy_value);
+    }
+
+    std::vector<RegistryPeer> peers;
+    std::string remaining(peers_value);
+    std::size_t start = 0U;
+    while (start <= remaining.size()) {
+        const auto comma = remaining.find(',', start);
+        const std::string entry = remaining.substr(
+            start, comma == std::string::npos ? std::string::npos : comma - start);
+        const auto first_bar = entry.find('|');
+        if (first_bar == std::string::npos) {
+            throw std::invalid_argument(
+                "TRADEP2P_REGISTRY_GOSSIP_PEERS entry must be host:port|pin[|trust]");
+        }
+        const auto second_bar = entry.find('|', first_bar + 1U);
+        const std::string endpoint_text = entry.substr(0U, first_bar);
+        const std::string pin_text = second_bar == std::string::npos
+                                         ? entry.substr(first_bar + 1U)
+                                         : entry.substr(first_bar + 1U, second_bar - first_bar - 1U);
+        const std::string trust_text =
+            second_bar == std::string::npos ? std::string{} : entry.substr(second_bar + 1U);
+
+        RegistryPeer peer;
+        peer.registry = parse_gossip_endpoint(endpoint_text);
+        peer.registry_tls = ClientTlsPolicy{pin_text};
+        peer.auto_trust = trust_text == "1";
+        if (peer.registry.host.size() >= 6U &&
+            peer.registry.host.compare(peer.registry.host.size() - 6U, 6U, ".onion") == 0) {
+            if (!shared_proxy.has_value()) {
+                throw std::invalid_argument(
+                    "TRADEP2P_REGISTRY_GOSSIP_PEERS names an .onion peer but "
+                    "TRADEP2P_REGISTRY_GOSSIP_PROXY is unset");
+            }
+            peer.proxy = shared_proxy;
+        }
+        peers.push_back(std::move(peer));
+
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1U;
+    }
+    return peers;
+}
+
 } // namespace
 
 class RegistryServer::Impl {
 public:
-    Impl(Endpoint bind_endpoint, ServerTlsIdentity identity,
-         std::vector<RegistryPeer> gossip_peers)
+    Impl(Endpoint bind_endpoint, ServerTlsIdentity identity)
         : bind_endpoint_(std::move(bind_endpoint)),
           identity_(std::move(identity)),
           state_file_(configured_registry_state_file()),
           admin_token_(configured_registry_admin_token()),
           admin_port_(configured_registry_admin_port()),
-          gossip_peers_(std::move(gossip_peers)) {}
+          gossip_peers_(configured_registry_gossip_peers()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
@@ -681,10 +779,8 @@ private:
     std::unordered_map<std::string, RegistryEntry> gossip_entries_;
 };
 
-RegistryServer::RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity,
-                               std::vector<RegistryPeer> gossip_peers)
-    : impl_(std::make_unique<Impl>(std::move(bind_endpoint), std::move(identity),
-                                   std::move(gossip_peers))) {}
+RegistryServer::RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity)
+    : impl_(std::make_unique<Impl>(std::move(bind_endpoint), std::move(identity))) {}
 
 RegistryServer::~RegistryServer() = default;
 

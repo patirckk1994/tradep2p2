@@ -3,40 +3,19 @@
 #include "tradep2p/secure_channel.hpp"
 
 #include <memory>
-#include <optional>
-#include <vector>
 
 namespace tradep2p {
 
-// A peer registry this registry pulls from - see registry.cpp's
-// gossip_loop(). Single-hop only: this registry re-shares only its own
-// directly-registered, approved entries with ITS OWN callers, never
-// anything it learned from a peer via this mechanism - see the file
-// comment on gossip_entries_ for why. Choosing to configure a peer at all
-// IS the trust decision; auto_trust below only controls how much of that
-// trust extends to what the peer vouches for.
-struct RegistryPeer {
-    Endpoint registry;
-    ClientTlsPolicy registry_tls;
-    // Set for a peer reachable only over Tor - reuses
-    // list_registered_nodes_via_socks5() instead of the direct variant.
-    std::optional<Endpoint> proxy;
-    // false (default): a node learned from this peer sits Pending here too
-    // (same LISTPENDING/APPROVE/REJECT flow as a direct registration,
-    // just sourced from a pull instead of a push) - this registry's own
-    // admin must separately approve it before local callers see it.
-    // true: the peer's own approval is trusted outright - the node is
-    // merged into this registry's listings immediately, tagged with the
-    // peer as its source_registry.
-    bool auto_trust{false};
-};
-
 // Small semi-centralized directory for mediator endpoints. It is not a trust
 // authority: clients still pin the mediator certificate listed for each node.
+// Optional peer-to-peer gossip federation (TRADEP2P_REGISTRY_GOSSIP_PEERS,
+// see registry.cpp's configured_registry_gossip_peers()) is configured the
+// same way every other optional feature on this server is - environment
+// variables read internally at construction, not a constructor parameter -
+// so this public API is unaffected by it.
 class RegistryServer {
 public:
-    RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity,
-                   std::vector<RegistryPeer> gossip_peers = {});
+    RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity);
     ~RegistryServer();
 
     RegistryServer(const RegistryServer&) = delete;
