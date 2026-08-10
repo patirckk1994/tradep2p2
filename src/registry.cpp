@@ -129,17 +129,23 @@ std::uint16_t configured_registry_admin_port() {
 
 class RegistryServer::Impl {
 public:
-    Impl(Endpoint bind_endpoint, ServerTlsIdentity identity)
+    Impl(Endpoint bind_endpoint, ServerTlsIdentity identity,
+         std::vector<RegistryPeer> gossip_peers)
         : bind_endpoint_(std::move(bind_endpoint)),
           identity_(std::move(identity)),
           state_file_(configured_registry_state_file()),
           admin_token_(configured_registry_admin_token()),
-          admin_port_(configured_registry_admin_port()) {}
+          admin_port_(configured_registry_admin_port()),
+          gossip_peers_(std::move(gossip_peers)) {}
 
     ~Impl() {
         snapshot_running_.store(false);
         if (snapshot_thread_.joinable()) {
             snapshot_thread_.join();
+        }
+        gossip_running_.store(false);
+        if (gossip_thread_.joinable()) {
+            gossip_thread_.join();
         }
     }
 
@@ -163,6 +169,14 @@ public:
             std::cout << "New registrations are Pending until approved: set "
                          "TRADEP2P_REGISTRY_ADMIN_TOKEN to enable the admin control "
                          "channel, otherwise nothing can ever be approved.\n";
+        }
+
+        if (!gossip_peers_.empty()) {
+            gossip_running_.store(true);
+            gossip_thread_ = std::thread([this] { gossip_loop(); });
+            std::cout << "Gossiping with " << gossip_peers_.size()
+                      << " peer registr" << (gossip_peers_.size() == 1U ? "y" : "ies")
+                      << " (single-hop, own direct+approved entries only)\n";
         }
 
         for (;;) {
@@ -206,14 +220,20 @@ public:
     }
 
 private:
-    void remove_expired_locked(std::chrono::steady_clock::time_point now) {
-        for (auto it = entries_.begin(); it != entries_.end();) {
+    static void remove_expired_from_locked(std::unordered_map<std::string, RegistryEntry>& map,
+                                           std::chrono::steady_clock::time_point now) {
+        for (auto it = map.begin(); it != map.end();) {
             if (it->second.expires_at <= now) {
-                it = entries_.erase(it);
+                it = map.erase(it);
             } else {
                 ++it;
             }
         }
+    }
+
+    void remove_expired_locked(std::chrono::steady_clock::time_point now) {
+        remove_expired_from_locked(entries_, now);
+        remove_expired_from_locked(gossip_entries_, now);
     }
 
     void handle_connection(SecureChannel channel) {
@@ -285,23 +305,30 @@ private:
         {
             std::scoped_lock lock(mutex_);
             remove_expired_locked(now);
-            result.nodes.reserve(entries_.size());
-            for (const auto& [key, entry] : entries_) {
-                (void)key;
-                // Pending entries are invisible to every ordinary caller
-                // (RegistryList responses and the public state-snapshot
-                // JSON both go through this function) until approved over
-                // the loopback admin channel - see admin_control_loop().
-                if (entry.status != RegistryStatus::Approved) {
-                    continue;
+            result.nodes.reserve(entries_.size() + gossip_entries_.size());
+            const auto append_approved = [&](const std::unordered_map<std::string, RegistryEntry>& map) {
+                for (const auto& [key, entry] : map) {
+                    (void)key;
+                    // Pending entries are invisible to every ordinary caller
+                    // (RegistryList responses and the public state-snapshot
+                    // JSON both go through this function) until approved -
+                    // either over the loopback admin channel
+                    // (admin_control_loop()) for a direct registration, or
+                    // an auto_trust peer's own approval for a gossip-learned
+                    // one (gossip_loop()).
+                    if (entry.status != RegistryStatus::Approved) {
+                        continue;
+                    }
+                    RegistryNode node = entry.node;
+                    const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                        entry.expires_at - now);
+                    node.remaining_ttl_seconds = static_cast<std::uint32_t>(
+                        std::max<std::int64_t>(1, remaining.count()));
+                    result.nodes.push_back(std::move(node));
                 }
-                RegistryNode node = entry.node;
-                const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-                    entry.expires_at - now);
-                node.remaining_ttl_seconds = static_cast<std::uint32_t>(
-                    std::max<std::int64_t>(1, remaining.count()));
-                result.nodes.push_back(std::move(node));
-            }
+            };
+            append_approved(entries_);
+            append_approved(gossip_entries_);
         }
         std::sort(result.nodes.begin(), result.nodes.end(),
                   [](const RegistryNode& left, const RegistryNode& right) {
@@ -407,15 +434,26 @@ private:
             {
                 std::scoped_lock lock(mutex_);
                 remove_expired_locked(std::chrono::steady_clock::now());
-                for (const auto& [key, entry] : entries_) {
-                    if (entry.status != RegistryStatus::Pending) {
-                        continue;
-                    }
-                    if (!listing.empty()) {
-                        listing += ',';
-                    }
-                    listing += key + '|' + certificate_pin_to_hex(entry.node.certificate_pin);
-                }
+                const auto append_pending =
+                    [&](const std::unordered_map<std::string, RegistryEntry>& map) {
+                        for (const auto& [key, entry] : map) {
+                            if (entry.status != RegistryStatus::Pending) {
+                                continue;
+                            }
+                            if (!listing.empty()) {
+                                listing += ',';
+                            }
+                            // Three fields always, even when source is empty
+                            // (a direct registration) - a consistent shape
+                            // is easier for a caller (e.g. the registry
+                            // dashboard) to parse than one that sometimes
+                            // has two fields and sometimes three.
+                            listing += key + '|' + certificate_pin_to_hex(entry.node.certificate_pin) +
+                                      '|' + entry.node.source_registry;
+                        }
+                    };
+                append_pending(entries_);
+                append_pending(gossip_entries_);
             }
             send_admin_line(fd, listing.empty() ? "OK NONE" : "OK " + listing);
             return;
@@ -435,15 +473,20 @@ private:
             }
             const std::string key = host + ":" + std::to_string(port);
             std::scoped_lock lock(mutex_);
-            const auto existing = entries_.find(key);
+            auto existing = entries_.find(key);
+            std::unordered_map<std::string, RegistryEntry>* owning_map = &entries_;
             if (existing == entries_.end()) {
+                existing = gossip_entries_.find(key);
+                owning_map = &gossip_entries_;
+            }
+            if (existing == owning_map->end()) {
                 send_admin_line(fd, "ERR no such registration");
                 return;
             }
             if (command == "APPROVE") {
                 existing->second.status = RegistryStatus::Approved;
             } else {
-                entries_.erase(existing);
+                owning_map->erase(existing);
             }
             send_admin_line(fd, "OK");
             return;
@@ -464,6 +507,84 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
+    }
+
+    // Single-hop registry federation: pulls each configured peer's own
+    // PUBLIC listing (RegistryList/RegistryNodes - the exact same request
+    // the `nodes`/`nodes-tor` CLI commands already make, nothing new on
+    // the wire) and caches what comes back in gossip_entries_, separate
+    // from and bounded independently of this registry's own entries_ (see
+    // kMaxGossipCachedNodes's comment in protocol.hpp - gossip can never
+    // crowd out an operator's own direct-registration capacity). Never
+    // re-shares a gossip-learned entry with ITS OWN peers - only entries_
+    // (this registry's own direct, approved registrations) ever go out
+    // over the wire to a peer's RegistryList caller, so information can
+    // travel at most one hop from wherever it was first registered.
+    void gossip_loop() {
+        while (gossip_running_.load()) {
+            for (const auto& peer : gossip_peers_) {
+                if (!gossip_running_.load()) {
+                    break;
+                }
+                try {
+                    const RegistryNodesMessage pulled =
+                        peer.proxy.has_value()
+                            ? list_registered_nodes_via_socks5(*peer.proxy, peer.registry,
+                                                               peer.registry_tls)
+                            : list_registered_nodes(peer.registry, peer.registry_tls);
+                    const std::string peer_key =
+                        peer.registry.host + ":" + std::to_string(peer.registry.port);
+                    const auto now = std::chrono::steady_clock::now();
+                    std::scoped_lock lock(mutex_);
+                    for (RegistryNode node : pulled.nodes) {
+                        node.source_registry = peer_key;
+                        const std::string key = registry_key(node);
+                        const auto existing = gossip_entries_.find(key);
+                        // Same "a refresh preserves whatever approval status
+                        // it already has" reasoning as register_node() below -
+                        // otherwise every ~60s pull would silently revert a
+                        // manually-approved (non-auto-trust) entry back to
+                        // Pending, or flip an auto-trusted one that a peer
+                        // later stopped trusting mid-cycle in a confusing way.
+                        const RegistryStatus status =
+                            existing != gossip_entries_.end()
+                                ? existing->second.status
+                                : (peer.auto_trust ? RegistryStatus::Approved
+                                                   : RegistryStatus::Pending);
+                        if (existing == gossip_entries_.end() &&
+                            gossip_entries_.size() >= kMaxGossipCachedNodes) {
+                            evict_soonest_expiring_gossip_entry_locked();
+                        }
+                        const auto ttl = std::chrono::seconds(std::max<std::uint32_t>(
+                            1U, std::min(node.remaining_ttl_seconds, kRegistryTtlSeconds)));
+                        gossip_entries_[key] = RegistryEntry{std::move(node), now + ttl, status};
+                    }
+                } catch (const std::exception& error) {
+                    std::cerr << "gossip pull from " << peer.registry.host << ':'
+                              << peer.registry.port << " failed: " << error.what() << '\n';
+                    // Deliberately no special handling beyond logging - a
+                    // peer that stays unreachable just has its previously
+                    // cached entries expire on their own TTL, same as any
+                    // other stale registration.
+                }
+            }
+            for (int tick = 0; tick < 600 && gossip_running_.load(); ++tick) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+    // Only called with mutex_ already held and gossip_entries_ confirmed at
+    // capacity. A linear scan is fine at kMaxGossipCachedNodes's size - no
+    // need for a real priority structure at this bound.
+    void evict_soonest_expiring_gossip_entry_locked() {
+        auto soonest = gossip_entries_.begin();
+        for (auto it = gossip_entries_.begin(); it != gossip_entries_.end(); ++it) {
+            if (it->second.expires_at < soonest->second.expires_at) {
+                soonest = it;
+            }
+        }
+        gossip_entries_.erase(soonest);
     }
 
     void write_state_snapshot() {
@@ -497,6 +618,7 @@ private:
                  << ",\"certificate_pin\":\""
                  << json_escape(certificate_pin_to_hex(node.certificate_pin))
                  << "\",\"remaining_ttl_seconds\":" << node.remaining_ttl_seconds
+                 << ",\"source_registry\":\"" << json_escape(node.source_registry) << "\""
                  << '}';
         }
         json << "]}";
@@ -543,10 +665,26 @@ private:
     std::uint16_t admin_port_;
     std::mutex mutex_;
     std::unordered_map<std::string, RegistryEntry> entries_;
+    // Configured once at construction, never mutated afterward - read from
+    // gossip_loop() with no lock needed, same reasoning as admin_token_
+    // above. Empty means gossip is off entirely - no client connections to
+    // any peer are ever attempted.
+    std::vector<RegistryPeer> gossip_peers_;
+    std::atomic<bool> gossip_running_{false};
+    std::thread gossip_thread_;
+    // Single-hop gossip-learned cache - see gossip_loop()'s file comment.
+    // Bounded independently of entries_ (kMaxGossipCachedNodes, distinct
+    // from kMaxRegistryNodes) so peering can never crowd out an operator's
+    // own direct registrations. Guarded by the same mutex_ as entries_
+    // (both need to be read together in snapshot(), and both need
+    // APPROVE/REJECT to check them together) rather than a separate lock.
+    std::unordered_map<std::string, RegistryEntry> gossip_entries_;
 };
 
-RegistryServer::RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity)
-    : impl_(std::make_unique<Impl>(std::move(bind_endpoint), std::move(identity))) {}
+RegistryServer::RegistryServer(Endpoint bind_endpoint, ServerTlsIdentity identity,
+                               std::vector<RegistryPeer> gossip_peers)
+    : impl_(std::make_unique<Impl>(std::move(bind_endpoint), std::move(identity),
+                                   std::move(gossip_peers))) {}
 
 RegistryServer::~RegistryServer() = default;
 

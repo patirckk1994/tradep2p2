@@ -34,7 +34,27 @@ constexpr std::size_t kMaxAddressLength = 256;
 constexpr std::size_t kMaxReasonLength = 128;
 constexpr std::size_t kMaxNodeHostLength = 96;
 constexpr std::size_t kMaxPeerListEntries = 128;
+// Caps a single registry's own DIRECT registrations only (registry.cpp's
+// entries_) - deliberately small and unchanged by gossip federation, since
+// this is what keeps a registry a personally-curated list rather than
+// scale-up infrastructure. Gossip-learned entries live in a separate,
+// separately-bounded pool (registry.cpp's gossip_entries_,
+// kMaxGossipCachedNodes) so peering can never crowd out an operator's own
+// registration capacity.
 constexpr std::size_t kMaxRegistryNodes = 16;
+// Caps a single registry's gossip-learned cache (registry.cpp's
+// gossip_entries_) - separate from, and independent of, kMaxRegistryNodes
+// above. Single-hop gossip only (a registry never re-shares what it
+// learned from a peer), so this bounds "sum of your configured peers' own
+// direct registrations", not the whole network.
+constexpr std::size_t kMaxGossipCachedNodes = 128;
+// Caps a single RegistryNodesMessage wire encoding - distinct from either
+// cap above since a listing response can merge BOTH pools
+// (registry.cpp's snapshot()). kMaxRegistryNodes + kMaxGossipCachedNodes
+// with headroom; kMaxFramePayload (131072 bytes) comfortably fits this
+// many nodes even at each field's maximum length (verified: worst case
+// ~266 bytes/node, this cap's worth is ~43KB).
+constexpr std::size_t kMaxRegistryNodesInList = 160;
 constexpr std::size_t kMaxOfferPageEntries = 32;
 // Bounds both the mediator's retained per-pair price history (lobby.cpp)
 // and a single CandleData response - chosen so the largest possible
@@ -365,6 +385,15 @@ struct RegistryNode {
     std::uint16_t port{};
     CertificatePin certificate_pin{};
     std::uint32_t remaining_ttl_seconds{};
+    // Empty for a node this registry holding the listing registered
+    // directly; otherwise the peer registry's own "host:port" this entry
+    // was learned from via single-hop gossip (registry.cpp's
+    // gossip_entries_) - lets a caller tell "this registry personally
+    // vetted this mediator" from "this registry is relaying it from a
+    // peer it chose to trust". Only meaningful (and only encoded/decoded)
+    // in a RegistryNodesMessage listing, never in a RegistryRegisterMessage
+    // - a registrant never sets this itself.
+    std::string source_registry;
 };
 
 struct RegistryRegisterMessage {

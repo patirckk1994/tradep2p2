@@ -283,6 +283,11 @@ void append_registry_node(Writer& writer,
     writer.fixed_id(node.certificate_pin);
     if (include_ttl) {
         writer.u32(node.remaining_ttl_seconds);
+        // source_registry only ever means something in a listing (a
+        // registrant never sets it) - gated on the same include_ttl flag
+        // that already distinguishes "registration request" from "listing
+        // response" for this shared helper.
+        writer.short_string(node.source_registry, kMaxNodeHostLength);
     }
 }
 
@@ -292,6 +297,7 @@ void append_registry_node(Writer& writer,
     node.port = reader.u16();
     node.certificate_pin = reader.fixed_id<32U>();
     node.remaining_ttl_seconds = include_ttl ? reader.u32() : 0U;
+    node.source_registry = include_ttl ? reader.short_string(kMaxNodeHostLength) : std::string{};
     validate_registry_node(node, include_ttl);
     return node;
 }
@@ -365,6 +371,15 @@ void validate_registry_node(const RegistryNode& node, bool require_ttl) {
         (node.remaining_ttl_seconds == 0U ||
          node.remaining_ttl_seconds > kRegistryTtlSeconds)) {
         throw std::invalid_argument("invalid registry TTL");
+    }
+    if (!require_ttl && !node.source_registry.empty()) {
+        // A registration request (require_ttl=false) never carries this -
+        // it is a listing-only annotation the REGISTRY itself attaches,
+        // never something a registrant supplies.
+        throw std::invalid_argument("source_registry is only valid in a listing");
+    }
+    if (!node.source_registry.empty()) {
+        validate_printable(node.source_registry, kMaxNodeHostLength, false, "source registry");
     }
 }
 
@@ -1022,7 +1037,7 @@ RegistryRegisteredMessage decode_registry_registered(std::span<const std::uint8_
 }
 
 std::vector<std::uint8_t> encode_registry_nodes(const RegistryNodesMessage& message) {
-    if (message.nodes.size() > kMaxRegistryNodes) {
+    if (message.nodes.size() > kMaxRegistryNodesInList) {
         throw std::invalid_argument("registry node list exceeds protocol limit");
     }
     Writer writer;
@@ -1036,7 +1051,7 @@ std::vector<std::uint8_t> encode_registry_nodes(const RegistryNodesMessage& mess
 RegistryNodesMessage decode_registry_nodes(std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
     const auto count = static_cast<std::size_t>(reader.u16());
-    if (count > kMaxRegistryNodes) {
+    if (count > kMaxRegistryNodesInList) {
         throw std::runtime_error("registry node list exceeds protocol limit");
     }
     RegistryNodesMessage message;
