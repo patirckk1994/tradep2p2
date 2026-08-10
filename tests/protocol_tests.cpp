@@ -81,6 +81,43 @@ void test_offer_and_address_serialization() {
             "offer continuation cursor failed");
 }
 
+void test_candle_serialization() {
+    tradep2p::GetCandlesMessage request;
+    request.asset_a = "BTC";
+    request.asset_b = "QRL";
+    const auto decoded_request = tradep2p::decode_get_candles(
+        tradep2p::encode_get_candles(request));
+    require(decoded_request.asset_a == "BTC" && decoded_request.asset_b == "QRL",
+            "candle request asset serialization failed");
+
+    tradep2p::CandleDataMessage data;
+    data.base_asset = "BTC";
+    data.quote_asset = "QRL";
+    data.ticks.push_back(tradep2p::TradeTick{1000U, 10U, 230U});
+    data.ticks.push_back(tradep2p::TradeTick{2000U, 5U, 120U});
+    const auto decoded_data = tradep2p::decode_candle_data(
+        tradep2p::encode_candle_data(data));
+    require(decoded_data.base_asset == "BTC" && decoded_data.quote_asset == "QRL",
+            "candle data pair serialization failed");
+    require(decoded_data.ticks.size() == 2U, "candle tick count failed");
+    require(decoded_data.ticks[0].timestamp == 1000U &&
+                decoded_data.ticks[0].base_amount == 10U &&
+                decoded_data.ticks[0].quote_amount == 230U,
+            "candle tick fields failed");
+    require(decoded_data.ticks[1].timestamp == 2000U, "second candle tick failed");
+
+    bool threw = false;
+    try {
+        tradep2p::CandleDataMessage zero;
+        zero.base_asset = "BTC";
+        zero.quote_asset = "QRL";
+        zero.ticks.push_back(tradep2p::TradeTick{1000U, 0U, 230U});
+        (void)tradep2p::encode_candle_data(zero);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "a zero-amount candle tick must be rejected");
+}
 
 void test_registry_serialization() {
     tradep2p::RegistryNodesMessage original;
@@ -272,6 +309,7 @@ int main() {
     try {
         test_integer_tranches();
         test_offer_and_address_serialization();
+        test_candle_serialization();
         test_registry_serialization();
         test_mediator_flow();
         test_mediator_fee_flow();

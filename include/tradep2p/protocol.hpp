@@ -26,6 +26,12 @@ constexpr std::size_t kMaxNodeHostLength = 96;
 constexpr std::size_t kMaxPeerListEntries = 128;
 constexpr std::size_t kMaxRegistryNodes = 16;
 constexpr std::size_t kMaxOfferPageEntries = 32;
+// Bounds both the mediator's retained per-pair price history (lobby.cpp)
+// and a single CandleData response - chosen so the largest possible
+// response (two kMaxAssetCodeLength-ish asset strings plus this many
+// 24-byte ticks) comfortably fits under kMaxFramePayload with no pagination
+// needed, unlike the offer list (which is unbounded and so needs a cursor).
+constexpr std::size_t kMaxCandleTicksPerPair = 300;
 constexpr std::uint32_t kMaxRounds = 1000;
 constexpr std::uint32_t kRegistryTtlSeconds = 300;
 
@@ -143,6 +149,13 @@ enum class MessageType : std::uint16_t {
     // parallels ReceiptAckRequired's role for the receipt-ack gate. Only
     // ever sent by the mediator; a client never sends this type.
     FeeConfirmationPending = 38,
+    // A client's request for the mediator's retained price history for one
+    // asset pair - see lobby.cpp's price_history_/handle_get_candles(). Not
+    // room-scoped and not admin-gated: this is public market data, the same
+    // trust level as ListOffers/OfferList, just for completed trades
+    // instead of open ones.
+    GetCandles = 39,
+    CandleData = 40,
 };
 
 struct Frame {
@@ -213,6 +226,34 @@ struct OfferListMessage {
     std::vector<OfferSummary> offers;
     bool has_more{false};
     RoomId next_cursor{};
+};
+
+struct GetCandlesMessage {
+    std::string asset_a;
+    std::string asset_b;
+};
+
+// One completed trade's implied price, as raw integer amounts rather than
+// a computed ratio - no floating point crosses the wire. base_amount/
+// quote_amount are already oriented to CandleDataMessage's base_asset/
+// quote_asset (see lobby.cpp's canonical_pair()), so price = quote_amount
+// / base_amount regardless of which asset the original room called
+// asset_a vs asset_b.
+struct TradeTick {
+    std::uint64_t timestamp{};
+    std::uint64_t base_amount{};
+    std::uint64_t quote_amount{};
+};
+
+// The mediator decides base/quote (lexicographically smaller asset code is
+// base) so that a room's asset_a/asset_b order never splits one real pair
+// into two series. Oldest tick first. Bounded to kMaxCandleTicksPerPair -
+// unlike OfferListMessage this never paginates, since that bound already
+// guarantees the whole series fits in one frame.
+struct CandleDataMessage {
+    std::string base_asset;
+    std::string quote_asset;
+    std::vector<TradeTick> ticks;
 };
 
 struct JoinOfferMessage {
@@ -558,6 +599,12 @@ void validate_message_type(MessageType type);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_offer_list(const OfferListMessage& message);
 [[nodiscard]] OfferListMessage decode_offer_list(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_get_candles(const GetCandlesMessage& message);
+[[nodiscard]] GetCandlesMessage decode_get_candles(std::span<const std::uint8_t> bytes);
+
+[[nodiscard]] std::vector<std::uint8_t> encode_candle_data(const CandleDataMessage& message);
+[[nodiscard]] CandleDataMessage decode_candle_data(std::span<const std::uint8_t> bytes);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_join_offer(const JoinOfferMessage& message);
 [[nodiscard]] JoinOfferMessage decode_join_offer(std::span<const std::uint8_t> bytes);

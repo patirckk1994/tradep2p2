@@ -295,6 +295,23 @@ over the admin control channel, instead of trusting the payer's own "I sent
 it" claim alone — still honor-based (no blockchain check), just
 operator-gated rather than fully automatic. Combines with any fee position.
 
+## Price history / candlestick chart
+
+The mediator retains a small, bounded history of implied prices
+(`quote_amount / base_amount`) for trades it has settled, per asset pair —
+enough to draw a candlestick chart. Any connected client can ask for it
+(`/candles ASSET_A ASSET_B` on the CLI; a "Chart" tab in
+`tradep2p-webclient`, which buckets the returned trades into candles at
+whatever interval you pick, entirely in the browser) — this is public
+market data, not gated behind the admin channel.
+
+**This is not a price oracle.** It reflects only trades this one mediator
+happened to settle, self-reported by the parties exactly like every other
+number in this protocol — the mediator never verifies that value actually
+moved, here any more than anywhere else (see [Current
+limitations](#current-limitations)). Treat it as a log of what this
+mediator has seen, not as ground truth about a market.
+
 ## Terminal commands — trading
 
 Publish an offer lobby:
