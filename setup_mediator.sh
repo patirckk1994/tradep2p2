@@ -52,6 +52,29 @@ Options:
                         channel entirely.
   --admin-port N       port for the admin control channel (default 7444,
                         only meaningful with --admin-token)
+  --admin-fee-token TOKEN
+                        a second, more narrowly scoped credential for the
+                        same admin channel: usable only for
+                        LISTPENDINGFEES/FEEDETAILS/CONFIRMFEE, rejected for
+                        SETFEE or anything else. Meant for an automated fee
+                        checker (see plugins/) so it never needs a
+                        credential powerful enough to change your fee.
+                        Only meaningful with --admin-token; leave unset to
+                        skip issuing this narrower credential at all.
+  --fee-plugin-path PATH
+                        load an in-process fee-checking plugin (a shared
+                        object implementing include/tradep2p/
+                        fee_plugin_abi.h) at startup and poll it for every
+                        pending fee, auto-confirming any it reports paid -
+                        no admin-channel action needed at all. Optional;
+                        leave unset to load no plugin. Fails mediator
+                        startup loudly if the path is wrong or the plugin's
+                        ABI doesn't match. A crashing/hanging plugin takes
+                        the whole mediator process down with it - see
+                        plugins/README.md before using this in production;
+                        the admin-channel option above (--admin-fee-token)
+                        gives an out-of-process alternative with no such
+                        risk.
   --registry HOST:PORT registry endpoint to register with (optional)
   --registry-pin HEX   registry certificate SHA-256 pin (required with --registry)
   --advertise HOST:PORT the endpoint peers can reach this mediator on (defaults
@@ -83,7 +106,9 @@ FEE_ADDRESS=""
 FEE_REQUIRE_CONFIRMATION="0"
 FEE_POSITION="after-last"
 ADMIN_TOKEN=""
+ADMIN_FEE_TOKEN=""
 ADMIN_PORT="7444"
+FEE_PLUGIN_PATH=""
 REGISTRY_ENDPOINT=""
 REGISTRY_PIN=""
 ADVERTISED_ENDPOINT=""
@@ -115,7 +140,9 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2 ;;
         --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
+        --admin-fee-token) ADMIN_FEE_TOKEN="$2"; shift 2 ;;
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
+        --fee-plugin-path) FEE_PLUGIN_PATH="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
         --registry-pin) REGISTRY_PIN="$2"; shift 2 ;;
         --advertise) ADVERTISED_ENDPOINT="$2"; shift 2 ;;
@@ -151,6 +178,16 @@ FEE_POSITION="$FEE_POSITION"
 # Keep this secret if set - anyone who has it can change the fee live.
 ADMIN_TOKEN="$ADMIN_TOKEN"
 ADMIN_PORT="$ADMIN_PORT"
+
+# Optional narrower credential for the same channel - can only list/inspect
+# pending fees and confirm one, never SETFEE. Meant for an automated fee
+# checker (see plugins/). Only meaningful with ADMIN_TOKEN set.
+ADMIN_FEE_TOKEN="$ADMIN_FEE_TOKEN"
+
+# Leave empty to load no in-process fee plugin (default). See
+# plugins/README.md before setting this - a crashing/hanging plugin takes
+# the whole mediator process down with it.
+FEE_PLUGIN_PATH="$FEE_PLUGIN_PATH"
 
 # Leave REGISTRY_ENDPOINT empty to run standalone, unregistered.
 REGISTRY_ENDPOINT="$REGISTRY_ENDPOINT"
@@ -234,6 +271,12 @@ else
 fi
 if [[ -n "$ADMIN_TOKEN" ]]; then
     echo "  admin control:     127.0.0.1:$ADMIN_PORT (loopback only, live fee changes)"
+    if [[ -n "$ADMIN_FEE_TOKEN" ]]; then
+        echo "                     + scoped fee-only token (LISTPENDINGFEES/FEEDETAILS/CONFIRMFEE only)"
+    fi
+fi
+if [[ -n "$FEE_PLUGIN_PATH" ]]; then
+    echo "  fee plugin:        $FEE_PLUGIN_PATH (in-process, polling pending fees)"
 fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
@@ -275,6 +318,12 @@ fi
 if [[ -n "$ADMIN_TOKEN" ]]; then
     export TRADEP2P_ADMIN_TOKEN="$ADMIN_TOKEN"
     export TRADEP2P_ADMIN_PORT="$ADMIN_PORT"
+    if [[ -n "$ADMIN_FEE_TOKEN" ]]; then
+        export TRADEP2P_ADMIN_FEE_TOKEN="$ADMIN_FEE_TOKEN"
+    fi
+fi
+if [[ -n "$FEE_PLUGIN_PATH" ]]; then
+    export TRADEP2P_FEE_PLUGIN_PATH="$FEE_PLUGIN_PATH"
 fi
 
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then

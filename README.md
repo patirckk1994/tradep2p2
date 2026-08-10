@@ -295,6 +295,20 @@ over the admin control channel, instead of trusting the payer's own "I sent
 it" claim alone — still honor-based (no blockchain check), just
 operator-gated rather than fully automatic. Combines with any fee position.
 
+### Automating fee confirmation with a plugin
+
+That "operator explicitly confirms" step can be automated by a plugin —
+your own code that checks a chain for the actual payment and confirms the
+room on the mediator's behalf, instead of a human checking a block
+explorer and typing a command. Two independent, both-optional ways to do
+this (`setup_mediator.sh --admin-fee-token` for an out-of-process
+checker driving the admin channel, `--fee-plugin-path` for an in-process
+`dlopen`'d checker) are documented in full, including the exact protocol
+and ABI, in [`plugins/README.md`](plugins/README.md). The mediator itself
+still performs zero chain inspection either way — verification logic
+lives entirely in whatever plugin you write or run, and a plugin's
+confirmation carries exactly the trust a human operator's did, no more.
+
 ## Terminal commands — trading
 
 Publish an offer lobby:

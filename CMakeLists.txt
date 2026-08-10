@@ -36,7 +36,7 @@ target_include_directories(tradep2p PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(tradep2p PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(tradep2p PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
 target_compile_options(tradep2p PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )

@@ -141,7 +141,16 @@ assets live on.
 An operator may configure a mediator-wide fee (asset, amount, address),
 settled as an ordinary additional final transfer, acknowledged the same way
 any other round is — the fee is never held or verified by the mediator
-either.
+either. An operator may optionally hold the fee leg open until it is
+explicitly confirmed (`--fee-require-confirmation`), and that confirmation
+step may itself be automated by a third-party plugin (see `plugins/`) that
+checks a chain and confirms on the mediator's behalf — but this changes
+nothing about the mediator's own honesty: it still performs zero chain
+inspection itself, in any configuration. Verification logic, when it
+exists at all, lives entirely outside the mediator's trust-minimized core,
+in code the operator chose to run — a plugin's confirmation carries
+exactly the trust a human operator's manual confirmation did, no more, no
+less.
 
 ### 2.2 What this achieves, and what it doesn't
 

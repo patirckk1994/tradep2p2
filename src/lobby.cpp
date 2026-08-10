@@ -1,6 +1,7 @@
 #include "tradep2p/lobby.hpp"
 
 #include "tradep2p/ephemeral.hpp"
+#include "tradep2p/fee_plugin_abi.h"
 #include "tradep2p/mediator.hpp"
 #include "tradep2p/protocol.hpp"
 #include "tradep2p/receipt.hpp"
@@ -10,6 +11,7 @@
 #include <openssl/rand.h>
 
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -354,6 +356,28 @@ void persist_fee_to_file(const std::string& path, const FeeTerms& fee) {
 // guessable or empty token.
 std::string configured_admin_token() { return env_or_empty("TRADEP2P_ADMIN_TOKEN"); }
 
+// A second, more narrowly scoped token for the same channel - see
+// handle_admin_connection()'s auth check. A connection authenticating with
+// this token instead of TRADEP2P_ADMIN_TOKEN is restricted to
+// LISTPENDINGFEES/FEEDETAILS/CONFIRMFEE only (SETFEE and anything else is
+// rejected), so a fee-checking plugin process (Mode A - see plugins/) needs
+// a credential no more powerful than "read pending fees and confirm one",
+// never "rewrite the mediator's fee configuration". Unset (the default)
+// means only the full admin token works, unchanged from today; also
+// meaningless (never even compared against) if TRADEP2P_ADMIN_TOKEN itself
+// is unset, since the whole channel stays closed in that case regardless.
+std::string configured_admin_fee_token() { return env_or_empty("TRADEP2P_ADMIN_FEE_TOKEN"); }
+
+// Mode B (in-process fee plugin) - see include/tradep2p/fee_plugin_abi.h
+// and Impl::fee_plugin_thread_. Unset (the default) means dlopen() is
+// never even attempted - no in-process plugin code ever runs unless an
+// operator explicitly opts in by setting this. A plugin crash or hang
+// takes the whole mediator process down with it (inherent to running
+// dlopen'd code on the mediator's own thread) - operators wanting process
+// isolation instead should use Mode A (the admin-channel protocol - see
+// plugins/README.md) rather than this.
+std::string configured_fee_plugin_path() { return env_or_empty("TRADEP2P_FEE_PLUGIN_PATH"); }
+
 std::uint16_t configured_admin_port() {
     const std::string text = env_or_empty("TRADEP2P_ADMIN_PORT");
     if (text.empty()) {
@@ -433,15 +457,24 @@ public:
           mediator_receipt_keypair_(
               load_or_create_mediator_receipt_key(configured_mediator_receipt_key_file())),
           admin_token_(configured_admin_token()),
+          admin_fee_token_(configured_admin_fee_token()),
           admin_port_(configured_admin_port()),
           require_fee_confirmation_(configured_require_fee_confirmation()),
           fee_position_(configured_fee_position()),
-          fee_persist_file_(configured_fee_persist_file()) {}
+          fee_persist_file_(configured_fee_persist_file()),
+          fee_plugin_path_(configured_fee_plugin_path()) {}
 
     ~Impl() {
         snapshot_running_.store(false);
         if (snapshot_thread_.joinable()) {
             snapshot_thread_.join();
+        }
+        fee_plugin_running_.store(false);
+        if (fee_plugin_thread_.joinable()) {
+            fee_plugin_thread_.join();
+        }
+        if (fee_plugin_handle_ != nullptr) {
+            ::dlclose(fee_plugin_handle_);
         }
     }
 
@@ -491,6 +524,22 @@ public:
             std::thread([this] { admin_control_loop(); }).detach();
             std::cout << "Admin control listening on 127.0.0.1:" << admin_port_
                       << " (loopback only, live fee changes)\n";
+            if (!admin_fee_token_.empty()) {
+                std::cout << "  Scoped fee-only admin token also accepted "
+                             "(LISTPENDINGFEES/FEEDETAILS/CONFIRMFEE only)\n";
+            }
+        }
+
+        if (!fee_plugin_path_.empty()) {
+            // Deliberately unguarded - a plugin that fails to load (bad
+            // path, missing symbols, ABI mismatch) must abort mediator
+            // startup, not silently run with fee confirmation still
+            // entirely manual. See load_fee_plugin()'s comment.
+            load_fee_plugin();
+            fee_plugin_running_.store(true);
+            fee_plugin_thread_ = std::thread([this] { fee_plugin_loop(); });
+            std::cout << "Fee plugin loaded: " << fee_plugin_path_
+                      << " (in-process, polling pending fees)\n";
         }
 
         load_persisted_rooms_at_startup();
@@ -741,6 +790,16 @@ private:
         // receipt_chain_link_hash(). Guarded by `mutex` like every other
         // mutable field here.
         std::optional<IssuedReceipt> final_ack_receipt;
+        // Set the moment this room first lands in
+        // SessionState::WaitingForFeeConfirmation (see handle_sent()) -
+        // exposed to the admin channel's FEEDETAILS command and to the
+        // in-process plugin polling thread (Mode B) so a checker can decide
+        // how long a fee has been outstanding. Never persisted - like
+        // require_fee_confirmation_/fee_position_, a room already past this
+        // gate at restart has that fact baked into its persisted `state`,
+        // and a restart is a reasonable moment to lose "how long" precision
+        // for the (rare, operator-visible) rooms still waiting.
+        std::optional<std::uint64_t> fee_confirmation_pending_since;
     };
 
     static Party party_for(const RoomEntry& room, const ClientId& client_id) {
@@ -1249,7 +1308,7 @@ private:
             // stage-4 "settlement completed" receipt here is never premature
             // - see receipt.hpp's file comment. Unless the operator opted
             // into require_fee_confirmation, in which case the session lands
-            // in WaitingForFeeConfirmation instead - see handle_confirm_fee()
+            // in WaitingForFeeConfirmation instead - see try_confirm_fee_locked()
             // for where completion actually happens in that case. An early
             // fee position instead lands in WaitingForSent, handled below.
             const SessionState new_state = room->session.state();
@@ -1259,6 +1318,8 @@ private:
             if (complete) {
                 room->active = false;
                 completion_receipt = issue_receipt(*room, ReceiptStage::SettlementCompleted, true);
+            } else if (awaiting_fee_confirmation) {
+                room->fee_confirmation_pending_since = now_unix_seconds();
             } else if (resumed_trading_after_early_fee) {
                 resumed_turn = room->session.current_turn();
             }
@@ -1307,17 +1368,19 @@ private:
         receiver->enqueue(MessageType::Sent, encode_round_signal(message));
     }
 
-    // Admin-only (see Impl::admin_control_loop()'s CONFIRMFEE command) -
-    // there is no client-facing wire message for this, matching
+    // Admin-only (see Impl::admin_control_loop()'s CONFIRMFEE command) and
+    // the in-process plugin polling thread (Mode B - see fee_plugin_thread_)
+    // - there is no client-facing wire message for this, matching
     // MediatorSession::confirm_fee_received()'s own comment. Looks the room
     // up directly by id rather than via find_room_for(), since this is not
     // acting on behalf of either connected party. Returns false (and
     // changes nothing) if no room with this id is currently in
-    // WaitingForFeeConfirmation - the caller (admin_control_loop) reports
-    // that back over the admin channel rather than throwing, since "you
-    // asked about a room that isn't in that state" is a normal outcome for
-    // an operator racing their own external payment check, not a bug.
-    bool handle_confirm_fee(const RoomId& room_id) {
+    // WaitingForFeeConfirmation - the caller reports that back (over the
+    // admin channel, or simply tries again next poll) rather than this
+    // throwing, since "you asked about a room that isn't in that state" is
+    // a normal outcome for a caller racing its own external payment check,
+    // not a bug.
+    bool try_confirm_fee_locked(const RoomId& room_id) {
         std::shared_ptr<RoomEntry> room;
         {
             std::scoped_lock lock(hub_mutex_);
@@ -1350,11 +1413,22 @@ private:
         return true;
     }
 
-    // Admin-only (LISTPENDINGFEES) - room ids currently sitting in
-    // WaitingForFeeConfirmation, for the operator to check against whatever
-    // they use to actually verify a payment arrived.
-    std::vector<RoomId> pending_fee_confirmations() {
-        std::vector<RoomId> out;
+    // A pending fee leg's own frozen terms (captured at room creation - see
+    // RoomEntry's constructors, never the mediator's current live-configured
+    // fee, which SETFEE can change between a room's creation and its fee
+    // leg becoming due) plus how long it has been waiting.
+    struct PendingFeeDetail {
+        RoomId room_id;
+        FeeTerms fee;
+        std::uint64_t since{};
+    };
+
+    // Admin-only (LISTPENDINGFEES/FEEDETAILS) and the in-process plugin
+    // polling thread (Mode B) - every room currently sitting in
+    // WaitingForFeeConfirmation, for a human operator or a plugin to check
+    // against whatever they use to actually verify a payment arrived.
+    std::vector<PendingFeeDetail> pending_fee_details_locked() {
+        std::vector<PendingFeeDetail> out;
         std::vector<std::shared_ptr<RoomEntry>> snapshot;
         {
             std::scoped_lock lock(hub_mutex_);
@@ -1367,8 +1441,20 @@ private:
         for (const auto& room : snapshot) {
             std::scoped_lock lock(room->mutex);
             if (room->session.state() == SessionState::WaitingForFeeConfirmation) {
-                out.push_back(room->id);
+                out.push_back(PendingFeeDetail{
+                    room->id, room->session.fee(),
+                    room->fee_confirmation_pending_since.value_or(0U)});
             }
+        }
+        return out;
+    }
+
+    // LISTPENDINGFEES only needs the ids - kept as a thin projection of
+    // pending_fee_details_locked() rather than a second room scan.
+    std::vector<RoomId> pending_fee_confirmations() {
+        std::vector<RoomId> out;
+        for (auto& detail : pending_fee_details_locked()) {
+            out.push_back(std::move(detail.room_id));
         }
         return out;
     }
@@ -1910,6 +1996,26 @@ private:
             for (auto it = rooms_.begin(); it != rooms_.end();) {
                 if (it->second->party_a == client_id ||
                     it->second->party_b == client_id) {
+                    // A room already parked in WaitingForFeeConfirmation is
+                    // waiting on the operator (or a plugin - see
+                    // fee_plugin_loop()/admin_control_loop()), not on
+                    // either party - by this point both have already done
+                    // everything the protocol asks of them, and
+                    // disconnecting is the expected, harmless next thing a
+                    // client does. Aborting here would silently defeat the
+                    // entire point of --fee-require-confirmation, since a
+                    // room that never survives its own parties
+                    // disconnecting can never actually wait for anyone.
+                    bool keep_room = false;
+                    {
+                        std::scoped_lock room_lock(it->second->mutex);
+                        keep_room = it->second->active && it->second->session.state() ==
+                                                                SessionState::WaitingForFeeConfirmation;
+                    }
+                    if (keep_room) {
+                        ++it;
+                        continue;
+                    }
                     affected_rooms.push_back(it->second);
                     it = rooms_.erase(it);
                 } else {
@@ -2064,8 +2170,25 @@ private:
         std::string token;
         stream >> command >> token;
 
-        if (admin_token_.empty() || token.size() != admin_token_.size() ||
-            CRYPTO_memcmp(token.data(), admin_token_.data(), token.size()) != 0) {
+        // Two credential levels on one channel - see
+        // configured_admin_fee_token()'s comment. fee_scoped_only stays
+        // false (full access) whenever the connection authenticated with
+        // the full admin token, even if TRADEP2P_ADMIN_FEE_TOKEN also
+        // happens to be configured.
+        bool fee_scoped_only = false;
+        if (!admin_token_.empty() && token.size() == admin_token_.size() &&
+            CRYPTO_memcmp(token.data(), admin_token_.data(), token.size()) == 0) {
+            fee_scoped_only = false;
+        } else if (!admin_fee_token_.empty() && token.size() == admin_fee_token_.size() &&
+                   CRYPTO_memcmp(token.data(), admin_fee_token_.data(), token.size()) == 0) {
+            fee_scoped_only = true;
+        } else {
+            send_admin_line(fd, "ERR unauthorized");
+            return;
+        }
+
+        if (fee_scoped_only && command != "LISTPENDINGFEES" && command != "FEEDETAILS" &&
+            command != "CONFIRMFEE") {
             send_admin_line(fd, "ERR unauthorized");
             return;
         }
@@ -2126,12 +2249,33 @@ private:
             return;
         }
 
+        if (command == "FEEDETAILS") {
+            std::string room_id_hex;
+            stream >> room_id_hex;
+            try {
+                const RoomId room_id = room_id_from_hex(room_id_hex);
+                const auto pending = pending_fee_details_locked();
+                const auto it = std::find_if(
+                    pending.begin(), pending.end(),
+                    [&room_id](const PendingFeeDetail& detail) { return detail.room_id == room_id; });
+                if (it == pending.end()) {
+                    send_admin_line(fd, "ERR no room with that id is waiting for fee confirmation");
+                } else {
+                    send_admin_line(fd, "OK " + it->fee.asset + " " + std::to_string(it->fee.amount) +
+                                            " " + it->fee.address + " " + std::to_string(it->since));
+                }
+            } catch (const std::exception& error) {
+                send_admin_line(fd, std::string("ERR ") + error.what());
+            }
+            return;
+        }
+
         if (command == "CONFIRMFEE") {
             std::string room_id_hex;
             stream >> room_id_hex;
             try {
                 const RoomId room_id = room_id_from_hex(room_id_hex);
-                if (handle_confirm_fee(room_id)) {
+                if (try_confirm_fee_locked(room_id)) {
                     send_admin_line(fd, "OK");
                 } else {
                     send_admin_line(fd, "ERR no room with that id is waiting for fee confirmation");
@@ -2153,6 +2297,74 @@ private:
                 std::cerr << "lobby snapshot failed: " << error.what() << '\n';
             }
             for (int tick = 0; tick < 10 && snapshot_running_.load(); ++tick) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+    // Mode B (in-process fee plugin) - dlopen()s fee_plugin_path_ and
+    // resolves both required symbols. Called once from run(), before
+    // fee_plugin_thread_ starts. Throws (never partially leaving
+    // fee_plugin_handle_/fee_plugin_check_ set to something unusable) on
+    // any failure - a missing symbol, an ABI version mismatch, or dlopen()
+    // itself failing - so a misconfigured plugin path fails mediator
+    // startup loudly instead of silently running with no plugin at all.
+    void load_fee_plugin() {
+        ::dlerror();
+        void* handle = ::dlopen(fee_plugin_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (handle == nullptr) {
+            const char* error = ::dlerror();
+            throw std::runtime_error("failed to load fee plugin '" + fee_plugin_path_ +
+                                      "': " + (error != nullptr ? error : "unknown error"));
+        }
+
+        auto* const abi_version_fn = reinterpret_cast<int (*)(void)>(
+            ::dlsym(handle, "tradep2p_fee_plugin_abi_version"));
+        auto* const check_fn = reinterpret_cast<int (*)(const tradep2p_fee_check_request*)>(
+            ::dlsym(handle, "tradep2p_fee_plugin_check"));
+        if (abi_version_fn == nullptr || check_fn == nullptr) {
+            ::dlclose(handle);
+            throw std::runtime_error(
+                "fee plugin '" + fee_plugin_path_ +
+                "' is missing tradep2p_fee_plugin_abi_version or tradep2p_fee_plugin_check");
+        }
+        const int reported_version = abi_version_fn();
+        if (reported_version != TRADEP2P_FEE_PLUGIN_ABI_VERSION) {
+            ::dlclose(handle);
+            throw std::runtime_error(
+                "fee plugin '" + fee_plugin_path_ + "' reports ABI version " +
+                std::to_string(reported_version) + ", mediator expects " +
+                std::to_string(TRADEP2P_FEE_PLUGIN_ABI_VERSION));
+        }
+
+        fee_plugin_handle_ = handle;
+        fee_plugin_check_ = check_fn;
+    }
+
+    // Polls every pending fee against the loaded plugin and confirms any
+    // it reports paid - the in-process equivalent of an operator typing
+    // CONFIRMFEE, or Mode A's admin-channel-driven plugin, but with no
+    // separate process or credential involved. See fee_plugin_abi.h for
+    // the exact contract each call to fee_plugin_check_ makes.
+    void fee_plugin_loop() {
+        while (fee_plugin_running_.load()) {
+            try {
+                for (const auto& detail : pending_fee_details_locked()) {
+                    const std::string room_id_hex = room_id_to_hex(detail.room_id);
+                    tradep2p_fee_check_request request{};
+                    request.room_id_hex = room_id_hex.c_str();
+                    request.asset = detail.fee.asset.c_str();
+                    request.amount = detail.fee.amount;
+                    request.address = detail.fee.address.c_str();
+                    request.since_unix_seconds = detail.since;
+                    if (fee_plugin_check_(&request) == 1) {
+                        try_confirm_fee_locked(detail.room_id);
+                    }
+                }
+            } catch (const std::exception& error) {
+                std::cerr << "fee plugin poll failed: " << error.what() << '\n';
+            }
+            for (int tick = 0; tick < 50 && fee_plugin_running_.load(); ++tick) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
@@ -2317,6 +2529,10 @@ private:
     // Gates admin_control_loop() - see configured_admin_token()'s comment
     // for why an empty token disables the channel entirely.
     std::string admin_token_;
+    // See configured_admin_fee_token()'s comment - a scoped, lower-privilege
+    // credential for the same channel, meaningful only once admin_token_
+    // (which gates the channel itself) is also set.
+    std::string admin_fee_token_;
     std::uint16_t admin_port_;
     // See mediator.hpp's SessionState::WaitingForFeeConfirmation. Captured
     // once at startup and threaded into every new room's MediatorSession -
@@ -2333,6 +2549,16 @@ private:
     std::string fee_persist_file_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
+    // Mode B (in-process fee plugin) - see configured_fee_plugin_path()'s
+    // comment, load_fee_plugin(), and fee_plugin_loop(). fee_plugin_handle_
+    // is the dlopen() handle (nullptr if no plugin is configured or
+    // loading hasn't happened yet); fee_plugin_check_ is the plugin's
+    // tradep2p_fee_plugin_check symbol, resolved once at load time.
+    std::string fee_plugin_path_;
+    void* fee_plugin_handle_{nullptr};
+    int (*fee_plugin_check_)(const tradep2p_fee_check_request*){nullptr};
+    std::atomic<bool> fee_plugin_running_{false};
+    std::thread fee_plugin_thread_;
     std::atomic<std::size_t> pending_handshakes_{0U};
     std::mutex hub_mutex_;
     std::unordered_map<std::string, std::shared_ptr<Client>> clients_;
