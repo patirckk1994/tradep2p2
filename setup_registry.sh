@@ -32,6 +32,25 @@ Options:
                         (e.g. a testing and a production instance), each
                         MUST use a different --admin-port or the second one
                         to start silently loses the bind (logged, not fatal).
+  --gossip-peer HOST:PORT|PIN[|1]
+                        (repeatable) single-hop gossip peer: pulls this
+                        peer's own approved registrations periodically (the
+                        same RegistryList request `nodes`/`nodes-tor`
+                        already make - no new protocol). Trailing |1 means
+                        auto-trust this peer's approval outright (merged
+                        into your listings immediately, tagged with the
+                        peer as source); omit it (default) to have each
+                        peer-learned entry sit Pending here too, needing
+                        your own --admin-token approval like a direct
+                        registration. This registry never re-shares what it
+                        learns from a peer - only your OWN direct,
+                        approved registrations ever go out to anyone else.
+  --gossip-proxy HOST:PORT
+                        SOCKS5 proxy (e.g. a local Tor daemon) used for any
+                        --gossip-peer whose host ends in .onion - one
+                        shared proxy for all of them. Required if any
+                        configured peer is onion-only; leave unset if none
+                        are.
   --dashboard-port N   operator dashboard port (default 8092)
   --no-dashboard        do not launch the operator dashboard
   -h, --help            show this help
@@ -49,8 +68,22 @@ REGISTRY_KEY="$ROOT/certs/registry.key.pem"
 REGISTRY_STATE_FILE="$ROOT/logs/registry-state.json"
 ADMIN_TOKEN=""
 ADMIN_PORT="7445"
+GOSSIP_PEERS=""
+GOSSIP_PROXY=""
 DASHBOARD_PORT="8092"
 RUN_DASHBOARD="1"
+
+# Pre-scan for --config so it can actually select which file gets sourced
+# below - see setup_mediator.sh's identical fix for why: without this,
+# --config's own value never takes effect until one command too late,
+# because sourcing otherwise happens before this flag is even parsed.
+for (( scan = 1; scan <= $#; scan++ )); do
+    if [[ "${!scan}" == "--config" ]]; then
+        next=$((scan + 1))
+        CONFIG_FILE="${!next}"
+        break
+    fi
+done
 
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -68,6 +101,14 @@ while [[ $# -gt 0 ]]; do
         --state-file) REGISTRY_STATE_FILE="$2"; shift 2 ;;
         --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
+        --gossip-peer)
+            if [[ -n "$GOSSIP_PEERS" ]]; then
+                GOSSIP_PEERS="$GOSSIP_PEERS,$2"
+            else
+                GOSSIP_PEERS="$2"
+            fi
+            shift 2 ;;
+        --gossip-proxy) GOSSIP_PROXY="$2"; shift 2 ;;
         --dashboard-port) DASHBOARD_PORT="$2"; shift 2 ;;
         --no-dashboard) RUN_DASHBOARD="0"; shift ;;
         -h|--help) print_usage; exit 0 ;;
@@ -84,6 +125,13 @@ REGISTRY_KEY="$REGISTRY_KEY"
 REGISTRY_STATE_FILE="$REGISTRY_STATE_FILE"
 ADMIN_TOKEN="$ADMIN_TOKEN"
 ADMIN_PORT="$ADMIN_PORT"
+
+# Comma-separated "host:port|pinhex|trust" entries - see --gossip-peer
+# --help. Leave empty to disable gossip federation entirely.
+GOSSIP_PEERS="$GOSSIP_PEERS"
+# Only needed if any GOSSIP_PEERS entry is an .onion host.
+GOSSIP_PROXY="$GOSSIP_PROXY"
+
 DASHBOARD_PORT="$DASHBOARD_PORT"
 RUN_DASHBOARD="$RUN_DASHBOARD"
 EOF
@@ -124,7 +172,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
-    "$DASHBOARD_BIN" "$REGISTRY_STATE_FILE" --port "$DASHBOARD_PORT" &
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        "$DASHBOARD_BIN" "$REGISTRY_STATE_FILE" --port "$DASHBOARD_PORT" \
+            --admin-token "$ADMIN_TOKEN" --admin-port "$ADMIN_PORT" &
+    else
+        "$DASHBOARD_BIN" "$REGISTRY_STATE_FILE" --port "$DASHBOARD_PORT" &
+    fi
     DASHBOARD_PID=$!
 fi
 
@@ -141,8 +194,15 @@ else
     echo "                     nothing will ever appear on RegistryList or status.php"
     echo "                     until you re-run with --admin-token"
 fi
+if [[ -n "$GOSSIP_PEERS" ]]; then
+    PEER_COUNT=$(( $(grep -o ',' <<< "$GOSSIP_PEERS" | wc -l) + 1 ))
+    echo "  gossip peers:      $PEER_COUNT configured (single-hop; see --gossip-peer --help)"
+fi
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
     echo "  operator dashboard: http://127.0.0.1:$DASHBOARD_PORT (loopback only; proxy it yourself to expose remotely)"
+    if [[ -n "$ADMIN_TOKEN" ]]; then
+        echo "                      admin actions enabled - can approve/reject pending registrations"
+    fi
 fi
 echo "============================================================"
 
@@ -150,5 +210,11 @@ export TRADEP2P_REGISTRY_STATE_FILE="$REGISTRY_STATE_FILE"
 if [[ -n "$ADMIN_TOKEN" ]]; then
     export TRADEP2P_REGISTRY_ADMIN_TOKEN="$ADMIN_TOKEN"
     export TRADEP2P_REGISTRY_ADMIN_PORT="$ADMIN_PORT"
+fi
+if [[ -n "$GOSSIP_PEERS" ]]; then
+    export TRADEP2P_REGISTRY_GOSSIP_PEERS="$GOSSIP_PEERS"
+    if [[ -n "$GOSSIP_PROXY" ]]; then
+        export TRADEP2P_REGISTRY_GOSSIP_PROXY="$GOSSIP_PROXY"
+    fi
 fi
 exec "$CLI" registry "$REGISTRY_BIND" "$REGISTRY_CERT" "$REGISTRY_KEY"

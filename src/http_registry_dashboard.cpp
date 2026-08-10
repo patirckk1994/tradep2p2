@@ -149,10 +149,17 @@ struct PendingNode {
     std::string host;
     std::uint16_t port{};
     std::string pin_hex;
+    // Empty for a direct registration; otherwise the peer registry this
+    // was learned from via gossip (registry.cpp's gossip_entries_) - see
+    // RegistryNode::source_registry's own comment (protocol.hpp).
+    std::string source_registry;
 };
 
-// Parses LISTPENDING's "OK NONE" / "OK host:port|pinhex,host:port|pinhex,..."
-// response (registry.cpp's admin_control_loop()) into structured rows.
+// Parses LISTPENDING's "OK NONE" /
+// "OK host:port|pinhex|source,host:port|pinhex|source,..." response
+// (registry.cpp's admin_control_loop()) into structured rows - always
+// three fields per entry now (source empty for a direct registration),
+// so this splits on the FIRST two '|' rather than the last one.
 std::vector<PendingNode> parse_pending_list(const std::string& ok_response) {
     std::vector<PendingNode> out;
     // Strip the leading "OK " already confirmed by admin_query()'s ok flag.
@@ -165,13 +172,19 @@ std::vector<PendingNode> parse_pending_list(const std::string& ok_response) {
         const auto comma = body.find(',', start);
         const std::string entry =
             body.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        const auto bar = entry.rfind('|');
-        if (bar != std::string::npos) {
-            const std::string key = entry.substr(0U, bar);
-            const std::string pin = entry.substr(bar + 1U);
+        const auto first_bar = entry.find('|');
+        if (first_bar != std::string::npos) {
+            const std::string key = entry.substr(0U, first_bar);
+            const auto second_bar = entry.find('|', first_bar + 1U);
+            const std::string pin =
+                second_bar == std::string::npos
+                    ? entry.substr(first_bar + 1U)
+                    : entry.substr(first_bar + 1U, second_bar - first_bar - 1U);
+            const std::string source =
+                second_bar == std::string::npos ? std::string{} : entry.substr(second_bar + 1U);
             try {
                 const Endpoint endpoint = parse_endpoint(key);
-                out.push_back(PendingNode{endpoint.host, endpoint.port, pin});
+                out.push_back(PendingNode{endpoint.host, endpoint.port, pin, source});
             } catch (const std::exception&) {
                 // A key this dashboard can't parse is skipped rather than
                 // aborting the whole listing - better to show every other
@@ -195,7 +208,8 @@ std::string pending_to_json(const std::vector<PendingNode>& pending) {
         }
         const auto& node = pending[index];
         json << "{\"host\":\"" << json_escape(node.host) << "\",\"port\":" << node.port
-             << ",\"certificate_pin\":\"" << json_escape(node.pin_hex) << "\"}";
+             << ",\"certificate_pin\":\"" << json_escape(node.pin_hex) << "\""
+             << ",\"source_registry\":\"" << json_escape(node.source_registry) << "\"}";
     }
     json << "]}";
     return json.str();
@@ -266,6 +280,7 @@ std::string nodes_to_json(const RegistryNodesMessage& nodes) {
              << node.port << ",\"certificate_pin\":\""
              << tradep2p::certificate_pin_to_hex(node.certificate_pin)
              << "\",\"remaining_ttl_seconds\":" << node.remaining_ttl_seconds
+             << ",\"source_registry\":\"" << json_escape(node.source_registry) << "\""
              << '}';
     }
     json << "]}";
@@ -314,8 +329,8 @@ button.danger{background:#3a1414}
   <section class="panel" id="pending-panel" style="display:__PENDING_DISPLAY__">
     <h2>// pending registrations</h2>
     <p class="muted">New registrations on this registry start Pending and are invisible to every RegistryList caller (and the public snapshot below) until approved here.</p>
-    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th></th></tr></thead>
-    <tbody id="pending-nodes"><tr><td colspan="4" class="muted">loading&hellip;</td></tr></tbody></table>
+    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th>Source</th><th></th></tr></thead>
+    <tbody id="pending-nodes"><tr><td colspan="5" class="muted">loading&hellip;</td></tr></tbody></table>
   </section>
   <section class="panel">
     <h2>// query any registry</h2>
@@ -326,15 +341,15 @@ button.danger{background:#3a1414}
     </form>
     <div class="actions"><button id="query-submit">Query registry</button></div>
     <div id="query-summary" class="muted" style="margin-top:10px"></div>
-    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th>TTL remaining</th></tr></thead>
-    <tbody id="query-nodes"><tr><td colspan="4" class="muted">no query yet</td></tr></tbody></table>
+    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th>TTL remaining</th><th>Source</th></tr></thead>
+    <tbody id="query-nodes"><tr><td colspan="5" class="muted">no query yet</td></tr></tbody></table>
   </section>
   <section class="panel">
     <h2>// local snapshot</h2>
     <div id="summary" class="muted">__SNAPSHOT_TEXT__</div>
     <div id="metrics" class="metric-grid"></div>
-    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th>TTL remaining</th></tr></thead>
-    <tbody id="nodes"><tr><td colspan="4" class="muted">waiting for snapshot</td></tr></tbody></table>
+    <table><thead><tr><th>Host</th><th>Port</th><th>Certificate pin (SHA-256)</th><th>TTL remaining</th><th>Source</th></tr></thead>
+    <tbody id="nodes"><tr><td colspan="5" class="muted">waiting for snapshot</td></tr></tbody></table>
   </section>
   <p class="muted">__FOOTER_NOTE__</p>
 </div>
@@ -344,11 +359,12 @@ const snapshotEnabled=__SNAPSHOT_ENABLED__;
 const adminEnabled=__ADMIN_ENABLED__;
 const esc=(v)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function notice(text,bad){const n=document.getElementById('notice');n.textContent=text;n.className=bad?'notice error':'notice';setTimeout(()=>{if(n.textContent===text)n.textContent=''},6000)}
+function sourceLabel(source){return source?`<span title="relayed via gossip from this peer">${esc(source)}</span>`:'<span class="muted">direct</span>'}
 function renderNodeRows(target,nodes){
   target.innerHTML=nodes.length?nodes.map(n=>{
     const low=Number(n.remaining_ttl_seconds)<60;
-    return `<tr><td>${esc(n.host)}</td><td>${esc(n.port)}</td><td title="${esc(n.certificate_pin)}">${esc(String(n.certificate_pin||'').slice(0,16))}&hellip;</td><td class="${low?'ttl-low':''}">${esc(n.remaining_ttl_seconds)}s</td></tr>`;
-  }).join(''):'<tr><td colspan="4" class="muted">No nodes.</td></tr>';
+    return `<tr><td>${esc(n.host)}</td><td>${esc(n.port)}</td><td title="${esc(n.certificate_pin)}">${esc(String(n.certificate_pin||'').slice(0,16))}&hellip;</td><td class="${low?'ttl-low':''}">${esc(n.remaining_ttl_seconds)}s</td><td>${sourceLabel(n.source_registry)}</td></tr>`;
+  }).join(''):'<tr><td colspan="5" class="muted">No nodes.</td></tr>';
 }
 async function decide(host,port,verb,btn){
   btn.disabled=true;const original=btn.textContent;btn.textContent=verb==='approve'?'approving…':'rejecting…';
@@ -366,8 +382,8 @@ async function decide(host,port,verb,btn){
 function renderPendingRows(pending){
   const target=document.getElementById('pending-nodes');
   target.innerHTML=pending.length?pending.map(n=>
-    `<tr><td>${esc(n.host)}</td><td>${esc(n.port)}</td><td title="${esc(n.certificate_pin)}">${esc(String(n.certificate_pin||'').slice(0,16))}&hellip;</td><td><button onclick="decide('${esc(n.host)}',${esc(n.port)},'approve',this)">Approve</button> <button class="danger" onclick="decide('${esc(n.host)}',${esc(n.port)},'reject',this)">Reject</button></td></tr>`
-  ).join(''):'<tr><td colspan="4" class="muted">No pending registrations.</td></tr>';
+    `<tr><td>${esc(n.host)}</td><td>${esc(n.port)}</td><td title="${esc(n.certificate_pin)}">${esc(String(n.certificate_pin||'').slice(0,16))}&hellip;</td><td>${sourceLabel(n.source_registry)}</td><td><button onclick="decide('${esc(n.host)}',${esc(n.port)},'approve',this)">Approve</button> <button class="danger" onclick="decide('${esc(n.host)}',${esc(n.port)},'reject',this)">Reject</button></td></tr>`
+  ).join(''):'<tr><td colspan="5" class="muted">No pending registrations.</td></tr>';
 }
 async function refreshPending(){
   if(!adminEnabled)return;
