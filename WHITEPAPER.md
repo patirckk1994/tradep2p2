@@ -428,7 +428,7 @@ third party who was not present for the transaction. A bare assertion of
 the form *"key X transacted successfully"* is insufficient: it is
 replayable into any context and attests to nothing checkable. A receipt
 must instead bind: a version and suite identifier, the transaction-session
-identifier (or a privacy-preserving commitment to it), awhitepaper.md commitment to the
+identifier (or a privacy-preserving commitment to it), a commitment to the
 transaction's terms, both parties' transaction-ephemeral public keys, the
 facilitator's public key, a stage identifier, a completion flag, a
 timestamp, a unique nonce, and the hash of the previous stage's receipt —
