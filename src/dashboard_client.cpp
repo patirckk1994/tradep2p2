@@ -1,4 +1,5 @@
 #include "tradep2p/dashboard_client.hpp"
+#include "tradep2p/registry.hpp"
 
 #include <openssl/rand.h>
 
@@ -97,21 +98,35 @@ const char* party_name(Party party) {
 DashboardClient::DashboardClient(Endpoint mediator,
                                  ClientTlsPolicy tls_policy,
                                  std::optional<Endpoint> socks_proxy,
-                                 std::string mediator_id)
+                                 std::string mediator_id,
+                                 std::optional<Endpoint> registry,
+                                 std::optional<ClientTlsPolicy> registry_tls,
+                                 std::optional<Endpoint> registry_proxy)
     : mediator_(std::move(mediator)),
       tls_policy_(std::move(tls_policy)),
       socks_proxy_(std::move(socks_proxy)),
-      mediator_id_(std::move(mediator_id)) {}
+      mediator_id_(std::move(mediator_id)),
+      registry_(std::move(registry)),
+      registry_tls_(std::move(registry_tls)),
+      registry_proxy_(std::move(registry_proxy)) {}
 
 DashboardClient::~DashboardClient() {
     stop_.store(true);
     if (worker_.joinable()) {
         worker_.join();
     }
+    registry_poll_running_.store(false);
+    if (registry_poll_thread_.joinable()) {
+        registry_poll_thread_.join();
+    }
 }
 
 void DashboardClient::start() {
     worker_ = std::thread([this] { worker_loop(); });
+    if (registry_.has_value()) {
+        registry_poll_running_.store(true);
+        registry_poll_thread_ = std::thread([this] { registry_poll_loop(); });
+    }
 }
 
 void DashboardClient::refresh_offers() {
@@ -455,7 +470,43 @@ std::string DashboardClient::state_json() const {
          << ",\"header_bytes\":" << header_bytes
          << ",\"connection_count\":" << connection_count_.load()
          << ",\"connection_seconds\":" << connection_seconds
-         << "}}";
+         << "}";
+
+    // Registry visibility - a fixed-frame snapshot of one registry's public
+    // listing (see registry_poll_loop()), never this client's own network
+    // mesh view. source_registry empty means that registry vetted the
+    // mediator directly; non-empty names the peer registry it was
+    // gossip-relayed from (specs.txt SS1.3).
+    json << ",\"registry\":{\"configured\":" << (registry_.has_value() ? "true" : "false");
+    if (registry_.has_value()) {
+        json << ",\"endpoint\":\"" << json_escape(registry_->host + ":" + std::to_string(registry_->port))
+             << "\",\"error\":\"" << json_escape(registry_poll_error_) << "\",\"polled_seconds_ago\":";
+        if (registry_polled_at_.has_value()) {
+            json << std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - *registry_polled_at_)
+                        .count();
+        } else {
+            json << "null";
+        }
+        json << ",\"nodes\":[";
+        for (std::size_t index = 0; index < registry_nodes_.size(); ++index) {
+            if (index != 0U) {
+                json << ',';
+            }
+            const auto& node = registry_nodes_[index];
+            const std::string node_endpoint = node.host + ":" + std::to_string(node.port);
+            json << "{\"host\":\"" << json_escape(node.host) << "\",\"port\":" << node.port
+                 << ",\"certificate_pin\":\"" << certificate_pin_to_hex(node.certificate_pin)
+                 << "\",\"remaining_ttl_seconds\":" << node.remaining_ttl_seconds
+                 << ",\"source_registry\":\"" << json_escape(node.source_registry) << "\""
+                 << ",\"is_current_mediator\":"
+                 << (node_endpoint == (mediator_.host + ":" + std::to_string(mediator_.port)) ? "true"
+                                                                                                : "false")
+                 << "}";
+        }
+        json << "]";
+    }
+    json << "}}";
     return json.str();
 }
 
@@ -585,6 +636,43 @@ void DashboardClient::worker_loop() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 }
             }
+        }
+    }
+}
+
+// Fixed-frame snapshot, not a live view: pulls the configured registry's
+// current public listing once, waits, repeats - independent of and not
+// gated on the mediator connection above (worker_loop's own reconnect
+// backoff has nothing to do with registry reachability). Same "pull
+// immediately, then tick-sleep up to N seconds checking the running flag
+// each tick for responsive shutdown" shape as registry.cpp's own
+// gossip_loop(), which this mirrors deliberately - a client polling one
+// registry is structurally the same operation as a registry gossiping
+// with a peer, just from the read-only side.
+void DashboardClient::registry_poll_loop() {
+    while (registry_poll_running_.load()) {
+        try {
+            const RegistryNodesMessage listing =
+                registry_proxy_.has_value()
+                    ? list_registered_nodes_via_socks5(*registry_proxy_, *registry_, *registry_tls_)
+                    : list_registered_nodes(*registry_, *registry_tls_);
+            std::scoped_lock lock(state_mutex_);
+            registry_nodes_ = listing.nodes;
+            registry_poll_error_.clear();
+            registry_polled_at_ = std::chrono::steady_clock::now();
+        } catch (const std::exception& error) {
+            std::scoped_lock lock(state_mutex_);
+            registry_poll_error_ = error.what();
+            registry_polled_at_ = std::chrono::steady_clock::now();
+            // Deliberately keep the previous registry_nodes_ rather than
+            // clearing it on a failed poll - a momentary registry hiccup
+            // shouldn't blank a display that was showing real data a
+            // moment ago, same reasoning as gossip_loop() leaving a
+            // peer's previously-cached entries alone when that peer is
+            // unreachable this cycle.
+        }
+        for (int tick = 0; tick < 600 && registry_poll_running_.load(); ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
 }

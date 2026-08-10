@@ -135,6 +135,18 @@ approve it, exactly like a direct registration would. Choosing to
 configure a peer at all is the actual trust decision this design rests
 on - gossip re-verifies nothing on its own.
 
+`tradep2p-dashboard` can optionally surface one registry's listing
+(`--registry`/`--registry-pin`/`--registry-proxy`), independent of the
+mediator connection - a second background thread
+(`DashboardClient::registry_poll_loop()`, mirrors `gossip_loop()`'s own
+"pull immediately, tick-sleep, catch-and-keep-previous-data-on-failure"
+shape) polls that one registry's public `RegistryList` every ~60s and
+reports it via `state_json()`'s `registry` field, including
+`source_registry` per node and whether it matches this session's own
+connected mediator. This is a fixed-frame snapshot of one registry's view,
+never a live connection and never this client's own reconstruction of the
+network mesh - it has none, and does not attempt to build one.
+
 ### 1.4 Offer book and room lifecycle
 
 A published offer records only the asset/amount pair on each side, a number

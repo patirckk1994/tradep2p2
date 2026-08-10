@@ -714,6 +714,19 @@ your configured peers' own direct registrations, nothing further, and
 choosing to configure a peer at all is the real trust decision this rests
 on, not something gossip re-verifies on its own.
 
+**Seeing a registry's listing from `tradep2p-dashboard`:** the trading
+client can optionally poll one registry (not this client's own view of the
+network mesh, which it doesn't have — just a periodic snapshot of what that
+one registry reports) and show it in a "registry visibility" panel, tagging
+each mediator direct vs. gossip-relayed:
+
+```sh
+./build/tradep2p-dashboard client 127.0.0.1:7443 MEDIATOR_PIN \
+  --registry 127.0.0.1:7555 --registry-pin REGISTRY_PIN
+```
+
+Add `--registry-proxy 127.0.0.1:9050` if the registry is onion-only.
+
 ### Tutorial: finding a mediator through someone else's registry
 
 Everything above is written from an operator's point of view — running your
