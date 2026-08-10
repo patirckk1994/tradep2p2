@@ -58,6 +58,18 @@ struct IdentityDashboardState {
     // identical design choice (see history.hpp's fingerprint-scoping
     // decision for why this is per-mediator, not global).
     std::string mediator_id;
+    // Security tier (specs.txt SS8): both default false, preserving today's
+    // unlinkable-by-default behavior unchanged unless a user explicitly
+    // opts in. persistent_identity_enabled alone means "prove my identity-
+    // layer pseudonym in every room automatically" (per-mediator scoped,
+    // same key recognition already used for a manual per-room click);
+    // global_identity_enabled additionally means "and reuse ONE such
+    // pseudonym across every mediator, not just this one" - only
+    // meaningful when persistent_identity_enabled is also true, but kept as
+    // an independent bool rather than an enum so the JSON/API shape stays a
+    // simple pair of checkboxes matching the two-checkbox UI directly.
+    bool persistent_identity_enabled{false};
+    bool global_identity_enabled{false};
 };
 
 template <std::size_t N>
@@ -72,8 +84,12 @@ std::string hex_encode(const std::array<std::uint8_t, N>& bytes) {
 
 // PRECONDITION: state.mutex already held.
 std::string identity_state_json_locked(const IdentityDashboardState& state) {
+    const std::string tier_json =
+        std::string(",\"persistent_identity_enabled\":") +
+        (state.persistent_identity_enabled ? "true" : "false") +
+        ",\"global_identity_enabled\":" + (state.global_identity_enabled ? "true" : "false");
     if (!state.keystore.has_value()) {
-        return "{\"ok\":true,\"loaded\":false}";
+        return "{\"ok\":true,\"loaded\":false" + tier_json + "}";
     }
     const auto identity = state.keystore->public_identity();
     std::ostringstream json;
@@ -89,7 +105,7 @@ std::string identity_state_json_locked(const IdentityDashboardState& state) {
                  : std::string{})
          << "\""
          << ",\"created_at\":" << identity.created_at
-         << ",\"key_generation\":" << identity.key_generation << "}";
+         << ",\"key_generation\":" << identity.key_generation << tier_json << "}";
     return json.str();
 }
 
@@ -297,6 +313,10 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.primary:hover{background:#7fa8ee}
 button.danger{background:#3a1c14;border-color:var(--danger);color:#f3c9c2}
 button:disabled{opacity:.45;cursor:not-allowed}
+.tier-row{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;color:var(--text);font-size:13px}
+.tier-row input[type=checkbox]{width:auto;margin-top:3px}
+.tier-warn{color:var(--amber)}
+.tier-disabled{opacity:.6}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .span2{grid-column:span 2}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
@@ -364,6 +384,32 @@ button.copy{padding:2px 7px;font-size:.8rem;background:transparent;border-color:
           </div>
         </form>
         <p class="muted">The passphrase is sent to this loopback-only dashboard process as an ordinary form field; it is never sent to the mediator.</p>
+      </section>
+      <section class="panel">
+        <h2>// security tier</h2>
+        <p class="muted">Your choice, not a recommendation either way - see specs.txt SS8. Off by
+        default: nothing here is enabled unless you check it.</p>
+        <div class="form-grid">
+          <label class="span2 tier-row">
+            <input type="checkbox" id="tier-persistent">
+            <span><b>Persistent identity (reputation)</b> - automatically prove the same
+            recognition key in every room, so repeat counterparties can build trust with you
+            over time. <span class="tier-warn">This correlates your rooms with each other -
+            that's the point, not a side effect, if reputation is what you want.</span></span>
+          </label>
+          <label class="span2 tier-row">
+            <input type="checkbox" id="tier-global" disabled>
+            <span><b>Global (all mediators)</b> - reuse ONE identity across every mediator you
+            trade through, not just this one. <span class="tier-warn">Wider correlation than
+            per-mediator alone - your reputation follows you everywhere, and so does the
+            linkability.</span> Requires the checkbox above.</span>
+          </label>
+          <label class="span2 tier-row tier-disabled">
+            <input type="checkbox" disabled>
+            <span><b>Blind-signature unlinkable credentials</b> - not implemented. See
+            specs.txt SS9.3 for status and why.</span>
+          </label>
+        </div>
       </section>
       <section class="panel">
         <h2>// publish offer</h2>
@@ -449,10 +495,16 @@ function roomCryptoDetail(r){const rc=r.recognition_challenge;const rr=r.recogni
 const expandedDetails=new Set();
 const pendingTurn=new Map();
 const selectedSuite=new Map();
+const autoRecognized=new Set();
 const turnKey=(r)=>r.turn?`${r.turn.round}:${r.turn.sender}:${r.turn.is_fee}:${r.action}`:`no-turn:${r.status}`;
 const waitingText='queued - waiting for the counterparty to confirm…';
 const waitingHtml=`<button class="primary" disabled>${waitingText}</button>`;
-function renderRooms(rooms){const target=document.getElementById('rooms');if(document.activeElement&&target.contains(document.activeElement)&&document.activeElement.tagName==='SELECT')return;if(!rooms.length){pendingTurn.clear();expandedDetails.clear();selectedSuite.clear();target.innerHTML='<p class="muted">No settlement rooms in this browser session.</p>';return}const liveIds=new Set(rooms.map(r=>r.room_id));for(const id of pendingTurn.keys())if(!liveIds.has(id))pendingTurn.delete(id);for(const id of expandedDetails)if(!liveIds.has(id))expandedDetails.delete(id);for(const id of selectedSuite.keys())if(!liveIds.has(id))selectedSuite.delete(id);target.innerHTML=rooms.map(r=>{const turn=r.turn?`<div class="turn"><b>${r.turn.is_fee?'Mediator fee':'Round '+esc(r.turn.round)}:</b> party ${esc(r.turn.sender)} sends <b>${esc(r.turn.amount)} ${esc(r.turn.asset)}</b><br><span class="muted mono-break">destination: ${esc(r.turn.destination)}</span></div>`:'';const tKey=turnKey(r);const isPending=pendingTurn.get(r.room_id)===tKey;let primary='';if(isPending){primary=waitingHtml;}else if(r.status==='active'&&r.action==='sent'){primary=`<button class="primary" data-sent="${esc(r.room_id)}" data-turnkey="${esc(tKey)}">${r.turn&&r.turn.is_fee?'I paid the mediator fee':'I sent it'}</button>`;}else if(r.status==='active'&&r.action==='received'){primary=`<button class="primary" data-received="${esc(r.room_id)}" data-turnkey="${esc(tKey)}">I verified receipt</button>`;}else if(r.status==='active'&&r.action==='awaiting_peer_send'){primary='<button class="primary" disabled>waiting for the counterparty to send this round&hellip;</button>';}else if(r.status==='active'&&r.turn&&r.turn.is_fee&&r.action==='none'){primary='<span class="muted">waiting for the offer creator to settle the mediator fee</span>';}const abort=r.status==='active'?`<button class="danger" data-abort="${esc(r.room_id)}">Abort room</button>`:'';const fee=r.fee_amount>0?`<div class="muted mono-break">mediator fee: ${esc(r.fee_amount)} ${esc(r.fee_asset)} &rarr; ${esc(r.fee_address)}</div>`:'';const canRecognize=r.status==='active'&&(r.recognition_status==='none'||r.recognition_status==='failed');const suiteSel=selectedSuite.get(r.room_id)||'ml-dsa-65';const recognize=canRecognize?`<select data-suite="${esc(r.room_id)}"><option value="ml-dsa-65"${suiteSel==='ml-dsa-65'?' selected':''}>ML-DSA-65 (PQ)</option><option value="ed25519"${suiteSel==='ed25519'?' selected':''}>Ed25519</option></select> <button data-recognize="${esc(r.room_id)}">Recognize counterparty</button>`:'';let recognitionLine='';if(r.recognition_status==='challenge_sent')recognitionLine='<p class="muted">recognition challenge sent - awaiting response</p>';else if(r.recognition_status==='recognized')recognitionLine=`<p class="muted">counterparty proved control of <span class="mono-break">${esc(r.recognized_fingerprint)}</span>${copyBtn(r.recognized_fingerprint)} - see History panel for prior settlement count with this key</p>`;else if(r.recognition_status==='declined')recognitionLine='<p class="muted">declined to answer counterparty\'s recognition challenge (no keystore unlocked)</p>';else if(r.recognition_status==='failed')recognitionLine='<p class="muted">a recognition response did not verify - not evidence of anything, may retry</p>';const ephemeralLine=r.own_ephemeral_key?`<p class="muted">ephemeral trade key: <span class="mono-break">${esc(short(r.own_ephemeral_key))}</span>${copyBtn(r.own_ephemeral_key)}${r.counterparty_ephemeral_key?` &middot; counterparty: <span class="mono-break">${esc(short(r.counterparty_ephemeral_key))}</span>${copyBtn(r.counterparty_ephemeral_key)}`:' &middot; awaiting counterparty announcement'} (unlinkable to any other room by design)</p>`:'';const receiptLine=r.receipt_status==='none'?'':`<p class="muted">receipt: ${esc(r.receipt_status)}${r.receipt_status!=='gate_open'?(r.receipt_chain_verifies?' (chain verifies)':' (chain INVALID)'):''}</p>`;const feeConfirmationLine=r.fee_confirmation_pending?'<p class="notice">Mediator fee reported sent - waiting for the mediator operator to confirm receipt before this room completes.</p>':'';return `<article class="room"><div class="room-head"><div><h3 title="${esc(r.room_id)}">Room ${esc(short(r.room_id))}${copyBtn(r.room_id)}</h3><div class="muted">party ${esc(r.party)} · peer ${esc(short(r.peer_id))}</div></div><span class="status ${esc(r.status)}">${esc(r.status)}</span></div><p>${esc(r.sell_amount)} ${esc(r.sell_asset)} ↔ ${esc(r.buy_amount)} ${esc(r.buy_asset)} · ${esc(r.rounds)} rounds</p><div class="muted mono-break">party A receives: ${esc(r.receive_address_a)}<br>party B receives: ${esc(r.receive_address_b)}</div>${fee}${turn}${ephemeralLine}${receiptLine}${feeConfirmationLine}${recognitionLine}${r.detail?`<p class="notice">${esc(r.detail)}</p>`:''}<div class="actions">${primary}${abort}${recognize}</div>${roomCryptoDetail(r)}</article>`}).join('');target.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>{const room=b.dataset.sent;pendingTurn.set(room,b.dataset.turnkey);b.disabled=true;b.textContent=waitingText;roomAction('/api/rooms/sent',room,()=>pendingTurn.delete(room))});target.querySelectorAll('[data-received]').forEach(b=>b.onclick=()=>{const room=b.dataset.received;pendingTurn.set(room,b.dataset.turnkey);b.disabled=true;b.textContent=waitingText;roomAction('/api/rooms/received',room,()=>pendingTurn.delete(room))});target.querySelectorAll('[data-abort]').forEach(b=>b.onclick=()=>{b.disabled=true;roomAction('/api/rooms/abort',b.dataset.abort)});target.querySelectorAll('select[data-suite]').forEach(s=>s.onchange=()=>{selectedSuite.set(s.dataset.suite,s.value)});target.querySelectorAll('[data-recognize]').forEach(b=>b.onclick=()=>{b.disabled=true;const sel=document.querySelector(`select[data-suite="${b.dataset.recognize}"]`);roomAction('/api/recognition/recognize',b.dataset.recognize,null,{suite:sel?sel.value:'ed25519'})});target.querySelectorAll('details.crypto').forEach(d=>d.addEventListener('toggle',()=>{const id=d.dataset.detailRoom;if(d.open)expandedDetails.add(id);else expandedDetails.delete(id)}))}
+function renderRooms(rooms){const target=document.getElementById('rooms');if(document.activeElement&&target.contains(document.activeElement)&&document.activeElement.tagName==='SELECT')return;if(!rooms.length){pendingTurn.clear();expandedDetails.clear();selectedSuite.clear();target.innerHTML='<p class="muted">No settlement rooms in this browser session.</p>';return}const liveIds=new Set(rooms.map(r=>r.room_id));for(const id of pendingTurn.keys())if(!liveIds.has(id))pendingTurn.delete(id);for(const id of expandedDetails)if(!liveIds.has(id))expandedDetails.delete(id);for(const id of selectedSuite.keys())if(!liveIds.has(id))selectedSuite.delete(id);target.innerHTML=rooms.map(r=>{const turn=r.turn?`<div class="turn"><b>${r.turn.is_fee?'Mediator fee':'Round '+esc(r.turn.round)}:</b> party ${esc(r.turn.sender)} sends <b>${esc(r.turn.amount)} ${esc(r.turn.asset)}</b><br><span class="muted mono-break">destination: ${esc(r.turn.destination)}</span></div>`:'';const tKey=turnKey(r);const isPending=pendingTurn.get(r.room_id)===tKey;let primary='';if(isPending){primary=waitingHtml;}else if(r.status==='active'&&r.action==='sent'){primary=`<button class="primary" data-sent="${esc(r.room_id)}" data-turnkey="${esc(tKey)}">${r.turn&&r.turn.is_fee?'I paid the mediator fee':'I sent it'}</button>`;}else if(r.status==='active'&&r.action==='received'){primary=`<button class="primary" data-received="${esc(r.room_id)}" data-turnkey="${esc(tKey)}">I verified receipt</button>`;}else if(r.status==='active'&&r.action==='awaiting_peer_send'){primary='<button class="primary" disabled>waiting for the counterparty to send this round&hellip;</button>';}else if(r.status==='active'&&r.turn&&r.turn.is_fee&&r.action==='none'){primary='<span class="muted">waiting for the offer creator to settle the mediator fee</span>';}const abort=r.status==='active'?`<button class="danger" data-abort="${esc(r.room_id)}">Abort room</button>`:'';const fee=r.fee_amount>0?`<div class="muted mono-break">mediator fee: ${esc(r.fee_amount)} ${esc(r.fee_asset)} &rarr; ${esc(r.fee_address)}</div>`:'';const canRecognize=r.status==='active'&&(r.recognition_status==='none'||r.recognition_status==='failed');const suiteSel=selectedSuite.get(r.room_id)||'ml-dsa-65';const recognize=canRecognize?`<select data-suite="${esc(r.room_id)}"><option value="ml-dsa-65"${suiteSel==='ml-dsa-65'?' selected':''}>ML-DSA-65 (PQ)</option><option value="ed25519"${suiteSel==='ed25519'?' selected':''}>Ed25519</option></select> <button data-recognize="${esc(r.room_id)}">Recognize counterparty</button>`:'';let recognitionLine='';if(r.recognition_status==='challenge_sent')recognitionLine='<p class="muted">recognition challenge sent - awaiting response</p>';else if(r.recognition_status==='recognized')recognitionLine=`<p class="muted">counterparty proved control of <span class="mono-break">${esc(r.recognized_fingerprint)}</span>${copyBtn(r.recognized_fingerprint)} - see History panel for prior settlement count with this key</p>`;else if(r.recognition_status==='declined')recognitionLine='<p class="muted">declined to answer counterparty\'s recognition challenge (no keystore unlocked)</p>';else if(r.recognition_status==='failed')recognitionLine='<p class="muted">a recognition response did not verify - not evidence of anything, may retry</p>';const ephemeralLine=r.own_ephemeral_key?`<p class="muted">ephemeral trade key: <span class="mono-break">${esc(short(r.own_ephemeral_key))}</span>${copyBtn(r.own_ephemeral_key)}${r.counterparty_ephemeral_key?` &middot; counterparty: <span class="mono-break">${esc(short(r.counterparty_ephemeral_key))}</span>${copyBtn(r.counterparty_ephemeral_key)}`:' &middot; awaiting counterparty announcement'} (unlinkable to any other room by design)</p>`:'';const receiptLine=r.receipt_status==='none'?'':`<p class="muted">receipt: ${esc(r.receipt_status)}${r.receipt_status!=='gate_open'?(r.receipt_chain_verifies?' (chain verifies)':' (chain INVALID)'):''}</p>`;const feeConfirmationLine=r.fee_confirmation_pending?'<p class="notice">Mediator fee reported sent - waiting for the mediator operator to confirm receipt before this room completes.</p>':'';return `<article class="room"><div class="room-head"><div><h3 title="${esc(r.room_id)}">Room ${esc(short(r.room_id))}${copyBtn(r.room_id)}</h3><div class="muted">party ${esc(r.party)} · peer ${esc(short(r.peer_id))}</div></div><span class="status ${esc(r.status)}">${esc(r.status)}</span></div><p>${esc(r.sell_amount)} ${esc(r.sell_asset)} ↔ ${esc(r.buy_amount)} ${esc(r.buy_asset)} · ${esc(r.rounds)} rounds</p><div class="muted mono-break">party A receives: ${esc(r.receive_address_a)}<br>party B receives: ${esc(r.receive_address_b)}</div>${fee}${turn}${ephemeralLine}${receiptLine}${feeConfirmationLine}${recognitionLine}${r.detail?`<p class="notice">${esc(r.detail)}</p>`:''}<div class="actions">${primary}${abort}${recognize}</div>${roomCryptoDetail(r)}</article>`}).join('');target.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>{const room=b.dataset.sent;pendingTurn.set(room,b.dataset.turnkey);b.disabled=true;b.textContent=waitingText;roomAction('/api/rooms/sent',room,()=>pendingTurn.delete(room))});target.querySelectorAll('[data-received]').forEach(b=>b.onclick=()=>{const room=b.dataset.received;pendingTurn.set(room,b.dataset.turnkey);b.disabled=true;b.textContent=waitingText;roomAction('/api/rooms/received',room,()=>pendingTurn.delete(room))});target.querySelectorAll('[data-abort]').forEach(b=>b.onclick=()=>{b.disabled=true;roomAction('/api/rooms/abort',b.dataset.abort)});target.querySelectorAll('select[data-suite]').forEach(s=>s.onchange=()=>{selectedSuite.set(s.dataset.suite,s.value)});target.querySelectorAll('[data-recognize]').forEach(b=>b.onclick=()=>{b.disabled=true;const sel=document.querySelector(`select[data-suite="${b.dataset.recognize}"]`);roomAction('/api/recognition/recognize',b.dataset.recognize,null,{suite:sel?sel.value:'ed25519'})});target.querySelectorAll('details.crypto').forEach(d=>d.addEventListener('toggle',()=>{const id=d.dataset.detailRoom;if(d.open)expandedDetails.add(id);else expandedDetails.delete(id)}))
+// Tier 1 (persistent identity): auto-fire the same action the manual
+// "Recognize counterparty" button does, once per room, only while the
+// checkbox is on. Only for status 'none' (not 'failed') - a failed
+// response should stay a manual retry, not loop automatically.
+if(document.getElementById('tier-persistent')&&document.getElementById('tier-persistent').checked){for(const r of rooms){if(r.status==='active'&&r.recognition_status==='none'&&!autoRecognized.has(r.room_id)){autoRecognized.add(r.room_id);roomAction('/api/recognition/recognize',r.room_id,()=>autoRecognized.delete(r.room_id),{suite:'ml-dsa-65'})}}}}
 async function roomAction(path,room,onError,extra={}){try{await post(path,{room_id:room,...extra});notice('room action queued')}catch(e){notice(e.message,true);if(onError)onError()}}
 function renderEvents(events){document.getElementById('events').innerHTML=(events.length?events:['No events yet.']).map(e=>`<li>${esc(e)}</li>`).join('')}
 const fmtBytes=(n)=>{n=Number(n)||0;if(n<1024)return n+' B';if(n<1024*1024)return (n/1024).toFixed(1)+' KiB';return (n/(1024*1024)).toFixed(2)+' MiB'};
@@ -464,7 +516,11 @@ function renderServer(s){const t=document.getElementById('server-state');if(!ser
 async function refreshServer(){if(!serverStateEnabled)return;try{const r=await fetch('/api/server-state',{cache:'no-store'});renderServer(await r.json())}catch(e){document.getElementById('server-state').textContent='server snapshot error: '+e.message}}
 document.getElementById('offer-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/offers/create',d);notice('offer request queued')}catch(err){notice(err.message,true)}};
 document.getElementById('refresh-offers').onclick=async()=>{try{await post('/api/offers/refresh');notice('offer refresh queued')}catch(e){notice(e.message,true)}};
-async function refreshIdentity(){try{const r=await fetch('/api/identity/state',{cache:'no-store'});const s=await r.json();const el=document.getElementById('identity-status');lastIdentityPublicKey=(s.loaded&&s.unlocked)?(s.public_key||''):'';if(!s.loaded){el.innerHTML='<span class="muted">No keystore loaded. Create or unlock one above.</span>';return}el.innerHTML=`<div class="server-grid"><div class="metric"><b>Status</b>${s.unlocked?'unlocked':'locked'}</div><div class="metric"><b>Alias</b>${esc(s.alias||'(none)')}</div><div class="metric"><b>Key generation</b>${esc(s.key_generation)}</div><div class="metric"><b>Created</b>${esc(s.created_at)}</div></div><p class="muted mono-break">path: ${esc(s.path)}<br>identity id: ${esc(s.identity_id)}<br>public key: ${esc(s.public_key)}${copyBtn(s.public_key)}</p>`}catch(e){document.getElementById('identity-status').textContent='identity status error: '+e.message}}
+let tierEditing=false;
+function syncTierCheckboxes(s){if(tierEditing)return;const p=document.getElementById('tier-persistent'),g=document.getElementById('tier-global');p.checked=!!s.persistent_identity_enabled;g.checked=!!s.global_identity_enabled;g.disabled=!p.checked}
+async function postTier(){try{await post('/api/identity/tier',{persistent:document.getElementById('tier-persistent').checked?'1':'0',global:document.getElementById('tier-global').checked?'1':'0'})}catch(e){notice(e.message,true)}}
+document.addEventListener('DOMContentLoaded',()=>{const p=document.getElementById('tier-persistent'),g=document.getElementById('tier-global');const onchange=async()=>{tierEditing=true;g.disabled=!p.checked;if(!p.checked)g.checked=false;await postTier();tierEditing=false};p.addEventListener('change',onchange);g.addEventListener('change',onchange)});
+async function refreshIdentity(){try{const r=await fetch('/api/identity/state',{cache:'no-store'});const s=await r.json();const el=document.getElementById('identity-status');lastIdentityPublicKey=(s.loaded&&s.unlocked)?(s.public_key||''):'';syncTierCheckboxes(s);if(!s.loaded){el.innerHTML='<span class="muted">No keystore loaded. Create or unlock one above.</span>';return}el.innerHTML=`<div class="server-grid"><div class="metric"><b>Status</b>${s.unlocked?'unlocked':'locked'}</div><div class="metric"><b>Alias</b>${esc(s.alias||'(none)')}</div><div class="metric"><b>Key generation</b>${esc(s.key_generation)}</div><div class="metric"><b>Created</b>${esc(s.created_at)}</div></div><p class="muted mono-break">path: ${esc(s.path)}<br>identity id: ${esc(s.identity_id)}<br>public key: ${esc(s.public_key)}${copyBtn(s.public_key)}</p>`}catch(e){document.getElementById('identity-status').textContent='identity status error: '+e.message}}
 async function refreshHistory(){try{const r=await fetch('/api/history/list',{cache:'no-store'});const s=await r.json();const tbody=document.getElementById('history-rows');const status=document.getElementById('history-status');if(!s.unlocked){status.textContent='requires an unlocked keystore';tbody.innerHTML='<tr><td colspan="7" class="muted">locked</td></tr>';return}status.textContent=s.entries.length+' record(s) for this session'+"'"+'s mediator';tbody.innerHTML=s.entries.length?s.entries.map(en=>`<tr><td class="mono-break" title="${esc(en.fingerprint)}">${esc(short(en.fingerprint))}</td><td>${esc(en.mediator_id)}</td><td>${esc(en.first_seen)} / ${esc(en.last_seen)}</td><td>${esc(en.encounter_count)}</td><td>${en.locally_blocked?'<b class="error">BLOCKED</b>':esc(en.display_category)}</td><td>${esc(en.notes.length)}</td><td><div class="actions"><button data-block="${esc(en.fingerprint)}" data-blocked="${en.locally_blocked?1:0}">${en.locally_blocked?'Unblock':'Block'}</button></div></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No counterparty records yet.</td></tr>';tbody.querySelectorAll('[data-block]').forEach(b=>b.onclick=async()=>{try{const path=b.dataset.blocked==='1'?'/api/history/unblock':'/api/history/block';await post(path,{fingerprint:b.dataset.block});notice('history updated');refreshHistory()}catch(e){notice(e.message,true)}})}catch(e){document.getElementById('history-status').textContent='history error: '+e.message}}
 document.getElementById('ks-create').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));await post('/api/identity/create',{path:d.ks_path,passphrase:d.ks_passphrase,alias:d.ks_alias||''});notice('keystore created');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
 document.getElementById('ks-unlock').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));await post('/api/identity/unlock',{path:d.ks_path,passphrase:d.ks_passphrase});notice('keystore unlocked');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
@@ -596,15 +652,38 @@ int main(int argc, char** argv) {
         client.set_recognition_key_provider(
             [&identity_state]() -> std::optional<tradep2p::dashboard::RecognitionKeyMaterial> {
                 std::scoped_lock lock(identity_state.mutex);
-                if (!identity_state.keystore.has_value() || !identity_state.keystore->is_unlocked()) {
+                // Security tier gate (specs.txt SS8): an unlocked keystore
+                // alone must NOT be enough to auto-answer a challenge - that
+                // would silently leak a persistent identity to anyone who
+                // challenges a user who unlocked their keystore for an
+                // unrelated feature (history/receipts), with no tier ever
+                // actually being off in practice. Declining because the
+                // tier is off looks identical on the wire to declining
+                // because no keystore is unlocked at all - "declining is
+                // not evidence of anything" (see the class comment above)
+                // covers this case too, deliberately.
+                if (!identity_state.persistent_identity_enabled ||
+                    !identity_state.keystore.has_value() || !identity_state.keystore->is_unlocked()) {
                     return std::nullopt;
                 }
+                // Security tier (specs.txt SS8): global_identity_enabled
+                // swaps the scope AND uses a fixed empty identifier instead
+                // of mediator_id, so the same recognition pseudonym comes
+                // out regardless of which mediator this process is talking
+                // to. Both remain the SAME derivation mechanism
+                // (derive_ed25519_keypair/derive_mldsa65_keypair) - only the
+                // scope label and identifier differ, no new cryptography.
+                const bool global = identity_state.global_identity_enabled;
+                const std::string_view scope = global ? tradep2p::key_scope::kGlobalPseudonym
+                                                       : tradep2p::key_scope::kMediatorPseudonym;
+                const std::string_view scope_mldsa65 = global
+                    ? tradep2p::key_scope::kGlobalPseudonymMlDsa65
+                    : tradep2p::key_scope::kMediatorPseudonymMlDsa65;
+                const std::string identifier = global ? std::string{} : identity_state.mediator_id;
                 auto keypair = tradep2p::derive_ed25519_keypair(
-                    identity_state.keystore->master_secret(), tradep2p::key_scope::kMediatorPseudonym,
-                    identity_state.mediator_id);
+                    identity_state.keystore->master_secret(), scope, identifier);
                 auto mldsa65_keypair = tradep2p::derive_mldsa65_keypair(
-                    identity_state.keystore->master_secret(),
-                    tradep2p::key_scope::kMediatorPseudonymMlDsa65, identity_state.mediator_id);
+                    identity_state.keystore->master_secret(), scope_mldsa65, identifier);
                 tradep2p::dashboard::RecognitionKeyMaterial material;
                 material.private_seed = std::move(keypair.private_seed);
                 material.public_key = keypair.public_key;
@@ -817,6 +896,21 @@ int main(int argc, char** argv) {
                         if (identity_state.keystore.has_value()) {
                             identity_state.keystore->lock();
                         }
+                    }));
+
+        // Security tier (specs.txt SS8): the user's own client-local choice,
+        // no mediator involvement or negotiation - see
+        // set_recognition_key_provider() above for what each flag actually
+        // gates. "global" alone with "persistent" off is accepted but inert
+        // (the provider already checks persistent_identity_enabled first),
+        // rather than rejected, since the two checkboxes are independent
+        // controls in the UI and toggling them in either order must work.
+        server.Post("/api/identity/tier", action([&](const httplib::Request& request) {
+                        const std::string persistent = required_param(request, "persistent");
+                        const std::string global = required_param(request, "global");
+                        std::scoped_lock lock(identity_state.mutex);
+                        identity_state.persistent_identity_enabled = (persistent == "1");
+                        identity_state.global_identity_enabled = (global == "1");
                     }));
 
         server.Post("/api/identity/rotate", action([&](const httplib::Request& request) {

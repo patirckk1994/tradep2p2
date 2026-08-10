@@ -222,6 +222,16 @@ inline constexpr std::string_view kMediatorPseudonym = "mediator";     // phase 
 // other's security, matching this file's existing per-purpose domain
 // separation rather than coupling two unrelated algorithms to one seed.
 inline constexpr std::string_view kMediatorPseudonymMlDsa65 = "mediator-mldsa65";
+// Security-tier "global identity" option (specs.txt SS8): a client-side,
+// opt-in choice to reuse ONE recognition pseudonym across every mediator
+// instead of kMediatorPseudonym's default per-mediator scoping - always
+// derived with an EMPTY identifier (never mediator_id), specifically so the
+// result does not vary by which mediator is asking. A distinct label from
+// kMediatorPseudonym (not the same scope with an empty identifier reused),
+// so enabling/disabling this per session can never accidentally collide
+// with or be derived from the per-mediator key.
+inline constexpr std::string_view kGlobalPseudonym = "global-pseudonym";
+inline constexpr std::string_view kGlobalPseudonymMlDsa65 = "global-pseudonym-mldsa65";
 inline constexpr std::string_view kLocalHistory = "local-history";    // phase 3
 // ML-DSA-65 sibling of kLocalHistory, same independent-derivation reasoning
 // as kMediatorPseudonymMlDsa65 above - see journal.hpp's checkpoint suite_id
