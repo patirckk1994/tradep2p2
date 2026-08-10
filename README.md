@@ -458,13 +458,27 @@ control the same key I've seen before on this mediator?* Nothing more — not
 ```
 
 This sends a live, single-use, expiring challenge to the counterparty (or
-auto-answers one if they send it to you and your keystore is unlocked). A
-successful proof looks up and prints your local settlement/incomplete count
-for that key. An unknown key is the *normal* case for a stranger — it is
-never shown as a warning. `tradep2p-dashboard` has an equivalent
-"Recognize counterparty" button per room (Ed25519 only — see
+auto-answers one if they send it to you, your keystore is unlocked, **and**
+you've opted into the security tier below — an unlocked keystore alone is
+no longer enough, since that used to leak a persistent identity to anyone
+who challenged it, whether or not that's what you wanted). A successful
+proof looks up and prints your local settlement/incomplete count for that
+key. An unknown key is the *normal* case for a stranger — it is never shown
+as a warning. `tradep2p-dashboard` has an equivalent "Recognize
+counterparty" button per room (Ed25519 only — see
 [Post-quantum posture](#post-quantum-posture) for the `ml-dsa-65` option,
 CLI-only for now).
+
+**Security tier (`tradep2p-dashboard` only, `specs.txt` §8.6):** two
+checkboxes in the identity panel, both off by default. "Persistent
+identity" auto-fires recognition in every room instead of a manual click
+per room — correlation is the point here, not a side effect, for a user who
+wants a counterparty to be able to recognize them and build reputation.
+"Global" goes further and reuses the *same* pseudonym across every mediator
+you connect through, not just one (a new key-derivation scope, same HKDF
+mechanism as everything else — not new cryptography). A third, disabled
+checkbox documents blind-signature unlinkable credentials as not
+implemented rather than omitting them silently.
 
 ### 5. Per-trade ephemeral identities
 

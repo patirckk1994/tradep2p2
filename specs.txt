@@ -540,6 +540,46 @@ mechanism cannot and does not attempt. The two are intentionally decoupled:
 this phase ships without waiting on blind signatures, and blind signatures
 remain a documented direction rather than a dependency.
 
+### 8.6 User-chosen security tier
+
+Correlation is not treated as an inherent harm here — some users
+specifically want it, because a counterparty recognizing a repeat trader
+*is* the reputation signal this mechanism exists to provide. The threat
+model this project defends against (a dishonest counterparty or mediator,
+network-level observation) does not call for hiding that choice from users
+who want it; it calls for making the tradeoff explicit and letting each
+user pick their own point on it. `tradep2p-dashboard`'s identity panel
+exposes this directly, off by default:
+
+- **Persistent identity** (`IdentityDashboardState::persistent_identity_
+  enabled`) — automatically proves the same recognition key (§8.2) in every
+  room instead of requiring a manual per-room click, and gates the
+  auto-*answer* path the same way. Before this flag existed, an unlocked
+  keystore alone was sufficient to auto-answer any incoming challenge,
+  regardless of whether the user had ever opted into being recognized —
+  meaning unlocking a keystore for an unrelated feature (journal/receipts)
+  silently exposed a persistent identity to anyone who challenged it. That
+  gap is now closed: declining because this flag is off is indistinguishable
+  on the wire from declining because no keystore is unlocked at all, so
+  §8.4's "no key presented" framing still holds for a user who leaves this
+  off.
+- **Global** (`global_identity_enabled`) — reuses *one* recognition
+  pseudonym across every mediator the user connects through, instead of
+  §8.2's default per-mediator scoping. A new key-scope label
+  (`key_scope::kGlobalPseudonym`/`kGlobalPseudonymMlDsa65`,
+  `identity.hpp`), derived the identical way every other scoped key in this
+  project is (`derive_ed25519_keypair()`/`derive_mldsa65_keypair()`, HKDF
+  off the same master secret) with a fixed empty identifier instead of a
+  mediator id — not a new cryptographic primitive, purely a different scope
+  and identifier pair. Requires the checkbox above; wider correlation is the
+  explicit tradeoff, not a side effect.
+- **Blind-signature unlinkable credentials** — shown, disabled, pointing at
+  §9.3's status. Not implemented, not silently omitted.
+
+No mediator-side change or negotiation is needed for either working option:
+recognition already functions against any mediator unmodified, so this is
+purely which local key the client offers, decided entirely by the user.
+
 ---
 
 ## 9. Attested reputation: receipts and disclosure
