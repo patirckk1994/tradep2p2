@@ -111,6 +111,20 @@ ADVERTISED_ENDPOINT=""
 DASHBOARD_PORT="8091"
 RUN_DASHBOARD="1"
 
+# Pre-scan for --config so it can actually select which file gets sourced
+# below - the real flag-parsing loop further down runs AFTER sourcing (so
+# that command-line flags still override whatever the sourced file set),
+# which means, without this prescan, --config's own value would never take
+# effect until one command too late. Harmless to let the main loop parse
+# --config again afterward.
+for (( scan = 1; scan <= $#; scan++ )); do
+    if [[ "${!scan}" == "--config" ]]; then
+        next=$((scan + 1))
+        CONFIG_FILE="${!next}"
+        break
+    fi
+done
+
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
