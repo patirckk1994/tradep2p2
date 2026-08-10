@@ -552,11 +552,9 @@ RegistryServer::~RegistryServer() = default;
 
 void RegistryServer::run() { impl_->run(); }
 
-void register_node_once(const Endpoint& registry,
-                        const ClientTlsPolicy& registry_tls,
-                        const RegistryNode& node) {
-    validate_registry_node(node, false);
-    auto channel = SecureChannel::connect_direct(registry, registry_tls);
+namespace {
+
+void register_node_once_over(SecureChannel channel, const RegistryNode& node) {
     channel.set_timeout(15U);
     channel.send_frame(
         MessageType::RegistryRegister,
@@ -569,6 +567,24 @@ void register_node_once(const Endpoint& registry,
         throw std::runtime_error("registry returned unexpected response");
     }
     (void)decode_registry_registered(reply.payload);
+}
+
+} // namespace
+
+void register_node_once(const Endpoint& registry,
+                        const ClientTlsPolicy& registry_tls,
+                        const RegistryNode& node) {
+    validate_registry_node(node, false);
+    register_node_once_over(SecureChannel::connect_direct(registry, registry_tls), node);
+}
+
+void register_node_once_via_socks5(const Endpoint& proxy,
+                                   const Endpoint& registry,
+                                   const ClientTlsPolicy& registry_tls,
+                                   const RegistryNode& node) {
+    validate_registry_node(node, false);
+    register_node_once_over(
+        SecureChannel::connect_via_socks5(proxy, registry, registry_tls), node);
 }
 
 namespace {

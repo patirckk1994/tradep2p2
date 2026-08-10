@@ -52,8 +52,19 @@ Options:
                         channel entirely.
   --admin-port N       port for the admin control channel (default 7444,
                         only meaningful with --admin-token)
-  --registry HOST:PORT registry endpoint to register with (optional)
+  --registry HOST:PORT registry endpoint to register with (defaults to this
+                        project's own registry - see REGISTRY_ENDPOINT in
+                        --init-config output; pass an empty string to run
+                        standalone/unregistered instead)
   --registry-pin HEX   registry certificate SHA-256 pin (required with --registry)
+  --registry-proxy HOST:PORT
+                        reach --registry through this SOCKS5 proxy (e.g. a
+                        local Tor daemon on 127.0.0.1:9050) instead of a
+                        direct connection - required when --registry is an
+                        .onion address, since a direct TCP connection to one
+                        never resolves. Only the registry leg is proxied;
+                        the mediator's own listener is unaffected. Leave
+                        unset for a directly-reachable (non-onion) registry.
   --advertise HOST:PORT the endpoint peers can reach this mediator on (defaults
                         to --bind). Also used, regardless of --registry, as
                         the mediator's own identity for receipt-ack
@@ -84,8 +95,18 @@ FEE_REQUIRE_CONFIRMATION="0"
 FEE_POSITION="after-last"
 ADMIN_TOKEN=""
 ADMIN_PORT="7444"
-REGISTRY_ENDPOINT=""
-REGISTRY_PIN=""
+# Defaults to this project's own registry - registration there starts
+# Pending (invisible to every other client) until its operator approves it,
+# so pointing here by default carries no discoverability risk. Reachable
+# only via Tor (see REGISTRY_PROXY below) - pass --registry '' to run fully
+# standalone/unregistered instead.
+REGISTRY_ENDPOINT="zjfip5qncqerbtue422tclht3u6otzgtc6ewo5nokrihfi3e6lhajxid.onion:7555"
+REGISTRY_PIN="8395534ddc1239bc7fa3c03d94e634827baed71acfa1c6a497dd1c9bf4fd43a0"
+# Default assumes a local Tor daemon's standard SOCKS port - matches
+# REGISTRY_ENDPOINT above being an .onion address. Pass --registry-proxy ''
+# if pointing REGISTRY_ENDPOINT at a directly-reachable (non-onion) registry
+# instead.
+REGISTRY_PROXY="127.0.0.1:9050"
 ADVERTISED_ENDPOINT=""
 DASHBOARD_PORT="8091"
 RUN_DASHBOARD="1"
@@ -118,6 +139,7 @@ while [[ $# -gt 0 ]]; do
         --admin-port) ADMIN_PORT="$2"; shift 2 ;;
         --registry) REGISTRY_ENDPOINT="$2"; shift 2 ;;
         --registry-pin) REGISTRY_PIN="$2"; shift 2 ;;
+        --registry-proxy) REGISTRY_PROXY="$2"; shift 2 ;;
         --advertise) ADVERTISED_ENDPOINT="$2"; shift 2 ;;
         --dashboard-port) DASHBOARD_PORT="$2"; shift 2 ;;
         --no-dashboard) RUN_DASHBOARD="0"; shift ;;
@@ -155,6 +177,11 @@ ADMIN_PORT="$ADMIN_PORT"
 # Leave REGISTRY_ENDPOINT empty to run standalone, unregistered.
 REGISTRY_ENDPOINT="$REGISTRY_ENDPOINT"
 REGISTRY_PIN="$REGISTRY_PIN"
+
+# Leave empty for a directly-reachable registry. Required (typically your
+# local Tor daemon, e.g. 127.0.0.1:9050) when REGISTRY_ENDPOINT is an
+# .onion address - a direct connection to one never resolves.
+REGISTRY_PROXY="$REGISTRY_PROXY"
 ADVERTISED_ENDPOINT="$ADVERTISED_ENDPOINT"
 
 DASHBOARD_PORT="$DASHBOARD_PORT"
@@ -236,7 +263,11 @@ if [[ -n "$ADMIN_TOKEN" ]]; then
     echo "  admin control:     127.0.0.1:$ADMIN_PORT (loopback only, live fee changes)"
 fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
-    echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
+    if [[ -n "$REGISTRY_PROXY" ]]; then
+        echo "  registry:          $REGISTRY_ENDPOINT via SOCKS5 $REGISTRY_PROXY (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
+    else
+        echo "  registry:          $REGISTRY_ENDPOINT (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
+    fi
 fi
 if [[ "$RUN_DASHBOARD" == "1" ]]; then
     if [[ -n "$ADMIN_TOKEN" ]]; then
@@ -277,7 +308,12 @@ if [[ -n "$ADMIN_TOKEN" ]]; then
     export TRADEP2P_ADMIN_PORT="$ADMIN_PORT"
 fi
 
-if [[ -n "$REGISTRY_ENDPOINT" ]]; then
+if [[ -n "$REGISTRY_ENDPOINT" && -n "$REGISTRY_PROXY" ]]; then
+    exec "$CLI" mediator-registered-tor "$REGISTRY_PROXY" \
+        "$MEDIATOR_BIND" "$MEDIATOR_CERT" "$MEDIATOR_KEY" \
+        "$REGISTRY_ENDPOINT" "$REGISTRY_PIN" \
+        "${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND}" "$CERT_PIN"
+elif [[ -n "$REGISTRY_ENDPOINT" ]]; then
     exec "$CLI" mediator-registered "$MEDIATOR_BIND" "$MEDIATOR_CERT" "$MEDIATOR_KEY" \
         "$REGISTRY_ENDPOINT" "$REGISTRY_PIN" \
         "${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND}" "$CERT_PIN"
