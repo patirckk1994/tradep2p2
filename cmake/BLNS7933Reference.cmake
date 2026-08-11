@@ -103,3 +103,29 @@ target_link_libraries(tradep2p_blns7933_scaling_diagnostics PRIVATE
 target_compile_options(tradep2p_blns7933_scaling_diagnostics PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
+
+# Explicit next-size gate. This deliberately skips the direct 64-pass
+# coordinate baseline and measures NTRUSolve -> global Babai -> exact cleanup
+# for one deterministic d=128 candidate only.
+add_executable(tradep2p_blns7933_scaling_128_diagnostic
+    BLIND/q7933-reference/scaling_128_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_128_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_128_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+# Reproducible small-coefficient corpus. Candidate rejection is diagnostic
+# output, not a CTest failure; accepted candidates retain strict exact
+# relation/norm invariants through global reduction and cleanup.
+add_executable(tradep2p_blns7933_corpus_diagnostics
+    BLIND/q7933-reference/corpus_diagnostics.cpp
+)
+target_link_libraries(tradep2p_blns7933_corpus_diagnostics PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_corpus_diagnostics PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
