@@ -1,6 +1,7 @@
 #include "tradep2p/blindsig_blns7933_reduce.hpp"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <utility>
 
@@ -73,7 +74,8 @@ BigInt best_integer_coordinate(const BigInt& linear, const BigInt& quadratic) {
     BigInt best = q;
     BigInt best_delta = exact_delta(best, linear, quadratic);
 
-    for (const BigInt candidate : {q - 1, q + 1}) {
+    const std::array<BigInt, 2> neighbours{q - 1, q + 1};
+    for (const BigInt& candidate : neighbours) {
         const BigInt delta = exact_delta(candidate, linear, quadratic);
         if (delta < best_delta || (delta == best_delta && candidate < best)) {
             best = candidate;
