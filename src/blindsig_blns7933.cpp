@@ -1,7 +1,8 @@
 #include "tradep2p/blindsig_blns7933.hpp"
 
+#include "tradep2p/blindsig_blns7933_ntrusolve.hpp"
+
 #include <algorithm>
-#include <limits>
 #include <utility>
 
 namespace tradep2p::blns7933 {
@@ -43,23 +44,11 @@ void require_size_at_most(const PolyQ& a, std::size_t degree, const char* what) 
     }
 }
 
-std::vector<__int128_t> negacyclic_mul_integer(const std::vector<std::int64_t>& a,
-                                               const std::vector<std::int64_t>& b,
-                                               std::size_t degree) {
-    if (a.size() > degree || b.size() > degree) {
-        throw std::invalid_argument("integer polynomial exceeds ring degree");
-    }
-    std::vector<__int128_t> out(degree, 0);
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        for (std::size_t j = 0; j < b.size(); ++j) {
-            const std::size_t k = i + j;
-            const __int128_t product = static_cast<__int128_t>(a[i]) * static_cast<__int128_t>(b[j]);
-            if (k < degree) {
-                out[k] += product;
-            } else {
-                out[k - degree] -= product; // x^degree == -1
-            }
-        }
+ZPoly to_zpoly(const std::vector<std::int64_t>& input) {
+    ZPoly out;
+    out.reserve(input.size());
+    for (const auto coefficient : input) {
+        out.emplace_back(coefficient);
     }
     return out;
 }
@@ -205,31 +194,24 @@ NTRUTrapdoorGenerator::NTRUTrapdoorGenerator(RingArithmetic ring)
 
 TrapdoorKey NTRUTrapdoorGenerator::generate(std::mt19937_64&) const {
     throw std::logic_error(
-        "BLNS7933 NTRUGen/NTRUSolve/Reduce not implemented yet; reference path intentionally fails closed");
+        "BLNS7933 candidate sampling/NTRUSolve/Reduce/quality checks not fully integrated yet; reference path intentionally fails closed");
 }
 
 PublicKey NTRUTrapdoorGenerator::derive_public(const TrapdoorKey& key) const {
     if (key.f.size() > ring_.degree() || key.g.size() > ring_.degree()) {
         throw std::invalid_argument("BLNS7933 trapdoor polynomial exceeds ring degree");
     }
-    const auto f_inv = ring_.inverse(key.f);
-    if (!f_inv) {
-        throw std::runtime_error("BLNS7933 trapdoor f is not invertible modulo q");
+    const auto g_inv = ring_.inverse(key.g);
+    if (!g_inv) {
+        throw std::runtime_error("BLNS7933 trapdoor g is not invertible modulo q");
     }
-    return PublicKey{ring_.mul(key.g, *f_inv)};
+    return PublicKey{ring_.mul(key.f, *g_inv)};
 }
 
 bool NTRUTrapdoorGenerator::verify_ntru_relation(const TrapdoorKey& key) const {
-    const auto fG = negacyclic_mul_integer(key.f, key.G, ring_.degree());
-    const auto gF = negacyclic_mul_integer(key.g, key.F, ring_.degree());
-
-    for (std::size_t i = 0; i < ring_.degree(); ++i) {
-        const __int128_t expected = (i == 0) ? static_cast<__int128_t>(ring_.modulus()) : 0;
-        if (fG[i] - gF[i] != expected) {
-            return false;
-        }
-    }
-    return true;
+    return verify_ntru_relation_exact(
+        to_zpoly(key.f), to_zpoly(key.g), to_zpoly(key.F), to_zpoly(key.G),
+        BigInt{ring_.modulus()}, ring_.degree());
 }
 
 } // namespace tradep2p::blns7933
