@@ -20,6 +20,26 @@ namespace {
 constexpr std::size_t kMaxEvents = 160U;
 constexpr int kDashboardPollMilliseconds = 250;
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+// Mirrors main.cpp's identical CLI helper of the same name - both must
+// agree since the CLI and dashboard are documented as behaviorally
+// identical for this feature (see enable_blindsig()'s header comment).
+const char* blindsig_stage_name(blindsig::BlindSigClientStage stage) {
+    using blindsig::BlindSigClientStage;
+    switch (stage) {
+    case BlindSigClientStage::kIdle: return "idle";
+    case BlindSigClientStage::kAwaitingInfo: return "awaiting-info";
+    case BlindSigClientStage::kBlindingAndProvingNizk1: return "blinding-and-proving-nizk1";
+    case BlindSigClientStage::kAwaitingSignerResponse: return "awaiting-signer-response";
+    case BlindSigClientStage::kFinalizingAndProvingNizk2: return "finalizing-and-proving-nizk2";
+    case BlindSigClientStage::kVerifyingOwnSignature: return "verifying-own-signature";
+    case BlindSigClientStage::kReady: return "ready";
+    case BlindSigClientStage::kFailed: return "failed";
+    }
+    return "unknown";
+}
+#endif
+
 std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string out;
@@ -535,6 +555,53 @@ std::string DashboardClient::candles_json(const std::string& asset_a,
     return json.str();
 }
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+void DashboardClient::enable_blindsig(std::string prover_path) {
+    blindsig_session_.emplace(
+        std::move(prover_path),
+        [this](MessageType type, std::vector<std::uint8_t> payload) {
+            enqueue(type, std::move(payload), "blind-signature protocol message");
+        });
+}
+
+void DashboardClient::request_blindsig_info() {
+    if (!blindsig_session_.has_value()) {
+        throw std::runtime_error(
+            "blind-signature feature not enabled for this dashboard process (set "
+            "TRADEP2P_BLINDSIG_PROVER_PATH before starting it)");
+    }
+    blindsig_session_->request_info();
+}
+
+void DashboardClient::submit_blindsig_request(std::string message) {
+    if (!blindsig_session_.has_value()) {
+        throw std::runtime_error(
+            "blind-signature feature not enabled for this dashboard process (set "
+            "TRADEP2P_BLINDSIG_PROVER_PATH before starting it)");
+    }
+    blindsig_session_->start_request(std::move(message));
+}
+
+std::string DashboardClient::blindsig_state_json() const {
+    if (!blindsig_session_.has_value()) {
+        return "{\"ok\":true,\"enabled\":false}";
+    }
+    const auto stage = blindsig_session_->stage();
+    std::ostringstream json;
+    json << "{\"ok\":true,\"enabled\":true,\"stage\":\"" << blindsig_stage_name(stage) << "\"";
+    if (stage == blindsig::BlindSigClientStage::kFailed) {
+        json << ",\"error\":\"" << json_escape(blindsig_session_->last_error()) << "\"";
+    }
+    if (const auto credential = blindsig_session_->credential(); credential.has_value()) {
+        json << ",\"credential\":{\"rho_hex\":\"" << json_escape(credential->rho_hex)
+             << "\",\"pi2_path\":\"" << json_escape(credential->pi2_path)
+             << "\",\"mu\":\"" << json_escape(credential->mu) << "\"}";
+    }
+    json << "}";
+    return json.str();
+}
+#endif
+
 void DashboardClient::enqueue(MessageType type,
                               std::vector<std::uint8_t> payload,
                               std::string description) {
@@ -1031,6 +1098,36 @@ void DashboardClient::handle_frame(const Frame& frame) {
                              room.recognized_fingerprint_hex);
             break;
         }
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        // Safe to call while state_mutex_ is held (unlike the recognition/
+        // ephemeral/receipt cases above, which defer their sends until after
+        // the lock releases): neither on_info_response() nor
+        // on_signer_response() ever calls send_frame_ synchronously on this
+        // thread - on_info_response() only records h/b and advances stage,
+        // and on_signer_response() only starts a background worker thread
+        // (which itself sends nothing; finalize/self-verify are local
+        // sidecar calls). Calling enqueue() from here WOULD deadlock (see
+        // enqueue()'s own state_mutex_ use) - if either method above is ever
+        // changed to send synchronously, this comment's safety argument
+        // breaks and these cases need the same defer-until-after-unlock
+        // treatment as the others.
+        case MessageType::BlindSigInfoResponse: {
+            const auto message = tradep2p::blindsig::decode_blindsig_info_response(frame.payload);
+            if (blindsig_session_.has_value()) {
+                blindsig_session_->on_info_response(message);
+            }
+            add_event_locked("blind-signature info received from mediator");
+            break;
+        }
+        case MessageType::BlindSigResponse: {
+            const auto message = tradep2p::blindsig::decode_blindsig_response(frame.payload);
+            if (blindsig_session_.has_value()) {
+                blindsig_session_->on_signer_response(message);
+            }
+            add_event_locked("blind-signature response received from mediator");
+            break;
+        }
+#endif
         default:
             add_event_locked("ignored unexpected mediator message type " +
                              std::to_string(static_cast<unsigned int>(frame.type)));

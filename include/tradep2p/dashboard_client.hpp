@@ -7,6 +7,10 @@
 #include "tradep2p/recognition.hpp"
 #include "tradep2p/secure_channel.hpp"
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+#include "tradep2p/blindsig_client.hpp"
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -272,6 +276,27 @@ public:
     [[nodiscard]] std::string candles_json(const std::string& asset_a,
                                            const std::string& asset_b) const;
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // Experimental, unreviewed cryptography - specs.txt SS9.3a. Mirrors
+    // main.cpp's CLI `/blindsig` command surface exactly (same lazy
+    // construction, same TRADEP2P_BLINDSIG_PROVER_PATH-gated availability)
+    // so the dashboard and CLI paths stay behaviorally identical rather
+    // than growing a second, subtly different client implementation.
+    // Must be called (if at all) before start(), same timing requirement
+    // as set_recognition_key_provider() above - constructs the session
+    // with this->enqueue() as its send_frame callback, so nothing may race
+    // frames onto the wire before the worker thread exists to flush them.
+    void enable_blindsig(std::string prover_path);
+    // Throws std::runtime_error if enable_blindsig() was never called (no
+    // TRADEP2P_BLINDSIG_PROVER_PATH configured for this dashboard process).
+    void request_blindsig_info();
+    void submit_blindsig_request(std::string message);
+    // `{"ok":true,"enabled":false}` if enable_blindsig() was never called.
+    // Otherwise stage/error/credential fields mirroring the CLI's
+    // `/blindsig status` output, in the same shape as state_json() above.
+    [[nodiscard]] std::string blindsig_state_json() const;
+#endif
+
 private:
     void enqueue(MessageType type,
                  std::vector<std::uint8_t> payload,
@@ -361,6 +386,15 @@ private:
     std::optional<Ed25519PublicKey> mediator_receipt_key_;
     std::optional<MlDsa65PublicKey> mediator_receipt_key_mldsa65_;
     std::map<std::string, std::vector<IssuedReceipt>> room_receipts_;
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // Not guarded by state_mutex_ - BlindSigClientSession is internally
+    // thread-safe (its own state_mutex_/atomics), and this member is only
+    // ever written once, from enable_blindsig() before start() runs (same
+    // single-writer-before-start discipline as recognition_key_provider_
+    // above).
+    std::optional<blindsig::BlindSigClientSession> blindsig_session_;
+#endif
 
     std::mutex queue_mutex_;
     std::deque<OutgoingFrame> outgoing_;

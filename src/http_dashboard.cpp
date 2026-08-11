@@ -223,6 +223,14 @@ std::uint32_t parse_u32(const std::string& value, const char* name) {
     return static_cast<std::uint32_t>(parsed);
 }
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+// Mirrors lobby.cpp's/main.cpp's identical helper of the same shape.
+std::string env_or_empty(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string{} : std::string(value);
+}
+#endif
+
 std::string required_param(const httplib::Request& request,
                            const char* name) {
     if (!request.has_param(name)) {
@@ -409,13 +417,57 @@ button.copy{padding:2px 7px;font-size:.8rem;background:transparent;border-color:
             per-mediator alone - your reputation follows you everywhere, and so does the
             linkability.</span> Requires the checkbox above.</span>
           </label>
+)HTML"
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+              R"HTML(
+          <label class="span2 tier-row">
+            <input type="checkbox" id="blindsig-enable" disabled>
+            <span><b>Blind-signature unlinkable credentials (EXPERIMENTAL, UNREVIEWED)</b> -
+            see specs.txt SS9.3a. This checkbox reflects whether the dashboard process was
+            started with a blind-signature prover configured
+            (TRADEP2P_BLINDSIG_PROVER_PATH); it does not itself turn the feature on or off.
+            <span class="tier-warn">Unreviewed post-quantum cryptography - proving a request
+            takes ~100-200s and happens in the background; use the panel below once
+            enabled.</span></span>
+          </label>
+)HTML"
+#else
+              R"HTML(
           <label class="span2 tier-row tier-disabled">
             <input type="checkbox" disabled>
             <span><b>Blind-signature unlinkable credentials</b> - not implemented. See
             specs.txt SS9.3 for status and why.</span>
           </label>
+)HTML"
+#endif
+              R"HTML(
         </div>
       </section>
+)HTML"
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+              R"HTML(
+      <section class="panel">
+        <h2>// blind-signature credential (EXPERIMENTAL, UNREVIEWED)</h2>
+        <p class="muted">See specs.txt SS9.3a. Only usable if this dashboard process was
+        started with TRADEP2P_BLINDSIG_PROVER_PATH set. Proving is slow (~100-200s per
+        request) and runs in the background; this panel polls for progress, it does not
+        block.</p>
+        <div id="blindsig-disabled-notice" class="muted" style="display:none">Not enabled for
+        this dashboard process - set TRADEP2P_BLINDSIG_PROVER_PATH and restart it.</div>
+        <div id="blindsig-panel-body" style="display:none">
+          <form id="blindsig-form" class="form-grid">
+            <label class="span2">Message to blind-sign<input name="blindsig_message" maxlength="512" placeholder="message"></label>
+            <div class="actions span2">
+              <button type="button" id="blindsig-fetch-info">Fetch mediator info</button>
+              <button class="primary" type="submit">Request signature</button>
+            </div>
+          </form>
+          <div id="blindsig-status" class="muted">stage: unknown</div>
+        </div>
+      </section>
+)HTML"
+#endif
+              R"HTML(
       <section class="panel">
         <h2>// publish offer</h2>
         <form id="offer-form" class="form-grid">
@@ -539,6 +591,16 @@ document.getElementById('ks-rotate').onclick=async()=>{try{const d=Object.fromEn
 document.getElementById('ks-destroy').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));if(!confirm('Destroy keystore at '+d.ks_path+'? This cannot be undone.'))return;await post('/api/identity/destroy',{path:d.ks_path});notice('keystore destroyed');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
 document.getElementById('note-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/history/note',{fingerprint:d.note_fp,text:d.note_text});notice('note added');refreshHistory()}catch(err){notice(err.message,true)}};
 document.getElementById('refresh-history').onclick=()=>refreshHistory();
+)HTML"
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+              R"HTML(
+async function refreshBlindsig(){try{const r=await fetch('/api/blindsig/state',{cache:'no-store'});const s=await r.json();const chk=document.getElementById('blindsig-enable');const dis=document.getElementById('blindsig-disabled-notice');const body=document.getElementById('blindsig-panel-body');if(!s.enabled){chk.checked=false;dis.style.display='';body.style.display='none';return}chk.checked=true;dis.style.display='none';body.style.display='';const st=document.getElementById('blindsig-status');let html='stage: '+esc(s.stage);if(s.error)html+='<br><span class="error">error: '+esc(s.error)+'</span>';if(s.credential)html+='<br>credential ready - rho: '+esc(s.credential.rho_hex)+'<br>message: "'+esc(s.credential.mu)+'"<br>proof file: '+esc(s.credential.pi2_path);st.innerHTML=html}catch(e){document.getElementById('blindsig-status').textContent='blind-signature status error: '+e.message}}
+document.getElementById('blindsig-fetch-info').onclick=async()=>{try{await post('/api/blindsig/info');notice('requested blind-signature info from mediator');refreshBlindsig()}catch(e){notice(e.message,true)}};
+document.getElementById('blindsig-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));if(!d.blindsig_message)throw new Error('message required');await post('/api/blindsig/request',{message:d.blindsig_message});notice('blind-signature request submitted - proving in the background (~100-200s)');refreshBlindsig()}catch(err){notice(err.message,true)}};
+refreshBlindsig();setInterval(refreshBlindsig,2000);
+)HTML"
+#endif
+              R"HTML(
 refreshClient();refreshServer();refreshIdentity();refreshHistory();setInterval(refreshClient,1000);setInterval(refreshServer,1500);setInterval(refreshIdentity,2000);setInterval(refreshHistory,2000);
 </script>
 </body>
@@ -743,6 +805,20 @@ int main(int argc, char** argv) {
                         ? tradep2p::LocalOutcome::Successful
                         : tradep2p::LocalOutcome::Incomplete);
             });
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        // Experimental, unreviewed cryptography - specs.txt SS9.3a. Same
+        // env-var-only gate as main.cpp's CLI client
+        // (TRADEP2P_BLINDSIG_PROVER_PATH) - unset means the feature stays
+        // fully absent from this dashboard process's behavior, not merely
+        // hidden in the UI. Must run before client.start(), same timing
+        // requirement as the recognition callbacks just above.
+        if (const std::string prover_path = env_or_empty("TRADEP2P_BLINDSIG_PROVER_PATH");
+            !prover_path.empty()) {
+            client.enable_blindsig(prover_path);
+            std::cout << "Blind-signature client enabled - EXPERIMENTAL, UNREVIEWED "
+                         "cryptography, see specs.txt SS9.3a before relying on this.\n";
+        }
+#endif
         client.start();
 
         httplib::Server server;
@@ -995,6 +1071,34 @@ int main(int argc, char** argv) {
                         history.add_note(tradep2p::fingerprint_from_hex(fingerprint_text),
                                          identity_state.mediator_id, text);
                     }));
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        // Experimental, unreviewed cryptography - specs.txt SS9.3a. Mirrors
+        // main.cpp's CLI `/blindsig info|request|status` surface exactly
+        // (see DashboardClient::enable_blindsig()'s header comment) rather
+        // than the wider 5-route surface an earlier draft of this feature's
+        // plan sketched - BlindSigClientSession's finalize/self-verify are
+        // automatic once the signer responds, so there is nothing for a
+        // separate finalize/verify route to do that request+state don't
+        // already cover.
+        server.Post("/api/blindsig/info", action([&](const httplib::Request&) {
+                        client.request_blindsig_info();
+                    }));
+        server.Post("/api/blindsig/request", action([&](const httplib::Request& request) {
+                        const std::string message = required_param(request, "message");
+                        client.submit_blindsig_request(message);
+                    }));
+        server.Get("/api/blindsig/state",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                       if (!host_allowed(request)) {
+                           response.status = 403;
+                           return;
+                       }
+                       response.set_header("Cache-Control", "no-store");
+                       response.set_content(client.blindsig_state_json(),
+                                            "application/json; charset=utf-8");
+                   });
+#endif
 
         std::cout << "TradeP2P interactive dashboard listening on http://"
                   << listen_host << ':' << http_port << "\n";
