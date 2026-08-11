@@ -9,6 +9,11 @@ if(NOT TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
     return()
 endif()
 
+# This file may be injected immediately after project() through
+# CMAKE_PROJECT_INCLUDE, before the root CMakeLists reaches its own
+# enable_testing() call. Repeating enable_testing() later is harmless.
+enable_testing()
+
 include(CheckIncludeFileCXX)
 check_include_file_cxx("boost/multiprecision/cpp_int.hpp"
     TRADEP2P_HAVE_BOOST_MULTIPRECISION_CPP_INT)
