@@ -17,6 +17,7 @@
 #include "tradep2p/registry.hpp"
 #include "tradep2p/secure_channel.hpp"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
@@ -267,6 +268,17 @@ void print_client_help() {
 // ever calls push(); only run_client()'s own main thread ever calls
 // channel.send_frame(), after poll() reports wake_read readable and it
 // drains this queue.
+void blindsig_set_nonblocking_close_on_exec(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        throw std::runtime_error("failed to configure blind-signature wake pipe");
+    }
+    const int fd_flags = ::fcntl(fd, F_GETFD, 0);
+    if (fd_flags < 0 || ::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) < 0) {
+        throw std::runtime_error("failed to configure blind-signature wake pipe");
+    }
+}
+
 struct BlindSigOutgoingBridge {
     BlindSigOutgoingBridge() {
         int fds[2]{-1, -1};
@@ -275,6 +287,23 @@ struct BlindSigOutgoingBridge {
         }
         wake_read = fds[0];
         wake_write = fds[1];
+        // drain() below reads in a loop until read() returns <= 0 - on a
+        // still-open blocking pipe that only ever returns 0 at EOF (write
+        // end closed), so without O_NONBLOCK the loop's second call blocks
+        // forever the first time drain() is ever called with exactly one
+        // byte pending, wedging run_client()'s entire poll loop. Mirrors
+        // lobby.cpp's set_nonblocking_close_on_exec() on the server's own
+        // Client wake pipe, which already gets this right.
+        try {
+            blindsig_set_nonblocking_close_on_exec(wake_read);
+            blindsig_set_nonblocking_close_on_exec(wake_write);
+        } catch (...) {
+            ::close(wake_read);
+            ::close(wake_write);
+            wake_read = -1;
+            wake_write = -1;
+            throw;
+        }
     }
     ~BlindSigOutgoingBridge() {
         if (wake_read >= 0) {

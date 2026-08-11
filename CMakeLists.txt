@@ -229,6 +229,28 @@ target_compile_options(tradep2p_mediator_auth_tests PRIVATE
 )
 add_test(NAME tradep2p_mediator_auth_tests COMMAND tradep2p_mediator_auth_tests)
 
+if(TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
+    # Exception to this codebase's live-verify-only precedent for new
+    # network features (specs.txt SS9.3a) - the wire codec and keystore
+    # are pure, fast, deterministic, and specifically the parts exposed
+    # to a hostile network peer or an on-disk file, unlike the zkVM
+    # proving/verifying and subprocess/queue behavior, which stay
+    # live-verify-only (slow, external-toolchain-dependent).
+    add_executable(tradep2p_blindsig_wire_tests tests/blindsig_wire_tests.cpp)
+    target_link_libraries(tradep2p_blindsig_wire_tests PRIVATE tradep2p)
+    target_compile_options(tradep2p_blindsig_wire_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+    )
+    add_test(NAME tradep2p_blindsig_wire_tests COMMAND tradep2p_blindsig_wire_tests)
+
+    add_executable(tradep2p_blindsig_keystore_tests tests/blindsig_keystore_tests.cpp)
+    target_link_libraries(tradep2p_blindsig_keystore_tests PRIVATE tradep2p)
+    target_compile_options(tradep2p_blindsig_keystore_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+    )
+    add_test(NAME tradep2p_blindsig_keystore_tests COMMAND tradep2p_blindsig_keystore_tests)
+endif()
+
 # ---------------------------------------------------------------------------
 # Library packaging: makes `tradep2p` consumable by a SEPARATE, external
 # project via find_package(tradep2p) - e.g. a future standalone MCP server

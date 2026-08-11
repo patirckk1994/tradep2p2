@@ -1,4 +1,5 @@
 /build/
+/build-live-test/
 /test-output/
 /logs/
 *.log
