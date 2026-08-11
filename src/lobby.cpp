@@ -1,5 +1,8 @@
 #include "tradep2p/lobby.hpp"
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+#include "tradep2p/blindsig_signer.hpp"
+#endif
 #include "tradep2p/ephemeral.hpp"
 #include "tradep2p/fee_plugin_abi.h"
 #include "tradep2p/mediator.hpp"
@@ -469,6 +472,37 @@ std::string configured_admin_fee_token() { return env_or_empty("TRADEP2P_ADMIN_F
 // plugins/README.md) rather than this.
 std::string configured_fee_plugin_path() { return env_or_empty("TRADEP2P_FEE_PLUGIN_PATH"); }
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+// The experimental blind-signature primitive (specs.txt SS9.3a). Unlike
+// every configured_*() helper above, whether this feature is enabled at
+// all is NOT read from an env var here - see main.cpp's mediator startup
+// sequence, which reads TRADEP2P_BLINDSIG_ENABLE and, if set, prompts
+// interactively for the keystore passphrase before calling
+// LobbyServer::enable_blindsig_signer() - deliberately not something
+// this constructor can do on its own, since unlocking a keystore needs a
+// human at a terminal, not an env var.
+std::string configured_blindsig_prover_path() { return env_or_empty("TRADEP2P_BLINDSIG_PROVER_PATH"); }
+
+// Bounds concurrent in-flight blind-sign jobs - defensive (this is the
+// first code path in this codebase's history that shells out to an
+// external process at all), not because any one job is slow: proving is
+// entirely client-side, this signer's own per-job cost is one fast
+// receipt verification plus one fast FALCON sample. See
+// blindsig_signer.hpp's file comment.
+std::size_t configured_blindsig_queue_size() {
+    const std::string text = env_or_empty("TRADEP2P_BLINDSIG_QUEUE_SIZE");
+    if (text.empty()) {
+        return 8U;
+    }
+    std::size_t size = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), size, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || size == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_BLINDSIG_QUEUE_SIZE");
+    }
+    return size;
+}
+#endif
+
 std::uint16_t configured_admin_port() {
     const std::string text = env_or_empty("TRADEP2P_ADMIN_PORT");
     if (text.empty()) {
@@ -642,6 +676,22 @@ public:
         }
         fee_ = std::move(fee);
     }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // Called from main.cpp's mediator startup sequence, before run(), at
+    // most once - `keystore` must already be unlocked (the interactive
+    // passphrase prompt happens there, not here - see that file). Throws
+    // if TRADEP2P_BLINDSIG_PROVER_PATH isn't set, since a signer with no
+    // way to reach the sidecar can never do anything useful.
+    void enable_blindsig_signer(blindsig::BlindSigKeystore keystore) {
+        const std::string prover_path = configured_blindsig_prover_path();
+        if (prover_path.empty()) {
+            throw std::runtime_error(
+                "TRADEP2P_BLINDSIG_PROVER_PATH must be set to enable the experimental blind-signature signer");
+        }
+        blindsig_signer_.emplace(std::move(keystore), prover_path, configured_blindsig_queue_size());
+    }
+#endif
 
     void run() {
         SecureListener listener(bind_endpoint_, identity_);
@@ -837,6 +887,17 @@ private:
         std::deque<QueuedFrame> outgoing;
         std::atomic<bool> alive{true};
         unsigned int bad_messages{0U};
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        // Reassembles this connection's BlindSigRequestChunk stream - see
+        // blindsig_wire.hpp's BlindSigChunkAssembler. One in-flight
+        // request at a time per connection (no request-id multiplexing):
+        // reset to std::nullopt once a request completes assembly, so the
+        // next BlindSigRequestChunk starts a fresh assembler; the
+        // assembler itself rejects a client trying to interleave two
+        // different requests (see its own total_length/total_chunks
+        // consistency check).
+        std::optional<blindsig::BlindSigChunkAssembler> blindsig_assembler;
+#endif
     };
 
     struct OpenOffer {
@@ -1109,6 +1170,14 @@ private:
         case MessageType::GetCandles:
             handle_get_candles(client, decode_get_candles(frame.payload));
             return;
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        case MessageType::BlindSigInfoRequest:
+            handle_blindsig_info_request(client);
+            return;
+        case MessageType::BlindSigRequestChunk:
+            handle_blindsig_request_chunk(client, blindsig::decode_blindsig_request_chunk(frame.payload));
+            return;
+#endif
         default:
             throw std::invalid_argument("message type is not accepted from clients");
         }
@@ -1223,6 +1292,58 @@ private:
         }
         client->enqueue(MessageType::CandleData, std::move(encoded));
     }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // Always answered, even when the feature is compiled in but not
+    // enabled at runtime - enabled=false (with h/b left zeroed) tells a
+    // client "not available here" without it needing to distinguish that
+    // from "this mediator doesn't have the feature compiled in at all"
+    // (which it can't observe directly anyway - see BlindSigInfoResponse's
+    // own doc comment in blindsig_wire.hpp).
+    void handle_blindsig_info_request(const std::shared_ptr<Client>& client) {
+        blindsig::BlindSigInfoResponse response;
+        if (blindsig_signer_.has_value()) {
+            response = blindsig_signer_->info();
+        }
+        client->enqueue(MessageType::BlindSigInfoResponse, blindsig::encode_blindsig_info_response(response));
+    }
+
+    // Accumulates this connection's chunk stream (client->blindsig_assembler)
+    // and, once a chunk completes assembly, hands the decoded request to
+    // the signer's queue - see blindsig_signer.hpp for what happens next.
+    // The reply callback captures `client` (keeping it alive) and runs on
+    // the SIGNER'S WORKER THREAD, not this one - Client::enqueue() is
+    // exactly the cross-thread-safe mechanism this needs (mutex-guarded
+    // queue + wake pipe), the same one every other relayed/async message
+    // in this file already uses.
+    void handle_blindsig_request_chunk(const std::shared_ptr<Client>& client,
+                                       blindsig::BlindSigRequestChunk chunk) {
+        if (!blindsig_signer_.has_value()) {
+            throw BenignRejection("blind-signature signer is not enabled on this mediator");
+        }
+        if (!client->blindsig_assembler.has_value()) {
+            client->blindsig_assembler.emplace();
+        }
+        // Throws std::runtime_error on any inconsistency (see
+        // BlindSigChunkAssembler::add_chunk's own doc comment) - caught by
+        // the generic std::exception handler around dispatch(), which
+        // counts it toward this connection's bad_messages threshold like
+        // any other malformed input, not a BenignRejection (unlike the
+        // "not enabled" case above, a broken chunk stream is a protocol
+        // violation, not an ordinary "no").
+        const bool complete = client->blindsig_assembler->add_chunk(chunk);
+        if (!complete) {
+            return;
+        }
+        const auto assembled_bytes = client->blindsig_assembler->assembled_bytes();
+        const auto request = blindsig::decode_blindsig_assembled_request(assembled_bytes);
+        client->blindsig_assembler.reset(); // ready for a fresh request next time
+
+        blindsig_signer_->submit(request, [client](const blindsig::BlindSigResponse& response) {
+            client->enqueue(MessageType::BlindSigResponse, blindsig::encode_blindsig_response(response));
+        });
+    }
+#endif
 
     // Called once a room genuinely completes (see handle_sent()/
     // handle_received()/handle_confirm_fee()), always with room->session.
@@ -2935,6 +3056,15 @@ private:
     int (*fee_plugin_check_)(const tradep2p_fee_check_request*){nullptr};
     std::atomic<bool> fee_plugin_running_{false};
     std::thread fee_plugin_thread_;
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // std::nullopt unless enable_blindsig_signer() has been called (main.cpp,
+    // only if TRADEP2P_BLINDSIG_ENABLE is set and the interactive passphrase
+    // prompt succeeded) - handle_blindsig_info_request()/
+    // handle_blindsig_request_chunk() below both check has_value() first.
+    // BlindSigSigner's own destructor cleanly joins its worker thread(s), so
+    // no explicit teardown is needed in ~Impl() beyond this member existing.
+    std::optional<blindsig::BlindSigSigner> blindsig_signer_;
+#endif
     // Bounded per-pair completed-trade price history - see
     // record_completed_trade()/handle_get_candles(). Key is "base/quote"
     // (canonical_pair()'s output joined with '/'); never persisted to
@@ -2973,5 +3103,11 @@ LobbyServer::LobbyServer(Endpoint bind_endpoint, ServerTlsIdentity identity)
 LobbyServer::~LobbyServer() = default;
 
 void LobbyServer::run() { impl_->run(); }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+void LobbyServer::enable_blindsig_signer(blindsig::BlindSigKeystore keystore) {
+    impl_->enable_blindsig_signer(std::move(keystore));
+}
+#endif
 
 } // namespace tradep2p
