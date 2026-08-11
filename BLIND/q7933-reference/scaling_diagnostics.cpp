@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -45,7 +47,7 @@ void print_solver_levels(const NTRUSolverDiagnostics& diagnostics) {
 
 void run_case(std::size_t degree) {
     // Deterministic, sparse candidate used only for controlled scaling of the
-    // exact solver/reducer machinery.  It is intentionally not a stand-in for
+    // exact solver/reducer machinery. It is intentionally not a stand-in for
     // the eventual BLNS23 TrapGen coefficient distribution.
     ZPoly f(degree, BigInt{0});
     ZPoly g(degree, BigInt{0});
@@ -118,9 +120,9 @@ void run_case(std::size_t degree) {
 
 int main() {
     try {
-        // Deliberately capped at 64 for this development stage.  d=128/256/512
+        // Deliberately capped at 64 for this development stage. d=128/256/512
         // are separate checkpoints and should not be reached accidentally by
-        // a routine test invocation.
+        // a routine diagnostic invocation.
         for (const std::size_t degree : {16U, 32U, 64U}) {
             run_case(degree);
         }
