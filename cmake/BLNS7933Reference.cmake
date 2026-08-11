@@ -128,6 +128,18 @@ target_compile_options(tradep2p_blns7933_scaling_256_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+# Actual BLNS23 ring-size machinery gate. This is still a single deterministic
+# anchor, not TrapGen sampling, and remains manual-only.
+add_executable(tradep2p_blns7933_scaling_512_diagnostic
+    BLIND/q7933-reference/scaling_512_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_512_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_512_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 # Reproducible small-coefficient corpus. Candidate rejection is diagnostic
 # output, not a CTest failure; accepted candidates retain strict exact
 # relation/norm invariants through global reduction and cleanup.
