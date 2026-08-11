@@ -226,16 +226,50 @@ arithmetic rather than hand-derive new NTT tables for an arbitrary modulus
 — but it means this implementation does **not** automatically inherit the
 paper's own security analysis.
 
-What a responsible next step looks like: running the parameters we actually
-use (`q=12289`, our exact `β_r`/`β_s` bounds) through a standard, public
-lattice-hardness estimator (e.g. the `lattice-estimator` tool used
-throughout the NIST PQC parameter-setting process) to get a concrete
-bit-security estimate against known lattice-reduction attacks, and
-comparing that to what the paper reports for `q=7933`. That's a genuine,
-useful check — but it estimates one necessary condition (SIS/LWE hardness
-at this modulus), not a full re-derivation of the paper's security
-reduction under the substituted parameters. It is not a substitute for
-independent cryptographic review, and shouldn't be represented as one.
+**Update — we actually ran this check, here's what it found and didn't
+find.** Using `lattice-estimator` (Martin Albrecht et al., the standard
+tool behind NIST PQC parameter selection - SageMath 10.9, real run, not a
+hand-derived estimate):
+
+- *Sanity check first*: the tool's own built-in `Falcon512_Unf` parameters
+  (FALCON-512's actual unforgeability problem, `n=512, q=12289`) estimate
+  at **≈2^121-146 bits** depending on cost model (`rough` vs full
+  `estimate`), root Hermite factor `δ≈1.003882`. This matches FALCON-512's
+  publicly documented NIST Level 1 security - confirms the tool and
+  methodology are being used correctly before trusting anything novel from
+  it.
+- *Then we tried the obvious framing for our own blinding relation*: model
+  "given public `B` and target `t`, find short `r` (worst-case `‖r‖≈45.25`
+  for coefficients bounded in `[-2,2]`, `n=512`)" as a SIS instance, at both
+  `q=12289` and `q=7933`, same `(n,m)` shape as `Falcon512_Unf`. Both
+  moduli returned **identical results**: `rop: ≈2^inf, δ: 1.002007` - the
+  required root Hermite factor for a target this short, relative to this
+  lattice's Gaussian-heuristic scale, is beyond what BKZ can reach at any
+  practical block size. Same result at both `q`, meaning this framing
+  doesn't discriminate between the two moduli **at all**.
+- *What that actually means*: not "we're unconditionally safe" - it means
+  this specific framing is the wrong question. `r` isn't something an
+  attacker searches for against an arbitrary target; the honest user picks
+  `r` first, then computes `c = B·r + H(...)` from it. There is no
+  "find `r` from `B` and a random target" attack in the real protocol,
+  which is presumably *why* a generic SIS reformulation returns
+  "infeasible" regardless of `q` - it's not modeling a real adversary
+  strategy. The real hardness questions - the paper's own "one-more
+  unforgeability" / ROS-resistance bound, and how the NIZK's soundness
+  slack and the encryption-to-the-sky noise growth factor into their
+  reduction - are reduction-specific properties tied to the paper's own
+  proof, not raw SIS/LWE/NTRU instances a generic estimator can evaluate
+  by itself.
+
+**Where this leaves us**: real, tool-verified confirmation that `q=12289`
+is not some obviously-broken modulus for a ring/dimension this size (the
+FALCON-512 sanity check backs that), but no verified answer - because
+there isn't a simple lattice-hardness number to compute - to whether it
+carries the *specific* extra margin the paper's own reduction needs for
+the blind construction. That answer requires reading the paper's actual
+theorem/proof and substituting `q=12289` into their own bound, which is
+exactly the kind of thing that needs a cryptographer's judgment, not a
+tool call. Still `REVIEW_REQUEST.md` priority #3.
 
 ## Roadmap: what has to be true before this is a responsible production integration
 

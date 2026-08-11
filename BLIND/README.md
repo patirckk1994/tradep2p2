@@ -23,22 +23,29 @@ questions (parameter fidelity is the big one — see that file).
 
 Being upfront rather than letting this folder imply more than is true:
 
-**Done and independently testable right now:**
+**Done and independently verified right now (compiled AND runtime-tested, not just written):**
 - The `blindsig-prover` CLI (`user-blind`, `user-prove-nizk1`,
   `signer-verify-nizk1`, `user-finalize-prove-nizk2`, `verify-signature`)
   builds and runs. A real NIZK1 proof has been generated and verified
   end-to-end (212.1s, 1.73MB receipt).
-- The C++ wire-protocol types for this feature (`blindsig_wire.hpp/cpp`)
-  and the FALCON C++ wrapper's declarations (`blindsig_falcon.hpp`).
+- `blindsig_wire.hpp/cpp` (wire structs, codec, chunk reassembly) —
+  compiles clean against the real headers.
+- `blindsig_falcon.hpp/cpp` (the FALCON keygen/sign/verify wrapper) —
+  compiles AND runtime-verified: 3 fresh-keypair sign+verify round-trips,
+  plus a correct negative control (a signature must not verify against an
+  unrelated random target - it doesn't).
+- `blindsig_keystore.hpp/cpp` (AEAD-encrypted trapdoor custody) —
+  compiles AND runtime-verified: create/unlock round-trips exactly,
+  creating over an existing file is rejected, wrong passphrase is
+  rejected, a tampered ciphertext byte is rejected.
 
 **Not done yet — this is the majority of the actual integration:**
-- `blindsig_falcon.cpp` (the wrapper's implementation)
-- Trapdoor key custody (`blindsig_keystore.hpp/cpp`)
 - The subprocess bridge to `blindsig-prover` (`blindsig_subprocess.hpp/cpp`)
 - The mediator's signing queue (`blindsig_signer.hpp/cpp`)
 - The client-side session logic (`blindsig_client.hpp/cpp`)
 - `CMakeLists.txt` wiring (the `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL`
-  option doesn't exist yet)
+  option doesn't exist yet - none of the files above are built into any
+  binary yet, they've only been compile-checked standalone)
 - Any of `lobby.cpp` / `main.cpp` / `http_dashboard.cpp` actually calling
   into any of the above
 - `setup_mediator.sh` flags
