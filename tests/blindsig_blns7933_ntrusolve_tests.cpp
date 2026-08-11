@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -62,6 +63,11 @@ std::optional<ToyD2Solution> brute_force_degree_two(
     return std::nullopt;
 }
 
+std::int64_t degree_two_resultant(const std::array<std::int64_t, 2>& f) {
+    // Res(a+b*x, x^2+1) = a^2+b^2.
+    return f[0] * f[0] + f[1] * f[1];
+}
+
 void test_exact_negacyclic_multiplication() {
     IntegerRingArithmetic ring(4);
     const ZPoly result = ring.mul(ZPoly{0, 0, 0, 1}, ZPoly{0, 1});
@@ -93,7 +99,16 @@ void test_base_case_success_and_failure() {
         NTRUEquationSolver solver(1, BigInt{17});
         const auto solution = solver.solve(ZPoly{2}, ZPoly{4});
         require(!solution.has_value(),
-                "base case must fail when gcd(f,g) does not divide q");
+                "Falcon-style base case must reject non-coprime deepest resultants");
+    }
+    {
+        // There is a direct scalar solution when gcd divides q, but Falcon's
+        // TrapGen-style NTRUSolve still rejects the candidate unless the
+        // resultants are coprime.  Keep that distinction explicit.
+        NTRUEquationSolver solver(1, BigInt{17});
+        const auto solution = solver.solve(ZPoly{17}, ZPoly{34});
+        require(!solution.has_value(),
+                "Falcon-style base case must reject gcd=q even though a direct equation solution exists");
     }
 }
 
@@ -111,13 +126,16 @@ void test_degree_two_against_independent_bruteforce_oracle() {
     struct Case {
         std::array<std::int64_t, 2> f;
         std::array<std::int64_t, 2> g;
+        bool falcon_style_accepts;
     };
 
     const std::array<Case, 4> cases{{
-        {{{1, 1}}, {{1, 2}}},
-        {{{2, 1}}, {{1, 1}}},
-        {{{3, -1}}, {{1, 2}}},
-        {{{2, 3}}, {{1, -2}}},
+        {{{1, 1}}, {{1, 2}}, true},
+        {{{2, 1}}, {{1, 1}}, true},
+        // Direct equation is solvable, but resultants are 10 and 5.  Falcon's
+        // norm/resultant descent rejects this candidate because gcd=5.
+        {{{3, -1}}, {{1, 2}}, false},
+        {{{2, 3}}, {{1, -2}}, true},
     }};
 
     constexpr std::int64_t q = 17;
@@ -126,7 +144,7 @@ void test_degree_two_against_independent_bruteforce_oracle() {
     for (const auto& c : cases) {
         const auto oracle = brute_force_degree_two(c.f, c.g, q, search_bound);
         require(oracle.has_value(),
-                "independent degree-2 brute-force oracle must find a bounded solution");
+                "independent degree-2 brute-force oracle must find a bounded direct solution");
 
         // Check the oracle with its own closed-form degree-2 equations so the
         // oracle is independent of both the recursive solver and ring helper.
@@ -137,17 +155,28 @@ void test_degree_two_against_independent_bruteforce_oracle() {
             c.f[0] * oracle->G1 + c.f[1] * oracle->G0 -
             (c.g[0] * oracle->F1 + c.g[1] * oracle->F0);
         require(constant == q && linear == 0,
-                "independent degree-2 oracle returned an invalid solution");
+                "independent degree-2 oracle returned an invalid direct solution");
+
+        const std::int64_t resultant_gcd = std::gcd(
+            degree_two_resultant(c.f), degree_two_resultant(c.g));
+        require((resultant_gcd == 1) == c.falcon_style_accepts,
+                "toy case has wrong expected Falcon-style resultant acceptance");
 
         NTRUEquationSolver solver(2, BigInt{q});
         const ZPoly f{c.f[0], c.f[1]};
         const ZPoly g{c.g[0], c.g[1]};
         const auto recursive = solver.solve(f, g);
-        require(recursive.has_value(),
-                "recursive solver must find a solution when the independent oracle does");
-        require(verify_ntru_relation_exact(f, g, recursive->F, recursive->G,
-                                           BigInt{q}, 2),
-                "recursive solver solution must satisfy exact relation on oracle case");
+
+        if (c.falcon_style_accepts) {
+            require(recursive.has_value(),
+                    "recursive solver must accept the coprime-resultant oracle case");
+            require(verify_ntru_relation_exact(f, g, recursive->F, recursive->G,
+                                               BigInt{q}, 2),
+                    "accepted recursive solution must satisfy exact relation on oracle case");
+        } else {
+            require(!recursive.has_value(),
+                    "Falcon-style recursive solver must reject a non-coprime-resultant candidate");
+        }
     }
 }
 
