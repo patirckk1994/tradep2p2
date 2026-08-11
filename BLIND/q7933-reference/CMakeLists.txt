@@ -12,6 +12,7 @@ add_library(tradep2p_blns7933_reference STATIC
     ../../src/blindsig_blns7933_integer_ring.cpp
     ../../src/blindsig_blns7933_ntrusolve.cpp
     ../../src/blindsig_blns7933_reduce.cpp
+    ../../src/blindsig_blns7933_babai_reduce.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ../../include
@@ -51,7 +52,17 @@ target_compile_options(tradep2p_blns7933_reduce_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
-# Manual diagnostics target: deliberately NOT registered with CTest.  Running
+add_executable(tradep2p_blns7933_babai_reduce_tests
+    ../../tests/blindsig_blns7933_babai_reduce_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_babai_reduce_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_babai_reduce_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+# Manual diagnostics target: deliberately NOT registered with CTest. Running
 # it is an explicit scaling experiment, currently capped at d=16/32/64.
 add_executable(tradep2p_blns7933_scaling_diagnostics
     scaling_diagnostics.cpp
@@ -67,3 +78,4 @@ enable_testing()
 add_test(NAME tradep2p_blns7933_reference_tests COMMAND tradep2p_blns7933_reference_tests)
 add_test(NAME tradep2p_blns7933_ntrusolve_tests COMMAND tradep2p_blns7933_ntrusolve_tests)
 add_test(NAME tradep2p_blns7933_reduce_tests COMMAND tradep2p_blns7933_reduce_tests)
+add_test(NAME tradep2p_blns7933_babai_reduce_tests COMMAND tradep2p_blns7933_babai_reduce_tests)
