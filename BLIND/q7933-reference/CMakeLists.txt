@@ -51,6 +51,18 @@ target_compile_options(tradep2p_blns7933_reduce_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+# Manual diagnostics target: deliberately NOT registered with CTest.  Running
+# it is an explicit scaling experiment, currently capped at d=16/32/64.
+add_executable(tradep2p_blns7933_scaling_diagnostics
+    scaling_diagnostics.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_diagnostics PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_diagnostics PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 enable_testing()
 add_test(NAME tradep2p_blns7933_reference_tests COMMAND tradep2p_blns7933_reference_tests)
 add_test(NAME tradep2p_blns7933_ntrusolve_tests COMMAND tradep2p_blns7933_ntrusolve_tests)
