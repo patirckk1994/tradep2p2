@@ -23,42 +23,46 @@ questions (parameter fidelity is the big one — see that file).
 
 Being upfront rather than letting this folder imply more than is true:
 
-**Done and independently verified right now (compiled AND runtime-tested, not just written):**
-- The `blindsig-prover` CLI (`user-blind`, `user-prove-nizk1`,
-  `signer-verify-nizk1`, `user-finalize-prove-nizk2`, `verify-signature`)
-  builds and runs. A real NIZK1 proof has been generated and verified
-  end-to-end (212.1s, 1.73MB receipt).
-- `blindsig_wire.hpp/cpp` (wire structs, codec, chunk reassembly) —
-  compiles clean against the real headers.
-- `blindsig_falcon.hpp/cpp` (the FALCON keygen/sign/verify wrapper) —
-  compiles AND runtime-verified: 3 fresh-keypair sign+verify round-trips,
-  plus a correct negative control (a signature must not verify against an
-  unrelated random target - it doesn't).
-- `blindsig_keystore.hpp/cpp` (AEAD-encrypted trapdoor custody) —
-  compiles AND runtime-verified: create/unlock round-trips exactly,
-  creating over an existing file is rejected, wrong passphrase is
-  rejected, a tampered ciphertext byte is rejected.
+**Done and independently verified right now (compiled AND runtime-tested with real cryptography, not just written):**
+- The `blindsig-prover` CLI, `blindsig_wire`, `blindsig_falcon`,
+  `blindsig_keystore`, and `blindsig_subprocess` — each compiled and
+  runtime-tested on its own (fresh-keypair sign/verify with a correct
+  negative control; keystore create/unlock/reject-wrong-passphrase/
+  reject-tampering; the subprocess bridge tested against a real
+  `sleep`-based timeout-kill and a real `blindsig-prover` invocation).
+- `blindsig_signer.hpp/cpp` — **a full real end-to-end test**: real
+  FALCON keypair, real `user-blind`, a real 216.7s NIZK1 proof,
+  `BlindSigSigner` verifying it via the sidecar and signing with real
+  `falcon_sign_dyn` — the resulting signature genuinely verifies. Plus a
+  tamper-rejection case and a queue-capacity case, both correct.
+- `blindsig_client.hpp/cpp` — written, compiles clean; not yet driven
+  through a full live round-trip (needs the wiring below to test via a
+  real connection — its internal logic reuses the same sidecar calls
+  already proven correct above).
+- `CMakeLists.txt` — **the whole thing now builds through real CMake**,
+  both `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL=ON` and the default `OFF`
+  configure, build, and pass the full 12-suite `ctest` clean. Confirmed
+  via `nm`/`strings` that the OFF build has zero `blindsig`/`falcon`/
+  `nlohmann` symbols anywhere — the compile gate genuinely gates.
 
-**Not done yet — this is the majority of the actual integration:**
-- The subprocess bridge to `blindsig-prover` (`blindsig_subprocess.hpp/cpp`)
-- The mediator's signing queue (`blindsig_signer.hpp/cpp`)
-- The client-side session logic (`blindsig_client.hpp/cpp`)
-- `CMakeLists.txt` wiring (the `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL`
-  option doesn't exist yet - none of the files above are built into any
-  binary yet, they've only been compile-checked standalone)
+**Not done yet:**
 - Any of `lobby.cpp` / `main.cpp` / `http_dashboard.cpp` actually calling
-  into any of the above
+  into any of the above (dispatch() case, startup passphrase prompt, CLI
+  REPL commands, dashboard routes+checkbox)
 - `setup_mediator.sh` flags
 - The `specs.txt` §9.3a section itself, and the §11 rewrite explaining
   why this was built ahead of independent review
-- Unit tests, a full build pass, and live end-to-end verification
+- Dedicated permanent unit tests (`blindsig_wire_tests.cpp`/
+  `blindsig_keystore_tests.cpp`), and a live end-to-end pass through the
+  REAL mediator+client over an actual connection
 
-**In short: there is no way to actually run a blind signature through the
-mediator/client yet.** The cryptographic primitive (the Rust side) works
-and has been tested in isolation; nothing in the C++ application calls it.
-Don't test "the feature" — there isn't one to test yet. If you want to
-exercise the cryptography directly, use the `blindsig-prover` CLI per
-`REVIEW_REQUEST.md`'s build instructions.
+**In short: the cryptographic core is now solid and proven against real
+data, but there is still no way to run a blind signature through the
+mediator/client yet** — nothing in `lobby.cpp`/`main.cpp`/
+`http_dashboard.cpp` calls any of this. Don't test "the feature" — there
+isn't one to test yet. If you want to exercise the cryptography directly,
+use the `blindsig-prover` CLI per `REVIEW_REQUEST.md`'s build
+instructions.
 
 ## The one rule that governs all of this
 
