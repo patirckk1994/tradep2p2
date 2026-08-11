@@ -13,6 +13,8 @@ add_library(tradep2p_blns7933_reference STATIC
     ../../src/blindsig_blns7933_ntrusolve.cpp
     ../../src/blindsig_blns7933_reduce.cpp
     ../../src/blindsig_blns7933_babai_reduce.cpp
+    ../../src/blindsig_blns7933_gaussian.cpp
+    ../../src/blindsig_blns7933_quality.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ../../include
@@ -59,6 +61,26 @@ target_link_libraries(tradep2p_blns7933_babai_reduce_tests PRIVATE
     tradep2p_blns7933_reference
 )
 target_compile_options(tradep2p_blns7933_babai_reduce_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_gaussian_tests
+    ../../tests/blindsig_blns7933_gaussian_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_gaussian_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_gaussian_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_quality_tests
+    ../../tests/blindsig_blns7933_quality_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_quality_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_quality_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
@@ -113,8 +135,20 @@ target_compile_options(tradep2p_blns7933_corpus_diagnostics PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_trapgen_diagnostic
+    trapgen_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_trapgen_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_trapgen_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 enable_testing()
 add_test(NAME tradep2p_blns7933_reference_tests COMMAND tradep2p_blns7933_reference_tests)
 add_test(NAME tradep2p_blns7933_ntrusolve_tests COMMAND tradep2p_blns7933_ntrusolve_tests)
 add_test(NAME tradep2p_blns7933_reduce_tests COMMAND tradep2p_blns7933_reduce_tests)
 add_test(NAME tradep2p_blns7933_babai_reduce_tests COMMAND tradep2p_blns7933_babai_reduce_tests)
+add_test(NAME tradep2p_blns7933_gaussian_tests COMMAND tradep2p_blns7933_gaussian_tests)
+add_test(NAME tradep2p_blns7933_quality_tests COMMAND tradep2p_blns7933_quality_tests)

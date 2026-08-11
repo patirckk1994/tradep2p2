@@ -8,6 +8,7 @@ namespace {
 
 using tradep2p::blns7933::NTRUTrapdoorGenerator;
 using tradep2p::blns7933::PolyQ;
+using tradep2p::blns7933::PublicKey;
 using tradep2p::blns7933::RingArithmetic;
 using tradep2p::blns7933::TrapdoorKey;
 
@@ -69,12 +70,40 @@ void test_ntru_relation_oracle_toy() {
     require(!gen.verify_ntru_relation(bad), "wrong exact NTRU relation must fail");
 }
 
-void test_generate_fails_closed() {
+// generate() now performs candidate sampling, invertibility/quality
+// checks, NTRUSolve, and reduction (blindsig_blns7933_gaussian.hpp,
+// blindsig_blns7933_quality.hpp) - it no longer fails closed by design.
+// This replaces the old test_generate_fails_closed(), which would now be
+// asserting the WRONG thing (that the tested behavior doesn't exist).
+void test_generate_produces_valid_trapdoor_toy() {
     RingArithmetic ring(4, 17);
     NTRUTrapdoorGenerator gen(ring);
     std::mt19937_64 rng(1);
-    require_throws<std::logic_error>([&] { (void)gen.generate(rng); },
-                                     "incomplete TrapGen must fail closed");
+    const TrapdoorKey key = gen.generate(rng);
+
+    require(gen.verify_ntru_relation(key),
+            "generate() must return a key satisfying f*G - g*F = q exactly");
+
+    // derive_public() itself throws if g is not invertible - reaching this
+    // line without an exception is itself part of what's being checked.
+    const PublicKey pub = gen.derive_public(key);
+    require(pub.t.size() == 4U, "derived public key must have the ring's degree");
+}
+
+void test_generate_is_repeatable_with_same_rng_seed() {
+    // Not a security property (this is exactly why the RNG needs to be a
+    // real CSPRNG before this is trusted for anything beyond testing - see
+    // generate()'s own header comment) - just confirms determinism given a
+    // fixed seed, useful for reproducing a specific run while debugging.
+    RingArithmetic ring(4, 17);
+    NTRUTrapdoorGenerator gen(ring);
+    std::mt19937_64 rng_a(99);
+    std::mt19937_64 rng_b(99);
+    const TrapdoorKey key_a = gen.generate(rng_a);
+    const TrapdoorKey key_b = gen.generate(rng_b);
+    require(key_a.f == key_b.f && key_a.g == key_b.g &&
+                key_a.F == key_b.F && key_a.G == key_b.G,
+            "identical RNG seed must produce an identical trapdoor");
 }
 
 } // namespace
@@ -85,7 +114,8 @@ int main() {
         test_inverse_toy();
         test_public_derivation_toy();
         test_ntru_relation_oracle_toy();
-        test_generate_fails_closed();
+        test_generate_produces_valid_trapdoor_toy();
+        test_generate_is_repeatable_with_same_rng_seed();
         std::cout << "blindsig_blns7933_tests: OK\n";
         return 0;
     } catch (const std::exception& e) {

@@ -1,5 +1,7 @@
 /build/
 /build-live-test/
+/build-q7933-reference/
+/build-blns7933-root/
 /test-output/
 /logs/
 *.log

@@ -1,8 +1,13 @@
 #include "tradep2p/blindsig_blns7933.hpp"
 
+#include "tradep2p/blindsig_blns7933_babai_reduce.hpp"
+#include "tradep2p/blindsig_blns7933_gaussian.hpp"
 #include "tradep2p/blindsig_blns7933_ntrusolve.hpp"
+#include "tradep2p/blindsig_blns7933_quality.hpp"
+#include "tradep2p/blindsig_blns7933_reduce.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace tradep2p::blns7933 {
@@ -192,9 +197,91 @@ bool RingArithmetic::equal(const PolyQ& a, const PolyQ& b) const {
 NTRUTrapdoorGenerator::NTRUTrapdoorGenerator(RingArithmetic ring)
     : ring_(std::move(ring)) {}
 
-TrapdoorKey NTRUTrapdoorGenerator::generate(std::mt19937_64&) const {
-    throw std::logic_error(
-        "BLNS7933 candidate sampling/NTRUSolve/Reduce/quality checks not fully integrated yet; reference path intentionally fails closed");
+TrapdoorKey NTRUTrapdoorGenerator::generate(std::mt19937_64& rng) const {
+    const std::size_t degree = ring_.degree();
+    const BigInt q{ring_.modulus()};
+    // sigma_{f,g} = 1.17*sqrt(q/2n), falcon.pdf eq. (3.27) - chosen so
+    // E[||(f,g)||] = 1.17*sqrt(q), the same constant the quality bound
+    // below compares gamma against.
+    const long double sigma_fg =
+        1.17L * std::sqrt(static_cast<long double>(ring_.modulus()) /
+                          (2.0L * static_cast<long double>(degree)));
+
+    const NTRUEquationSolver solver(degree, q);
+    const NTRUGlobalBabaiReducer global_reducer(degree, q);
+    const NTRUBasisReducer cleanup_reducer(degree, q);
+
+    for (;;) {
+        const std::vector<std::int64_t> f_raw =
+            sample_discrete_gaussian_poly(degree, sigma_fg, rng);
+        const std::vector<std::int64_t> g_raw =
+            sample_discrete_gaussian_poly(degree, sigma_fg, rng);
+
+        // Check g invertible mod q FIRST (cheap relative to the quality
+        // bound below) - this type's t=f*g^-1 orientation needs g
+        // invertible, the mirror image of FALCON's own h=g*f^-1
+        // convention checking f instead (falcon.pdf Algorithm 5 line 7).
+        if (!ring_.inverse(g_raw).has_value()) {
+            continue;
+        }
+
+        ZPoly f_big = to_zpoly(f_raw);
+        ZPoly g_big = to_zpoly(g_raw);
+
+        // Quality bound: gamma <= 1.17*sqrt(q) (falcon.pdf Algorithm 5
+        // lines 9-11). A singular quality system (f,g sharing a root) is
+        // treated as a rejection, not a hard failure - see
+        // compute_trapdoor_quality()'s own header comment.
+        bool quality_singular = false;
+        bool quality_accepted = false;
+        try {
+            quality_accepted = compute_trapdoor_quality(f_big, g_big, degree, q).accepted;
+        } catch (const std::runtime_error&) {
+            quality_singular = true;
+        }
+        if (quality_singular || !quality_accepted) {
+            continue;
+        }
+
+        // Solve fG - gF = q. NTRUEquationSolver already applies FALCON's
+        // own coprime-resultant rejection at the deepest recursion level
+        // (blindsig_blns7933_ntrusolve.cpp) - a std::nullopt here is a
+        // legitimate candidate rejection, not an error.
+        const auto solved = solver.solve(f_big, g_big);
+        if (!solved) {
+            continue;
+        }
+
+        // Reduce (F,G): global high-precision Babai round(s), then exact
+        // coordinate cleanup as a backstop - the identical two-stage
+        // pipeline already validated at d=128/256/512 by this project's
+        // own scaling diagnostics, not a new reduction strategy invented
+        // here.
+        const NTRUSolution globally_reduced = global_reducer.reduce(f_big, g_big, *solved);
+        const NTRUSolution cleaned = cleanup_reducer.reduce(f_big, g_big, globally_reduced);
+
+        TrapdoorKey key;
+        key.f = f_raw;
+        key.g = g_raw;
+        key.F.reserve(degree);
+        key.G.reserve(degree);
+        for (const auto& coefficient : cleaned.F) {
+            key.F.push_back(static_cast<std::int64_t>(coefficient));
+        }
+        for (const auto& coefficient : cleaned.G) {
+            key.G.push_back(static_cast<std::int64_t>(coefficient));
+        }
+
+        // Never return an unverified trapdoor - re-check the exact
+        // relation one final time on the values actually being returned,
+        // independent of whatever checks ran inside the solver/reducers.
+        if (!verify_ntru_relation(key)) {
+            throw std::logic_error(
+                "BLNS7933 TrapGen produced a candidate failing its own final relation check "
+                "- this should never happen, investigate");
+        }
+        return key;
+    }
 }
 
 PublicKey NTRUTrapdoorGenerator::derive_public(const TrapdoorKey& key) const {

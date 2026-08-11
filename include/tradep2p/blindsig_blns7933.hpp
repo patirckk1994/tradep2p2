@@ -83,9 +83,25 @@ class NTRUTrapdoorGenerator {
 public:
     explicit NTRUTrapdoorGenerator(RingArithmetic ring = RingArithmetic{});
 
-    // Intentionally fails closed until candidate sampling, NTRUSolve, basis
-    // reduction, and trapdoor-quality checks have each been implemented and
-    // validated independently.
+    // Samples candidate (f,g) from the discrete Gaussian D_{Z,sigma_fg,0}
+    // (sigma_fg = 1.17*sqrt(q/2n), falcon.pdf Algorithm 5), checks g is
+    // invertible mod q (this type's t=f*g^-1 orientation - see
+    // derive_public()), checks the quality bound gamma <= 1.17*sqrt(q)
+    // (blindsig_blns7933_quality.hpp), solves fG-gF=q, reduces (F,G), and
+    // resamples from scratch on any rejection - mirrors FALCON's own
+    // NTRUGen restart-on-failure loop (falcon.pdf Algorithm 5), not an
+    // adjust-and-retry strategy.
+    //
+    // SECURITY CAVEAT, not yet resolved: `rng` is whatever the caller
+    // supplies, and every test/diagnostic in this codebase currently
+    // passes a plain std::mt19937_64 - NOT a cryptographically secure
+    // generator. That's acceptable for the statistical/correctness testing
+    // this module exists for so far, but f,g ARE the secret trapdoor: this
+    // must be backed by a real CSPRNG (e.g. this project's existing
+    // OpenSSL RAND_bytes usage) before generate() is used for anything
+    // beyond development/testing. Precision of the sampling distribution
+    // and unpredictability of the randomness feeding it are different
+    // properties - this type only addresses the former.
     [[nodiscard]] TrapdoorKey generate(std::mt19937_64& rng) const;
 
     // BLNS23 public key orientation: t = f * g^{-1} mod q.

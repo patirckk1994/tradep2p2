@@ -34,6 +34,8 @@ add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933_ntrusolve.cpp
     src/blindsig_blns7933_reduce.cpp
     src/blindsig_blns7933_babai_reduce.cpp
+    src/blindsig_blns7933_gaussian.cpp
+    src/blindsig_blns7933_quality.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -90,6 +92,30 @@ target_compile_options(tradep2p_blns7933_babai_reduce_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_babai_reduce_tests
     COMMAND tradep2p_blns7933_babai_reduce_tests)
+
+add_executable(tradep2p_blns7933_gaussian_tests
+    tests/blindsig_blns7933_gaussian_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_gaussian_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_gaussian_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_gaussian_tests
+    COMMAND tradep2p_blns7933_gaussian_tests)
+
+add_executable(tradep2p_blns7933_quality_tests
+    tests/blindsig_blns7933_quality_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_quality_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_quality_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_quality_tests
+    COMMAND tradep2p_blns7933_quality_tests)
 
 # Manual diagnostics target: deliberately not a CTest test. It compares the
 # exact coordinate baseline against the high-precision global reduction at
@@ -150,5 +176,18 @@ target_link_libraries(tradep2p_blns7933_corpus_diagnostics PRIVATE
     tradep2p_blns7933_reference
 )
 target_compile_options(tradep2p_blns7933_corpus_diagnostics PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+# TrapGen candidate-generation diagnostic (Gaussian sampling -> invertibility
+# -> quality bound -> NTRUSolve -> reduce), with per-attempt rejection
+# visibility. Manual-only, same reasoning as the scaling diagnostics above.
+add_executable(tradep2p_blns7933_trapgen_diagnostic
+    BLIND/q7933-reference/trapgen_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_trapgen_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_trapgen_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )

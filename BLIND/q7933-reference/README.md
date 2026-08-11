@@ -16,11 +16,14 @@ Current purpose:
 - an exact coordinate-descent reducer retained as a slow correctness/cleanup oracle;
 - a global Babai-style reference reducer which forms the exact negacyclic Gram system, solves its real projection at 256 decimal digits, rounds a whole polynomial `k`, and accepts the update only after exact `cpp_int` relation and norm checks;
 - an independent degree-2 brute-force oracle used to test the distinction between direct equation solvability and TrapGen candidate acceptance;
-- explicit manual scaling/corpus diagnostics kept outside CTest so expensive development experiments cannot run accidentally.
+- a discrete Gaussian sampler `D_{Z,sigma,0}` (`blindsig_blns7933_gaussian.hpp`), by rejection sampling evaluated at 256-digit precision (not `double`, for both the Gaussian PDF and the accept/reject comparison - see that header's own comment for why this specific spot is where floating-point bias historically became a real, exploitable weakness in other lattice signature implementations);
+- a Falcon-style trapdoor-quality bound (`blindsig_blns7933_quality.hpp`): the Hermitian adjoint (exact, no transform needed) and `gamma = max(||(g,-f)||, ||q*f*/(f*f*+g*g*)||, ||q*g*/(f*f*+g*g*)||) <= 1.17*sqrt(q)` (falcon.pdf Algorithm 5, eq. (3.28)), computed via one real (not complex/FFT) linear solve at 256-digit precision - see that header's comment for why the FFT-domain formula reduces to a real linear system here;
+- a working `NTRUTrapdoorGenerator::generate()`: samples candidate `(f,g)`, checks `g` invertible mod `q` (this type's `t=f*g^-1` orientation), checks the quality bound, solves `fG-gF=q`, reduces `(F,G)`, and restarts from scratch on any rejection - mirroring FALCON's own NTRUGen restart loop;
+- explicit manual scaling/corpus/TrapGen diagnostics kept outside CTest so expensive development experiments cannot run accidentally.
 
-The full NTRU trapdoor generator itself is **not implemented yet**. `NTRUTrapdoorGenerator::generate()` still throws intentionally because candidate `f,g` sampling, trapdoor-quality acceptance, and the final BLNS23 `NTRU.SamplePre` path have not been implemented or validated.
+Neither reducer is a production implementation. The coordinate reducer is intentionally slow; the global reducer intentionally favors transparency and high precision over Falcon's optimized FFT/NTT/31-bit-limb engineering. The 256-digit projection is used only to choose the reduction polynomial: all state-changing updates and acceptance decisions are checked with exact integer arithmetic. This is not yet a claim that the `sigma=232` **signing/preimage-sampling** preconditions have been achieved - `generate()` produces a trapdoor `(f,g,F,G)` satisfying FALCON's own keygen acceptance criteria; it does not yet sample signatures, which is a separate, still-unbuilt piece (BLNS23's `NTRU.SamplePre`, see "Next implementation order" below).
 
-Neither reducer is a production implementation. The coordinate reducer is intentionally slow; the global reducer intentionally favors transparency and high precision over Falcon's optimized FFT/NTT/31-bit-limb engineering. The 256-digit projection is used only to choose the reduction polynomial: all state-changing updates and acceptance decisions are checked with exact integer arithmetic. This is not yet a claim that the `sigma=232` sampling preconditions have been achieved.
+**Known, unresolved gap: the RNG.** Every test/diagnostic here passes `std::mt19937_64` - not a cryptographically secure generator - into `generate()`. That's fine for the statistical/correctness testing this module exists for so far, but `f,g` ARE the secret trapdoor; this needs a real CSPRNG (e.g. this project's existing OpenSSL `RAND_bytes` usage elsewhere) before `generate()`'s output should be trusted for anything beyond development. This is a distinct property from the numerical-precision questions above - precision affects whether the *distribution* is right, RNG quality affects whether the *actual secret* is unpredictable - and only the former is addressed so far.
 
 CUDA is intentionally not used in the reference path. At the current stage, exact `cpp_int` arithmetic and a small high-precision dense solve are more valuable for auditability than GPU acceleration. A GPU backend would only be considered later for clearly isolated performance work after the mathematical path is validated.
 
@@ -46,7 +49,7 @@ ctest --preset blns7933-root --output-on-failure
 
 The q=7933 reference targets are still separate from the main `tradep2p` library; the preset merely compiles and tests them alongside the full experimental blind-signature tree.
 
-The current whole-repo checkpoint is 18/18 tests passing with the q=7933 reference, NTRUSolve, exact reducer, and global Babai reducer tests included.
+The current whole-repo checkpoint is 20/20 tests passing, now including the discrete Gaussian sampler and trapdoor-quality-bound tests alongside the q=7933 reference, NTRUSolve, exact reducer, and global Babai reducer tests. (This preset doesn't set an explicit `CMAKE_BUILD_TYPE`, so the Gaussian/quality tests - the two most floating-point-heavy suites - run noticeably slower here, ~4 minutes each, than under the standalone build's `-DCMAKE_BUILD_TYPE=Release`, where each is under a minute. Same correctness either way, just optimization level.)
 
 ## Controlled scaling diagnostics: d=16/32/64
 
@@ -120,17 +123,36 @@ cmake --build --preset blns7933-root \
 ./build-blns7933-root/tradep2p_blns7933_scaling_512_diagnostic
 ```
 
-This target is deliberately manual-only and is **not** TrapGen. Its purpose is to answer one narrow question before random candidate generation is introduced: can the current transparent `cpp_int` NTRUSolve plus 256-digit global reduction machinery survive the actual `d=512, q=7933` algebra while retaining exact postconditions?
+This target is deliberately manual-only and answers one narrow question before random candidate generation is introduced: can the current transparent `cpp_int` NTRUSolve plus 256-digit global reduction machinery survive the actual `d=512, q=7933` algebra while retaining exact postconditions? (Answer, since confirmed below: yes.)
+
+## TrapGen: candidate generation, now implemented
+
+`NTRUTrapdoorGenerator::generate()` (`blindsig_blns7933.hpp`/`.cpp`) is a real, working candidate-generation loop: sample `(f,g)` from `D_{Z,sigma_fg,0}` (`sigma_fg = 1.17*sqrt(q/2n)`) -> check `g` invertible mod `q` -> check `gamma <= 1.17*sqrt(q)` -> `NTRUSolve` -> reduce -> verify the exact relation one final time -> return, restarting from a fresh sample on any rejection. This is the step the earlier roadmap below called "TrapGen" - it now exists, is tested, and has been run at the real target parameters, not just toy dimensions.
+
+```sh
+cmake --build --preset blns7933-root \
+  --target tradep2p_blns7933_trapgen_diagnostic \
+  --parallel 2
+
+./build-blns7933-root/tradep2p_blns7933_trapgen_diagnostic
+```
+
+The diagnostic runs at `d=32` by default (fast - typically well under a second, one or two rejected candidates before an accept) with per-attempt visibility into exactly why a candidate was rejected (invertibility vs. quality bound, with the actual `gamma` value printed).
+
+**Real result at the actual `d=512, q=7933` target parameters** (via `NTRUTrapdoorGenerator::generate()` directly, seed `3`): succeeded in **402.567 seconds**, final exact relation verified, public-key derivation (`t = f*g^-1 mod q`) succeeded. The dominant cost by far is the quality-bound check (`compute_trapdoor_quality()`'s 256-digit real linear solve, roughly 30-60s per candidate at `d=512`) rather than `NTRUSolve` or reduction (each under 2s) - most of the wall-clock time across a run is spent evaluating rejected candidates' `gamma`, not on the eventual accepted one. This is a one-time cost per generated trapdoor (key generation, not per-signature), and squarely inside this project's stated tolerance for slow-but-correct over fast-but-approximate.
+
+**What this does and does not establish.** It establishes that a real, uniformly-sampled-from-the-correct-distribution `(f,g,F,G)` satisfying FALCON's own keygen acceptance criteria can be produced at the real BLNS23 parameters, with every step checked exactly. It does **not** establish that the *signing* side works: BLNS23's actual preimage sampler (`NTRU.SamplePre`, the paper's own `sigma=232` requirement) is a different, still-unbuilt component - see the updated roadmap below.
 
 ## Next implementation order
 
-1. Keep the exact ring, NTRUSolve, oracle, coordinate-reducer, and global-reducer tests green.
-2. Keep the deterministic small-coefficient corpus as a reproducible regression diagnostic, without interpreting its tiny accept/reject counts statistically.
-3. Run the explicit `d=512, q=7933` deterministic gate and inspect solver growth, global-reduction rounds, cleanup work, and runtime.
-4. Only after a clean `d=512` checkpoint, implement a separate candidate-generation/TrapGen diagnostic loop with explicit rejection reasons and trapdoor-quality measurements.
-5. Tie candidate quality acceptance to the BLNS23/Falcon-style Gaussian sampling requirements; exact equation correctness alone is not sufficient.
-6. Add toy `ffLDL` / preimage sampling behind a separate interface.
-7. Validate distributional properties and the `sigma=232` proof obligations at the actual parameters.
-8. Only after that, design an explicit backend adapter for `BlindSigSigner` and a new keystore format/version if required.
+1. ~~Keep the exact ring, NTRUSolve, oracle, coordinate-reducer, and global-reducer tests green.~~ Done, and now also covers the Gaussian sampler and quality-bound modules.
+2. ~~Keep the deterministic small-coefficient corpus as a reproducible regression diagnostic.~~ Done.
+3. ~~Run the explicit `d=512, q=7933` deterministic gate.~~ Done.
+4. ~~Implement a separate candidate-generation/TrapGen diagnostic loop with explicit rejection reasons and trapdoor-quality measurements.~~ Done - see "TrapGen" above. `generate()` itself (not just the diagnostic) has been run successfully at `d=512, q=7933`.
+5. ~~Tie candidate quality acceptance to the BLNS23/Falcon-style Gaussian sampling requirements.~~ Done - `sigma_{f,g}` sampling plus the `gamma` quality bound, both per falcon.pdf Algorithm 5.
+6. **Next real step**: add toy `ffLDL` / preimage sampling behind a separate interface - BLNS23's `NTRU.SamplePre`, the paper's own `sigma=232` requirement, is what actually produces signatures. Nothing in this module samples a signature yet; `generate()` only produces the trapdoor keypair.
+7. Validate distributional properties and the `sigma=232` proof obligations at the actual parameters, once (6) exists - not yet meaningful before there's a sampler to validate.
+8. Replace `std::mt19937_64` with a real CSPRNG before `generate()`'s output is trusted for anything beyond development/testing - see the RNG caveat above. Not yet done.
+9. Only after all of the above, design an explicit backend adapter for `BlindSigSigner` and a new keystore format/version if required.
 
 Do not silently reinterpret the current q=12289 keystore as q=7933 key material: the existing at-rest format is explicitly a `FalconTrapdoor` and should remain so until a deliberate migration/versioning design exists.
