@@ -20,11 +20,13 @@ use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 
-// Mirrors short_poly_from_seed() in the original C++ prototype exactly:
-// SHA-256(seed || label) seeds a SHAKE256 XOF, one byte per coefficient,
-// uniform in [-2, 2]. Public: also used directly by the CLI's `r`
-// sampling (same distribution, same construction, different label/seed).
-pub fn short_poly_from_seed(seed: &[u8], label: &str) -> Vec<i64> {
+// Deterministic uniform-in-[-bound,bound] polynomial: SHA-256(seed ||
+// label) seeds a SHAKE256 XOF, one byte per coefficient, mapped via
+// `% (2*bound+1) - bound`. `bound` must be small enough that `2*bound+1
+// <= 256` (one XOF byte per coefficient) - true for every bound actually
+// used in this module.
+fn bounded_poly_from_seed(seed: &[u8], label: &str, bound: i64) -> Vec<i64> {
+    let modulus = 2 * bound + 1;
     let mut input = Vec::with_capacity(seed.len() + label.len());
     input.extend_from_slice(seed);
     input.extend_from_slice(label.as_bytes());
@@ -37,9 +39,40 @@ pub fn short_poly_from_seed(seed: &[u8], label: &str) -> Vec<i64> {
     for _ in 0..N {
         let mut b = [0u8; 1];
         reader.read(&mut b);
-        out.push((b[0] % 5) as i64 - 2);
+        out.push((b[0] as i64 % modulus) - bound);
     }
     out
+}
+
+// The blinding vector r's own bound - fixed by the protocol (matches the
+// paper's D_sigma0 parameter choice and NIZK1/NIZK2's own r_in_bounds()
+// check, which specifically requires every coefficient in [-2,2]). Used
+// both by the CLI's `r` sampling and, historically, by this module's own
+// encryption noise before that was widened - see ENCRYPTION_NOISE_BOUND
+// below for why those needed to stop sharing one distribution.
+pub fn short_poly_from_seed(seed: &[u8], label: &str) -> Vec<i64> {
+    bounded_poly_from_seed(seed, label, 2)
+}
+
+// Encryption-to-the-sky's own noise (u, e1, e2) - deliberately NOT the
+// same [-2,2] bound as r above. Originally it was (both used
+// short_poly_from_seed), which independently-verified lattice-hardness
+// estimation (lattice-estimator, real run, not hand-derived) showed was
+// too thin: ~102 bits (rough) / ~125 bits (full) at q=12289 - noticeably
+// below FALCON-512's own ~121-146 bit margin at the same modulus. r
+// itself has to stay small (it's what NIZK1/NIZK2 bound and prove), but
+// this encryption's noise has no such constraint - nothing ever decrypts
+// these ciphertexts in the real protocol (paper's footnote 6: the
+// "public key" need not even be validly generated), so there is no
+// correctness cost to using much larger noise here. Bound 8 was chosen
+// by sweeping bounds 2/4/8/12/16/20/24/32 through the same estimator and
+// picking the smallest one with comfortable margin above both FALCON's
+// own numbers and a 128-bit floor on both rough and full estimates:
+// bound=8 measures ~146/166 bits (rough/full).
+const ENCRYPTION_NOISE_BOUND: i64 = 8;
+
+fn encryption_noise_from_seed(seed: &[u8], label: &str) -> Vec<i64> {
+    bounded_poly_from_seed(seed, label, ENCRYPTION_NOISE_BOUND)
 }
 
 // Mirrors the original C++ prototype's random_ring_element(): rejection
@@ -102,17 +135,17 @@ pub struct Ciphertexts {
 /// and internally by check_encryption() to verify a claimed one - see
 /// this module's own comment for why those share one implementation.
 pub fn generate_ciphertexts(coins: &[u8], r: &[i64], mu: &str, a: &[i64], pk: &[i64]) -> Ciphertexts {
-    let u_r = short_poly_from_seed(coins, "u_r");
-    let e1_r = short_poly_from_seed(coins, "e1_r");
-    let e2_r = short_poly_from_seed(coins, "e2_r");
+    let u_r = encryption_noise_from_seed(coins, "u_r");
+    let e1_r = encryption_noise_from_seed(coins, "e1_r");
+    let e2_r = encryption_noise_from_seed(coins, "e2_r");
     let ct1_r = mul_add(a, &u_r, &e1_r);
     let pku_r = poly_mul_mod_q_ntt(pk, &u_r);
     let ct2_r: Vec<i64> = (0..N).map(|i| pku_r[i] + e2_r[i] + r[i]).collect();
 
     let mu_bits = mu_to_bits(mu);
-    let u_mu = short_poly_from_seed(coins, "u_mu");
-    let e1_mu = short_poly_from_seed(coins, "e1_mu");
-    let e2_mu = short_poly_from_seed(coins, "e2_mu");
+    let u_mu = encryption_noise_from_seed(coins, "u_mu");
+    let e1_mu = encryption_noise_from_seed(coins, "e1_mu");
+    let e2_mu = encryption_noise_from_seed(coins, "e2_mu");
     let ct1_mu = mul_add(a, &u_mu, &e1_mu);
     let pku_mu = poly_mul_mod_q_ntt(pk, &u_mu);
     let ct2_mu: Vec<i64> = (0..N).map(|i| pku_mu[i] + e2_mu[i] + mu_bits[i]).collect();

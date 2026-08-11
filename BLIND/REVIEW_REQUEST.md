@@ -82,10 +82,24 @@ that, we built:
 - `pk` and the shared parameter `a` are both freshly random ring elements
   - no real keypair is ever generated, matching the paper's footnote.
 - Each ciphertext: `(a·u + e1, pk·u + e2 + message)`, with `u, e1, e2` all
-  short polynomials (coefficients uniform in `[-2,2]`) derived
-  deterministically from a 32-byte `coins` value via a domain-separated
-  hash-expand (`short_poly_from_seed()` - the same function used both to
-  generate a fresh request and, inside the guest, to check one).
+  short polynomials derived deterministically from a 32-byte `coins`
+  value via a domain-separated hash-expand (`encryption_noise_from_seed()`
+  - the same function used both to generate a fresh request and, inside
+  the guest, to check one). Coefficients uniform in `[-8,8]` - **not**
+  `r`'s own `[-2,2]` bound, deliberately: an earlier version reused `r`'s
+  sampler for this noise too, which independently-verified lattice-hardness
+  estimation (`lattice-estimator`, a real run, not hand-derived) showed
+  was too thin - roughly 102 bits (rough estimate) / 125 bits (full
+  estimate) at `q=12289`, noticeably below FALCON-512's own ~121-146 bit
+  margin at the same modulus. Since nothing ever decrypts these
+  ciphertexts (footnote 6 again), there's no correctness cost to using
+  larger noise here - `[-8,8]` was chosen by sweeping several bounds
+  through the same estimator and picking the smallest one with
+  comfortable margin above both FALCON's own numbers and a 128-bit floor
+  on both rough and full estimates (`[-8,8]` measures ~146/166 bits).
+  Still worth your independent judgment - the estimator only checks raw
+  problem hardness, not the full picture (see "Verification methodology"
+  below).
 
 We split into two ciphertexts rather than one because `r` (512 coefficients
 needing ~3 bits each) and `SHA-256(µ)` (256 bits) don't fit one ring

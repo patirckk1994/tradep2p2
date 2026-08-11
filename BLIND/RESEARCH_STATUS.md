@@ -185,8 +185,10 @@ never decrypted in the live protocol — its only role is enabling the
 security proof's extraction argument. Built as a standard LPR-style
 (Lyubashevsky-Peikert-Regev) Ring-LWE dual encryption,
 `(a·u+e1, pk·u+e2+message)`, with `a`/`pk` fresh random ring elements (no
-real keypair) and `u,e1,e2` short polynomials derived deterministically
-from `coins`. Two independent ciphertexts — one for `r` directly, one for
+real keypair) and `u,e1,e2` short polynomials (coefficients uniform in
+`[-8,8]` — see "Encryption noise widened" below for why this isn't `r`'s
+own `[-2,2]` bound) derived deterministically from `coins`. Two independent
+ciphertexts — one for `r` directly, one for
 `SHA-256(µ)`'s bits — rather than one dense packed ciphertext, to avoid
 inventing a custom multi-bit encoding on top of everything else that's
 already novel here. Cross-checked natively against real generated
@@ -270,6 +272,63 @@ the blind construction. That answer requires reading the paper's actual
 theorem/proof and substituting `q=12289` into their own bound, which is
 exactly the kind of thing that needs a cryptographer's judgment, not a
 tool call. Still `REVIEW_REQUEST.md` priority #3.
+
+## Encryption noise widened after a second, better-posed estimator check
+
+The SIS attempt above modeled the wrong problem (see "what that actually
+means"). A genuinely different, well-posed question turned out to be
+checkable: is the encryption-to-the-sky construction *itself* - not the
+blinding relation, the encryption piece specifically - a sound Ring-LWE
+instance at these parameters? Unlike the SIS attempt, this maps cleanly
+onto exactly what `lattice-estimator` is built for (real LWE estimation,
+the tool's primary use case), so we ran it.
+
+**Original noise reused `r`'s own sampler** (coefficients uniform in
+`[-2,2]`, same distribution, same underlying function) for `u,e1,e2` too -
+convenient, but never actually checked against a real hardness estimate.
+Running it: **≈102 bits (rough estimate) / ≈125 bits (full estimate)** at
+`q=12289, n=512` - noticeably below FALCON-512's own ~121-146 bit margin
+at the same modulus, and below a comfortable 128-bit floor under the
+"rough" convention most papers report.
+
+**Why this is fixable with zero correctness cost**: `r` genuinely has to
+stay small - it's what NIZK1/NIZK2 bound and prove knowledge of. The
+encryption noise has no such constraint. Nothing ever decrypts these
+ciphertexts in the real protocol (footnote 6 again: the "public key" need
+not even be validly generated) - so there's no decryption-correctness
+margin to preserve, and no reason the two had to share one distribution
+in the first place. That was an implementation-convenience choice, not a
+requirement.
+
+**Fix**: swept bounds `2,4,8,12,16,20,24,32` through the same estimator
+(holding `n,q,m` fixed) and picked the smallest one with comfortable
+margin over both FALCON's own numbers and a 128-bit floor on both rough
+and full estimates:
+
+| bound | σ | rough (bits) | full (bits) |
+|---|---|---|---|
+| 2 (original) | 1.41 | 101.9 | 125.2 |
+| 4 | 2.58 | 120.9 | 142.8 |
+| **8 (chosen)** | 4.90 | **145.7** | **165.8** |
+| 16 | 9.52 | 178.1 | 196.3 |
+
+Shipped as `[-8,8]` (`ENCRYPTION_NOISE_BOUND` in
+`blindsig-prover/prover-core/src/enc.rs`) - a new, separate
+`encryption_noise_from_seed()` function, so `r`'s own sampling
+(`short_poly_from_seed()`) is completely untouched. Re-verified after the
+change: `prover-core`'s regression tests (NTT cross-check, encryption
+negative control) still pass, and a fresh real end-to-end run (new
+`user-blind` → new NIZK1 proof → signer verify+sign → signature
+verification) confirms the whole pipeline still works correctly with the
+new noise.
+
+**Still not a substitute for review**: this confirms the *raw* Ring-LWE
+problem underlying the encryption is comfortably hard at the new bound -
+it says nothing about whether the two ciphertexts' shared `a`/`pk`,
+the message-encoding choice, or the "encryption to the sky" role itself
+(extraction argument, not real IND-CPA deployment) introduce some other
+issue the reduction cares about. Same caveat as before, still
+`REVIEW_REQUEST.md` priority #1.
 
 ## Roadmap: what has to be true before this is a responsible production integration
 
