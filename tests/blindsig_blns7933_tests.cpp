@@ -47,10 +47,10 @@ void test_public_derivation_toy() {
     RingArithmetic ring(4, 17);
     NTRUTrapdoorGenerator gen(ring);
     TrapdoorKey key;
-    key.f = {1, 0, 0, 0};
-    key.g = {2, 3, 4, 5};
+    key.f = {2, 3, 4, 5};
+    key.g = {1, 0, 0, 0};
     const auto pk = gen.derive_public(key);
-    require(pk.h == PolyQ({2, 3, 4, 5}), "g/f with f=1 must equal g");
+    require(pk.t == PolyQ({2, 3, 4, 5}), "BLNS t=f/g with g=1 must equal f");
 }
 
 void test_ntru_relation_oracle_toy() {
@@ -74,7 +74,7 @@ void test_generate_fails_closed() {
     NTRUTrapdoorGenerator gen(ring);
     std::mt19937_64 rng(1);
     require_throws<std::logic_error>([&] { (void)gen.generate(rng); },
-                                     "unimplemented TrapGen must fail closed");
+                                     "incomplete TrapGen must fail closed");
 }
 
 } // namespace
