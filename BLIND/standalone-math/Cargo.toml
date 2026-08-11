@@ -1,0 +1,16 @@
+[package]
+name = "blns-blindsig-standalone-math"
+version = "0.1.0"
+edition = "2021"
+
+# Deliberately minimal: only what ntt.rs/ntt_tables.rs/enc.rs actually use.
+# No risc0-zkvm, no serde, nothing from the parent project's wider prover
+# crate - this exists solely so an outside reviewer can `cargo test` two
+# self-contained pieces of math without pulling in anything else. See
+# README.md for what this is and isn't.
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+rand = "0.8"

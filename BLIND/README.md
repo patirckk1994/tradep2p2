@@ -12,57 +12,77 @@ actual code lives elsewhere in this repo:
   official FALCON C reference implementation both the Rust and C++ sides
   build against.
 - `../include/tradep2p/blindsig_*.hpp` / `../src/blindsig_*.cpp` — the C++
-  integration into the mediator/client. **In progress, not complete** —
-  see "Current status" below before assuming anything here is wired up.
+  integration into the mediator, CLI client, and dashboard. **Complete and
+  live-tested** — see "Current status" below.
+- `standalone-math/` (this folder) — a self-contained extraction of the
+  NTT multiplication and "encryption to the sky" construction, with no
+  dependency on the rest of this repo, intended for wider public
+  cryptographic review beyond the QRL-adjacent review this folder was
+  originally built for. See `standalone-math/README.md`.
 
 Read `REVIEW_REQUEST.md` if you're reviewing the cryptography.
 Read `RESEARCH_STATUS.md` for the full research history and open
 questions (parameter fidelity is the big one — see that file).
 
-## Current status (branch `PQR-BLINDSIG`) — NOT finished, NOT deployable
+## Current status (branch `PQR-BLINDSIG`) — cryptographic core AND integration complete, NOT independently reviewed, NOT merged
 
-Being upfront rather than letting this folder imply more than is true:
+Being upfront rather than letting this folder imply more or less than is
+true:
 
-**Done and independently verified right now (compiled AND runtime-tested with real cryptography, not just written):**
+**Done and independently verified with real cryptography, not just
+written or unit-tested:**
 - The `blindsig-prover` CLI, `blindsig_wire`, `blindsig_falcon`,
-  `blindsig_keystore`, and `blindsig_subprocess` — each compiled and
-  runtime-tested on its own (fresh-keypair sign/verify with a correct
-  negative control; keystore create/unlock/reject-wrong-passphrase/
-  reject-tampering; the subprocess bridge tested against a real
-  `sleep`-based timeout-kill and a real `blindsig-prover` invocation).
-- `blindsig_signer.hpp/cpp` — **a full real end-to-end test**: real
-  FALCON keypair, real `user-blind`, a real 216.7s NIZK1 proof,
-  `BlindSigSigner` verifying it via the sidecar and signing with real
-  `falcon_sign_dyn` — the resulting signature genuinely verifies. Plus a
-  tamper-rejection case and a queue-capacity case, both correct.
-- `blindsig_client.hpp/cpp` — written, compiles clean; not yet driven
-  through a full live round-trip (needs the wiring below to test via a
-  real connection — its internal logic reuses the same sidecar calls
-  already proven correct above).
-- `CMakeLists.txt` — **the whole thing now builds through real CMake**,
-  both `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL=ON` and the default `OFF`
-  configure, build, and pass the full 12-suite `ctest` clean. Confirmed
-  via `nm`/`strings` that the OFF build has zero `blindsig`/`falcon`/
-  `nlohmann` symbols anywhere — the compile gate genuinely gates.
+  `blindsig_keystore`, `blindsig_subprocess`, `blindsig_signer`, and
+  `blindsig_client` — each compiled and runtime-tested (fresh-keypair
+  sign/verify with a correct negative control; keystore create/unlock/
+  reject-wrong-passphrase/reject-tampering; the subprocess bridge tested
+  against a real timeout-kill; the signer tested against a real ~217s
+  NIZK1 proof it genuinely verifies and signs).
+- `CMakeLists.txt` — both `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL=ON` and
+  the default `OFF` configure, build, and pass the full `ctest` suite
+  clean (14/14 on ON, 12/12 on OFF). Confirmed via `nm`/`strings` that the
+  OFF build has zero `blindsig`/`falcon`/`nlohmann` symbols anywhere — the
+  compile gate genuinely gates.
+- `lobby.cpp`/`main.cpp` — the mediator-side signer wiring, the interactive
+  passphrase-gated startup, and the CLI's `/blindsig info|request|status`
+  REPL commands. Driven through a **real live end-to-end test**: an actual
+  mediator process and an actual client process over a real TLS
+  connection, through a real ~150s NIZK1 proof, real network chunk
+  submission, real mediator verify+sign, real ~100s NIZK2 proof, and real
+  independent self-verification via the sidecar's own `verify-signature`
+  call — reaching `stage: ready` with a genuine credential. (This also
+  caught and fixed a real client-side wake-pipe bug, since fixed.)
+- `http_dashboard.cpp`/`dashboard_client.hpp/cpp` — a live, gated dashboard
+  panel (`POST /api/blindsig/info`, `POST /api/blindsig/request`,
+  `GET /api/blindsig/state`), driven through the same kind of real live
+  test as above but via the actual HTTP API: real mediator, real dashboard
+  process, real ~200s proving cycle, reaching `stage: ready` with a
+  genuine self-verified credential.
+- `setup_mediator.sh` — `--blindsig-enable`/`--blindsig-keystore-file`/
+  `--blindsig-prover-path`/`--blindsig-queue-size` flags.
+- `specs.txt` §9.3a (new section) plus the §9.3/§10/§11 edits explaining
+  why this was built ahead of independent review, honestly.
+- Dedicated permanent unit tests: `blindsig_wire_tests.cpp` (codec/chunk-
+  assembler edge cases) and `blindsig_keystore_tests.cpp` (custody/tamper
+  checks).
 
-**Not done yet:**
-- Any of `lobby.cpp` / `main.cpp` / `http_dashboard.cpp` actually calling
-  into any of the above (dispatch() case, startup passphrase prompt, CLI
-  REPL commands, dashboard routes+checkbox)
-- `setup_mediator.sh` flags
-- The `specs.txt` §9.3a section itself, and the §11 rewrite explaining
-  why this was built ahead of independent review
-- Dedicated permanent unit tests (`blindsig_wire_tests.cpp`/
-  `blindsig_keystore_tests.cpp`), and a live end-to-end pass through the
-  REAL mediator+client over an actual connection
+**Not done, and not planned as part of this integration:**
+- Independent cryptographic review of any of the above — that's what this
+  folder and `REVIEW_REQUEST.md` are for. Nothing here should be read as
+  self-certification.
+- specs.txt §9.3's actual credential/reputation application (token↔room
+  mapping, epoch rotation, aggregate disclosure) — out of scope by design,
+  this integration is the primitive only.
+- A trapdoor sampler built for BLNS23's own actual parameters (`q=7933`,
+  not FALCON's `q=12289`) — a separate, still-in-progress research/
+  engineering track, not part of this folder.
 
-**In short: the cryptographic core is now solid and proven against real
-data, but there is still no way to run a blind signature through the
-mediator/client yet** — nothing in `lobby.cpp`/`main.cpp`/
-`http_dashboard.cpp` calls any of this. Don't test "the feature" — there
-isn't one to test yet. If you want to exercise the cryptography directly,
-use the `blindsig-prover` CLI per `REVIEW_REQUEST.md`'s build
-instructions.
+**In short: this is a complete, working, off-by-default, unreviewed
+experimental feature** — a real blind signature can be requested and
+produced through either the CLI or the browser dashboard, over a real
+network connection, and the result genuinely verifies. "Unreviewed" is
+doing real work in that sentence, not a formality — see
+`REVIEW_REQUEST.md` for what we'd most like scrutinized.
 
 ## The one rule that governs all of this
 
