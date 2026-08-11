@@ -21,12 +21,19 @@ if(NOT TRADEP2P_HAVE_BOOST_MULTIPRECISION_CPP_INT)
     message(FATAL_ERROR
         "BLNS7933 reference path requires boost/multiprecision/cpp_int.hpp")
 endif()
+check_include_file_cxx("boost/multiprecision/cpp_dec_float.hpp"
+    TRADEP2P_HAVE_BOOST_MULTIPRECISION_CPP_DEC_FLOAT)
+if(NOT TRADEP2P_HAVE_BOOST_MULTIPRECISION_CPP_DEC_FLOAT)
+    message(FATAL_ERROR
+        "BLNS7933 global reducer requires boost/multiprecision/cpp_dec_float.hpp")
+endif()
 
 add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933.cpp
     src/blindsig_blns7933_integer_ring.cpp
     src/blindsig_blns7933_ntrusolve.cpp
     src/blindsig_blns7933_reduce.cpp
+    src/blindsig_blns7933_babai_reduce.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -72,9 +79,21 @@ target_compile_options(tradep2p_blns7933_reduce_tests PRIVATE
 add_test(NAME tradep2p_blns7933_reduce_tests
     COMMAND tradep2p_blns7933_reduce_tests)
 
-# Manual diagnostics target: deliberately not a CTest test.  It performs
-# controlled exact-arithmetic scaling at d=16/32/64 only and must be invoked
-# explicitly so normal test runs never become accidental benchmarks.
+add_executable(tradep2p_blns7933_babai_reduce_tests
+    tests/blindsig_blns7933_babai_reduce_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_babai_reduce_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_babai_reduce_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_babai_reduce_tests
+    COMMAND tradep2p_blns7933_babai_reduce_tests)
+
+# Manual diagnostics target: deliberately not a CTest test. It compares the
+# exact coordinate baseline against the high-precision global reduction at
+# d=16/32/64 only and must be invoked explicitly.
 add_executable(tradep2p_blns7933_scaling_diagnostics
     BLIND/q7933-reference/scaling_diagnostics.cpp
 )
