@@ -45,8 +45,8 @@ public:
     [[nodiscard]] PolyQ mul(const PolyQ& a, const PolyQ& b) const;
 
     // Multiplicative inverse in F_q[x]/(x^d+1), when it exists.  This is a
-    // deliberately generic polynomial-Euclid implementation, not FALCON's
-    // q=12289 NTT inversion path.
+    // deliberately generic modular-linear-algebra implementation, not
+    // FALCON's q=12289 NTT inversion path.
     [[nodiscard]] std::optional<PolyQ> inverse(const PolyQ& a) const;
 
     [[nodiscard]] bool equal(const PolyQ& a, const PolyQ& b) const;
@@ -58,9 +58,13 @@ private:
     [[nodiscard]] std::int64_t mod(std::int64_t x) const noexcept;
 };
 
-// f,g,F,G describe the usual NTRU trapdoor basis relation.  We intentionally
-// keep wider signed coefficients here than the current FALCON wrapper's int8
-// storage: this is a reference/research representation, not a wire format.
+// f,g,F,G describe the NTRU trapdoor relation
+//
+//     f*G - g*F = q
+//
+// over Z[x]/(x^d+1).  We intentionally keep wider signed coefficients here
+// than the current FALCON wrapper's int8 storage: this is a research/reference
+// representation, not a wire or keystore format.
 struct TrapdoorKey {
     std::vector<std::int64_t> f;
     std::vector<std::int64_t> g;
@@ -69,23 +73,28 @@ struct TrapdoorKey {
 };
 
 struct PublicKey {
-    PolyQ h; // h = g/f in R_q when f is invertible
+    // BLNS23 writes A=(t,1) with t=f*g^{-1} mod q.  This orientation differs
+    // from the conventional Falcon h=g*f^{-1} notation used by the existing
+    // q=12289 wrapper, so this reference type deliberately calls it `t`.
+    PolyQ t;
 };
 
 class NTRUTrapdoorGenerator {
 public:
     explicit NTRUTrapdoorGenerator(RingArithmetic ring = RingArithmetic{});
 
-    // Intentionally fails closed until NTRUGen/NTRUSolve/Reduce are ported
-    // from the FALCON/GPV-style pseudocode and validated at toy scale.
+    // Intentionally fails closed until candidate sampling, NTRUSolve, basis
+    // reduction, and trapdoor-quality checks have each been implemented and
+    // validated independently.
     [[nodiscard]] TrapdoorKey generate(std::mt19937_64& rng) const;
 
-    // This part is already well-defined once exact ring inversion exists.
+    // BLNS23 public key orientation: t = f * g^{-1} mod q.
     [[nodiscard]] PublicKey derive_public(const TrapdoorKey& key) const;
 
     // Exact algebraic oracle for solver development: checks
     //     f*G - g*F == q  in Z[x]/(x^d+1),
     // NOT merely modulo q (where the RHS would vanish and lose information).
+    // The implementation uses arbitrary-precision integer arithmetic.
     [[nodiscard]] bool verify_ntru_relation(const TrapdoorKey& key) const;
 
 private:
