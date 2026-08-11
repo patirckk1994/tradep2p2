@@ -83,6 +83,16 @@ target_compile_options(tradep2p_blns7933_scaling_128_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_scaling_256_diagnostic
+    scaling_256_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_256_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_256_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 add_executable(tradep2p_blns7933_corpus_diagnostics
     corpus_diagnostics.cpp
 )
