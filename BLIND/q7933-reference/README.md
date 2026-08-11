@@ -175,7 +175,38 @@ Runs the full pipeline (TrapGen -> build the signing tree -> Sign -> Verify) at 
 
 **Real result at the actual `d=512, q=7933` target parameters** (`tradep2p_blns7933_sign_512_diagnostic`, same pipeline, no shortcuts, seed `4`): succeeded end-to-end in **4m29s total** - TrapGen 233.0s, `build_signing_tree` 33.0s (the LDL tree's `div()` cost, dominated by its top-level call, same order of cost as the quality-bound module's own d=512 measurement), `sign` 2.75s, `verify`: **accepted**, `||s||^2=51,497,427` comfortably within the bound `110,231,552` (~47% of it - a healthy margin, not a borderline pass). This is a genuine, complete signature produced and independently verified at the actual BLNS23 target parameters, not a toy dimension or a hand-fed anchor - the first time this reference substrate has closed the full loop (TrapGen -> tree -> sign -> verify) at real scale.
 
-**What this does and does not establish.** It establishes that a genuine, produced-by-this-code signature satisfies the real `A.s=c (mod q)` relation and the real norm bound, and that a tampered signature or a signature checked against the wrong message is correctly rejected (see `blindsig_blns7933_sign_tests.cpp`). It does **not** establish that the *distribution* of `s` matches what BLNS23's own security proof needs (statistical-distance validation against the target Gaussian, side-channel/constant-time considerations, and a from-scratch security rederivation are all still open - see the roadmap below, largely unchanged from before this session's work on this).
+**What this does and does not establish.** It establishes that a genuine, produced-by-this-code signature satisfies the real `A.s=c (mod q)` relation and the real norm bound, and that a tampered signature or a signature checked against the wrong message is correctly rejected (see `blindsig_blns7933_sign_tests.cpp`). It does **not** establish that the *distribution* of `s` matches what BLNS23's own security proof needs - see the next section, which is a first empirical pass at exactly that question.
+
+## Distribution diagnostic: an empirical first pass at `s`'s statistics
+
+Everything above only checks that `sign()`'s output is algebraically correct (right relation, right norm bound, genuine rejection of tampering) - none of it checks that `s`'s actual distribution matches what BLNS23's/falcon.pdf's own security argument requires: `s ~ D_{(c,0)+Lambda(B),sigma,0}`, a discrete Gaussian of parameter `sigma=232` centered on the message's coset. `distribution_diagnostic.cpp`/`distribution_512_diagnostic.cpp` are a first, honest, **empirical moment check** against that claim - not a formal statistical-distance proof - built on top of the already-tested `sign()`/`verify()` pair, reusing one precomputed Falcon tree across many signatures (the tree is a one-time per-keypair cost; each `sign()` call is cheap once it exists).
+
+Two complementary checks, both pooling every coefficient of every produced `s0`/`s1` and comparing against the target `sigma^2`:
+
+1. **Different messages** (many distinct cosets): pooled mean should be near 0 by symmetry across random targets, pooled variance should track `sigma^2`.
+2. **Same message, repeated** (same coset, many independent `ffSampling` draws): confirms the sampler is not accidentally deterministic or low-entropy - a real, checkable failure mode a broken RNG wiring could produce without any algebraic check noticing - and reports the same-coset sample variance as a secondary data point.
+
+Every sampled signature in both loops is independently re-verified via `verify()`, so a run that silently tolerated even one algebraically-invalid signature would fail loudly, not just report a bad statistic.
+
+```sh
+cmake --build --preset blns7933-root \
+  --target tradep2p_blns7933_distribution_diagnostic tradep2p_blns7933_distribution_512_diagnostic \
+  --parallel 2
+
+./build-blns7933-root/tradep2p_blns7933_distribution_diagnostic       # d=32,  1000 + 200 samples, ~3 min
+./build-blns7933-root/tradep2p_blns7933_distribution_512_diagnostic   # d=512, 100 + 50 samples, ~11 min
+```
+
+**First recorded results, both clean and consistent with each other:**
+
+| | d=32 (1000 + 200 samples) | d=512 (100 + 50 samples) |
+|---|---|---|
+| Check 1 pooled mean (target ~0, scale `sigma=232`) | -1.363 | -0.044 |
+| Check 1 pooled variance / `sigma^2` (target 1.0) | 0.998 | 0.997 |
+| Check 2 pooled variance / `sigma^2` (target 1.0) | 0.987 | 0.995 |
+| Check 2 all-identical guard | passed (genuinely randomized) | passed (genuinely randomized) |
+
+**What this does and does not establish.** Both means sit well within noise of 0 relative to `sigma=232`, and both variance ratios sit within half a percent of the target `sigma^2` at the real `d=512` target dimension specifically, not just at toy scale - real, positive evidence the tree-sampled output is landing on the right Gaussian, at the parameters that actually matter. It is **not** a formal statistical-distance bound, does not check higher moments or the covariance structure `ffSampling`'s security argument actually depends on, and pooled coefficients within one signature are not independent draws (so the naive variance-ratio precision overstates the test's real statistical power) - a rigorous treatment would need a proper statistical-distance estimate (e.g. via Renyi divergence or a KS-type test against the true discrete Gaussian CDF) rather than first- and second-moment matching. Side-channel/constant-time considerations and a from-scratch security rederivation remain entirely open - see the roadmap below.
 
 ## Next implementation order
 
@@ -185,9 +216,10 @@ Runs the full pipeline (TrapGen -> build the signing tree -> Sign -> Verify) at 
 4. ~~Implement a separate candidate-generation/TrapGen diagnostic loop with explicit rejection reasons and trapdoor-quality measurements.~~ Done - see "TrapGen" above. `generate()` itself (not just the diagnostic) has been run successfully at `d=512, q=7933`.
 5. ~~Tie candidate quality acceptance to the BLNS23/Falcon-style Gaussian sampling requirements.~~ Done - `sigma_{f,g}` sampling plus the `gamma` quality bound, both per falcon.pdf Algorithm 5.
 6. ~~Add toy `ffLDL` / preimage sampling behind a separate interface.~~ Done - see "Sign/Verify: a working end-to-end pipeline" above. `ffLDL*`/`ffSampling` (falcon.pdf Algorithms 8/9/11) are implemented entirely in real coefficient domain, and a full `sign()`/`verify()` round trip has been run successfully at both toy scale and the real `d=512, q=7933` target.
-7. **Next real step**: validate distributional properties and the `sigma=232` proof obligations at the actual parameters - this project's own tests so far confirm `sign()`/`verify()` are ALGEBRAICALLY correct (right relation, right norm bound, genuine rejection of tampering), not that the STATISTICAL distribution of `s` matches what BLNS23's security proof needs. A real statistical battery (mean/covariance of many samples against the target Gaussian, comparable to what `blindsig_blns7933_gaussian_tests.cpp` already does for the base sampler, but for the full tree-sampled output) is the concrete next piece of work.
+7. ~~Validate distributional properties at the actual parameters.~~ First pass done - see "Distribution diagnostic" above. Empirical mean/variance moment-matching against the target Gaussian, run at both `d=32` (1000+200 samples) and the real `d=512` target (100+50 samples), both clean (variance ratios within 0.5% of `sigma^2` at `d=512`). This is a first empirical pass, not a formal statistical-distance proof - a rigorous treatment (Renyi divergence or KS-type CDF test, covariance structure, not just first/second moments) remains open if this scheme is ever pushed toward a real security claim.
 8. Replace `std::mt19937_64` with a real CSPRNG before `generate()`'s or `sign()`'s output is trusted for anything beyond development/testing - see the RNG caveat above. Not yet done. `sign()` inherits this same gap: ffSampling's randomness quality matters just as much as TrapGen's.
 9. `hash_to_point()` (`blindsig_blns7933_sign.hpp`) is a deterministic placeholder, explicitly NOT a cryptographic hash-to-point - a real one (falcon.pdf Algorithm 3, SHAKE256-based, with a random salt per signature) is separate, unstarted work. Currently signing the same message twice targets the identical `c`, differing only in ffSampling's own randomized draw - real FALCON signatures additionally randomize `c` itself via a fresh salt each time.
-10. Only after all of the above, design an explicit backend adapter for `BlindSigSigner` and a new keystore format/version if required.
+10. **Actual blocker to "replace FALCON" in the live blind-signature protocol**: the zkVM guest circuit (NIZK1/NIZK2, `blindsig-prover/methods/`) still hardcodes NTT arithmetic for `q=12289` - everything in this file gives a plain (non-blind) signature scheme at `q=7933`, not yet a blind one. Porting the guest circuits to a non-NTT strategy compatible with `q=7933` is unstarted and is a larger, separate piece of work than anything above.
+11. Only after all of the above, design an explicit backend adapter for `BlindSigSigner` and a new keystore format/version if required.
 
 Do not silently reinterpret the current q=12289 keystore as q=7933 key material: the existing at-rest format is explicitly a `FalconTrapdoor` and should remain so until a deliberate migration/versioning design exists.

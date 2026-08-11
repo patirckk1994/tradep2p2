@@ -251,3 +251,27 @@ target_link_libraries(tradep2p_blns7933_sign_512_diagnostic PRIVATE
 target_compile_options(tradep2p_blns7933_sign_512_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
+
+# Statistical/distributional validation of sign()'s output against the
+# target discrete Gaussian - a distinct question from the algebraic
+# correctness already covered by the sign tests/diagnostics above.
+# Manual-only, same reasoning as the other diagnostics in this file.
+add_executable(tradep2p_blns7933_distribution_diagnostic
+    BLIND/q7933-reference/distribution_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_distribution_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_distribution_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_distribution_512_diagnostic
+    BLIND/q7933-reference/distribution_512_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_distribution_512_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_distribution_512_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)

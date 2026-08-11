@@ -199,6 +199,26 @@ target_compile_options(tradep2p_blns7933_sign_512_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_distribution_diagnostic
+    distribution_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_distribution_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_distribution_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_distribution_512_diagnostic
+    distribution_512_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_distribution_512_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_distribution_512_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 enable_testing()
 add_test(NAME tradep2p_blns7933_reference_tests COMMAND tradep2p_blns7933_reference_tests)
 add_test(NAME tradep2p_blns7933_ntrusolve_tests COMMAND tradep2p_blns7933_ntrusolve_tests)
