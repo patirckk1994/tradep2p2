@@ -174,6 +174,17 @@ void test_message_type_bounds() {
     // encode/decode coverage.
     tradep2p::validate_message_type(tradep2p::MessageType::GetCandles);
     tradep2p::validate_message_type(tradep2p::MessageType::CandleData);
+    // The experimental blind-signature primitive (specs.txt SS9.3a) reserves
+    // BlindSigInfoRequest(41)..BlindSigResponse(44) as the new contiguous
+    // top of the range - reserved unconditionally (validate_message_type()'s
+    // bound is not itself gated by TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL) so
+    // the enum's numbering never depends on build flags, even though the
+    // message structs/codec for these four live entirely in the gated
+    // blindsig_wire.hpp/cpp - see that file.
+    tradep2p::validate_message_type(tradep2p::MessageType::BlindSigInfoRequest);
+    tradep2p::validate_message_type(tradep2p::MessageType::BlindSigInfoResponse);
+    tradep2p::validate_message_type(tradep2p::MessageType::BlindSigRequestChunk);
+    tradep2p::validate_message_type(tradep2p::MessageType::BlindSigResponse);
 
     // Anything past the new upper bound must still be rejected - this is
     // the mechanism that lets an OLDER build (or, symmetrically, a build
@@ -183,7 +194,7 @@ void test_message_type_bounds() {
     // never wrapped or reinterpreted.
     bool threw = false;
     try {
-        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(41));
+        tradep2p::validate_message_type(static_cast<tradep2p::MessageType>(45));
     } catch (const std::invalid_argument&) {
         threw = true;
     }
