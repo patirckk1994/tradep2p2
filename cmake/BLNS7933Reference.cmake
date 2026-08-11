@@ -71,3 +71,16 @@ target_compile_options(tradep2p_blns7933_reduce_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_reduce_tests
     COMMAND tradep2p_blns7933_reduce_tests)
+
+# Manual diagnostics target: deliberately not a CTest test.  It performs
+# controlled exact-arithmetic scaling at d=16/32/64 only and must be invoked
+# explicitly so normal test runs never become accidental benchmarks.
+add_executable(tradep2p_blns7933_scaling_diagnostics
+    BLIND/q7933-reference/scaling_diagnostics.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_diagnostics PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_diagnostics PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
