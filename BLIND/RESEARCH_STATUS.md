@@ -2,11 +2,11 @@
 
 **This is the research log, now living inside the `tradep2p2` repo itself**
 (originally written in a separate, isolated research directory — moved here,
-with paths updated, once the user explicitly authorized wiring the primitive
-into this repo as an experimental, off-by-default feature; see `specs.txt`
-§9.3a and the `PQR-BLINDSIG` branch for the in-progress integration, and
-`README.md` in this folder for the current status of that integration
-specifically — this file is the *research* history, not a live status page).
+with paths updated, now that the primitive is being wired into this repo as
+an experimental, off-by-default feature; see `specs.txt` §9.3a and the
+`PQR-BLINDSIG` branch for the in-progress integration, and `README.md` in
+this folder for the current status of that integration specifically — this
+file is the *research* history, not a live status page).
 
 **Target paper:** Beullens, Lyubashevsky, Nguyen, Seiler, *Lattice-Based Blind
 Signatures: Short, Efficient, and Round-Optimal*, CCS 2023 / [eprint

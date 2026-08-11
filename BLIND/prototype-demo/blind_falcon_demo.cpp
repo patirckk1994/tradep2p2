@@ -337,7 +337,7 @@ int main() {
     inner_shake256_context user_rng;
     seed_from_openssl(user_rng);
 
-    const std::string mu = "this session's test message, phase 1 blinding";
+    const std::string mu = "blind-falcon algebraic-core demo message";
     std::vector<std::int32_t> r = sample_short_r(user_rng);
     std::vector<std::uint8_t> rho;
     std::vector<std::uint16_t> hash_term = hash_to_ring(r, mu, &rho);
