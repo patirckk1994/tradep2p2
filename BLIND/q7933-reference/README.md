@@ -78,11 +78,9 @@ This corpus is still a development diagnostic, not the final BLNS23 key distribu
 
 ## Explicit d=128 gate
 
-The next-size gate is a separate executable so `d=128` cannot be reached accidentally by the routine `d=16/32/64` diagnostic. It deliberately omits the expensive direct coordinate baseline and measures only:
+The `d=128` gate deliberately omits the expensive direct coordinate baseline and measures only:
 
 `NTRUSolve -> global Babai reduction -> exact coordinate cleanup`.
-
-Build and run it explicitly:
 
 ```sh
 cmake --build --preset blns7933-root \
@@ -92,11 +90,11 @@ cmake --build --preset blns7933-root \
 ./build-blns7933-root/tradep2p_blns7933_scaling_128_diagnostic
 ```
 
-The first recorded `d=128` run completed successfully: the deterministic anchor solved in about 9 ms, the global reduction in about 122 ms, one global round was accepted, and exact cleanup converged with the final coefficients at 12 bits and final squared-norm length at 25 bits. The same exact NTRU relation and monotonic-norm postconditions are enforced at every stage.
+The first recorded `d=128` run completed successfully: the deterministic anchor solved in about 9 ms, the global reduction in about 122 ms, one global round was accepted, and exact cleanup converged with the final coefficients at 12 bits and final squared-norm length at 25 bits.
 
 ## Explicit d=256 gate
 
-`d=256` is now a separate manual gate with the same deterministic sparse anchor and the same staged postconditions. It remains outside CTest and deliberately skips the raw coordinate baseline.
+`d=256` uses the same deterministic sparse anchor and staged exact postconditions, remains outside CTest, and skips the raw coordinate baseline.
 
 ```sh
 cmake --build --preset blns7933-root \
@@ -106,15 +104,31 @@ cmake --build --preset blns7933-root \
 ./build-blns7933-root/tradep2p_blns7933_scaling_256_diagnostic
 ```
 
-This is a machinery and precision checkpoint only. A successful `d=256` anchor does not by itself validate TrapGen sampling, trapdoor quality, or the BLNS23 Gaussian preimage sampler.
+The first recorded `d=256` run completed successfully: the solver took about 34 ms, the 256-digit global reducer about 781 ms, and exact cleanup about 77 ms. The lifted solution grew to 268-bit coefficients / a 544-bit squared-norm representation; one accepted global round reduced it to 12-bit coefficients and a 25-bit squared norm, after which four coordinate-cleanup steps converged. Exact `fG-gF=7933` and non-increasing norm checks held throughout.
+
+This is still a machinery and precision checkpoint only. A successful `d=256` anchor does not by itself validate TrapGen sampling, trapdoor quality, or the BLNS23 Gaussian preimage sampler.
+
+## Explicit d=512 gate
+
+`d=512` is the first diagnostic at the actual BLNS23 ring dimension. It intentionally changes nothing else: the same sparse deterministic anchor, the same eight-round global-reducer cap, the same exact relation and norm postconditions, and the same exact coordinate cleanup backstop are used.
+
+```sh
+cmake --build --preset blns7933-root \
+  --target tradep2p_blns7933_scaling_512_diagnostic \
+  --parallel 2
+
+./build-blns7933-root/tradep2p_blns7933_scaling_512_diagnostic
+```
+
+This target is deliberately manual-only and is **not** TrapGen. Its purpose is to answer one narrow question before random candidate generation is introduced: can the current transparent `cpp_int` NTRUSolve plus 256-digit global reduction machinery survive the actual `d=512, q=7933` algebra while retaining exact postconditions?
 
 ## Next implementation order
 
 1. Keep the exact ring, NTRUSolve, oracle, coordinate-reducer, and global-reducer tests green.
 2. Keep the deterministic small-coefficient corpus as a reproducible regression diagnostic, without interpreting its tiny accept/reject counts statistically.
-3. Run the explicit `d=256` gate and inspect solver growth, global-reduction rounds, exact cleanup work, and runtime.
-4. Only after a clean `d=256` checkpoint, add a single deterministic `d=512, q=7933` diagnostic before implementing a random TrapGen rejection loop.
-5. Add candidate `f,g` generation and trapdoor-quality analysis tied to the BLNS23/Falcon-style Gaussian sampling requirements; exact equation correctness alone is not sufficient.
+3. Run the explicit `d=512, q=7933` deterministic gate and inspect solver growth, global-reduction rounds, cleanup work, and runtime.
+4. Only after a clean `d=512` checkpoint, implement a separate candidate-generation/TrapGen diagnostic loop with explicit rejection reasons and trapdoor-quality measurements.
+5. Tie candidate quality acceptance to the BLNS23/Falcon-style Gaussian sampling requirements; exact equation correctness alone is not sufficient.
 6. Add toy `ffLDL` / preimage sampling behind a separate interface.
 7. Validate distributional properties and the `sigma=232` proof obligations at the actual parameters.
 8. Only after that, design an explicit backend adapter for `BlindSigSigner` and a new keystore format/version if required.
