@@ -31,7 +31,12 @@ BigInt round_to_bigint(const HighReal& value) {
     using boost::multiprecision::floor;
 
     const HighReal half("0.5");
-    const HighReal rounded = value >= 0 ? floor(value + half) : ceil(value - half);
+    HighReal rounded;
+    if (value >= 0) {
+        rounded = floor(value + half);
+    } else {
+        rounded = ceil(value - half);
+    }
     return BigInt(rounded.str(0, std::ios_base::fixed));
 }
 
@@ -177,7 +182,7 @@ NTRUSolution NTRUGlobalBabaiReducer::reduce(
                      max_coefficient_bit_length(out.G));
     }
 
-    // Build the full negacyclic shift basis once.  The exact Gram matrix is
+    // Build the full negacyclic shift basis once. The exact Gram matrix is
     // constant across all reduction rounds; only the projection RHS changes.
     std::vector<ZPoly> shifted_f;
     std::vector<ZPoly> shifted_g;
