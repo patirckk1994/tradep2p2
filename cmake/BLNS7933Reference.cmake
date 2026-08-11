@@ -104,9 +104,10 @@ target_compile_options(tradep2p_blns7933_scaling_diagnostics PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
-# Explicit next-size gate. This deliberately skips the direct 64-pass
-# coordinate baseline and measures NTRUSolve -> global Babai -> exact cleanup
-# for one deterministic d=128 candidate only.
+# Explicit next-size gates. These deliberately skip the direct 64-pass
+# coordinate baseline and measure NTRUSolve -> global Babai -> exact cleanup
+# for one deterministic candidate only. They are manual-only so normal CTest
+# runs stay cheap and cannot accidentally become scaling benchmarks.
 add_executable(tradep2p_blns7933_scaling_128_diagnostic
     BLIND/q7933-reference/scaling_128_diagnostic.cpp
 )
@@ -114,6 +115,16 @@ target_link_libraries(tradep2p_blns7933_scaling_128_diagnostic PRIVATE
     tradep2p_blns7933_reference
 )
 target_compile_options(tradep2p_blns7933_scaling_128_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_scaling_256_diagnostic
+    BLIND/q7933-reference/scaling_256_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_scaling_256_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_scaling_256_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
