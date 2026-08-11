@@ -27,12 +27,17 @@ TESTING_WEB="${TESTING_WEB:-/var/www/html/testing}"
 PRODUCTION_WEB="${PRODUCTION_WEB:-/var/www/html/new}"
 GIT_REMOTE="${GIT_REMOTE:-test}"
 PRODUCTION_BRANCH="${PRODUCTION_BRANCH:-main}"
-WEBCLIENT_HOME_URL="${WEBCLIENT_HOME_URL:-http://dq2wrri3nvcmfvmczw36c6npv7rxravi4cnusv5n4c4zihsy4h52ziad.onion/}"
+# No default for either of these two - they identify/authenticate a real
+# deployment and must never be hardcoded into a public repo (this file used
+# to do exactly that; both values were rotated/removed after the fact - see
+# git history if you're wondering why this comment exists). Set them in
+# your own shell environment before running this script.
+WEBCLIENT_HOME_URL="${WEBCLIENT_HOME_URL:?set WEBCLIENT_HOME_URL to your webclient's public URL before running this script}"
 # The webclient's own admin token (GET /api/admin/accounts) - a DIFFERENT
 # secret from mediator.conf's ADMIN_TOKEN (that one gates the mediator's
 # fee-control channel). Must match config.php's webclient_admin_token on
-# both websites (confirmed identical there as of this restore).
-WEBCLIENT_ADMIN_TOKEN="${WEBCLIENT_ADMIN_TOKEN:-b816c456463beff1b31e1ff3912025fe4a641c8b1d0b54170292ae1310f1d2fd}"
+# both websites.
+WEBCLIENT_ADMIN_TOKEN="${WEBCLIENT_ADMIN_TOKEN:?set WEBCLIENT_ADMIN_TOKEN to match config.php's webclient_admin_token before running this script}"
 
 # Files synced verbatim from the testing website to production - everything
 # EXCEPT config.php (intentionally different per environment) and

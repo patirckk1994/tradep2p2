@@ -91,10 +91,9 @@ Options:
                         against a later restart's key, a real, named
                         limitation of running without this set, not a
                         silent one. Only meaningful with --auth-port.
-  --registry HOST:PORT registry endpoint to register with (defaults to this
-                        project's own registry - see REGISTRY_ENDPOINT in
-                        --init-config output; pass an empty string to run
-                        standalone/unregistered instead)
+  --registry HOST:PORT registry endpoint to register with (defaults to
+                        standalone/unregistered - no registry is baked in;
+                        set this yourself, or leave unset to stay standalone)
   --registry-pin HEX   registry certificate SHA-256 pin (required with --registry)
   --registry-proxy HOST:PORT
                         reach --registry through this SOCKS5 proxy (e.g. a
@@ -138,13 +137,13 @@ ADMIN_PORT="7444"
 FEE_PLUGIN_PATH=""
 AUTH_PORT=""
 AUTH_KEY_FILE=""
-# Defaults to this project's own registry - registration there starts
-# Pending (invisible to every other client) until its operator approves it,
-# so pointing here by default carries no discoverability risk. Reachable
-# only via Tor (see REGISTRY_PROXY below) - pass --registry '' to run fully
-# standalone/unregistered instead.
-REGISTRY_ENDPOINT="zjfip5qncqerbtue422tclht3u6otzgtc6ewo5nokrihfi3e6lhajxid.onion:7555"
-REGISTRY_PIN="8395534ddc1239bc7fa3c03d94e634827baed71acfa1c6a497dd1c9bf4fd43a0"
+# No hardcoded default here on purpose - this used to point at a specific
+# real registry's .onion address and pin, which doesn't belong committed to
+# a public repo (rotated/removed after the fact - see git history). Defaults
+# to fully standalone/unregistered; pass --registry HOST:PORT and
+# --registry-pin HEX yourself to register with a real registry.
+REGISTRY_ENDPOINT=""
+REGISTRY_PIN=""
 # Default assumes a local Tor daemon's standard SOCKS port - matches
 # REGISTRY_ENDPOINT above being an .onion address. Pass --registry-proxy ''
 # if pointing REGISTRY_ENDPOINT at a directly-reachable (non-onion) registry
