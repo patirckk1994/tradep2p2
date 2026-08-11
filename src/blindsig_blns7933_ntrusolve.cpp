@@ -116,20 +116,23 @@ std::optional<NTRUSolution> NTRUEquationSolver::solve_recursive(
 
     if (degree == 1U) {
         const BezoutResult bezout = extended_gcd(ff[0], gg[0]);
-        if (bezout.gcd == 0) {
-            return std::nullopt;
-        }
-        if ((q_ % bezout.gcd) != 0) {
+
+        // Falcon-style NTRUSolve deliberately requires the two deepest
+        // resultants to be coprime.  A direct solution of fG-gF=q can exist
+        // even when their gcd divides q, but TrapGen is allowed to reject
+        // such an (f,g) candidate and resample.  Keeping that rejection
+        // behavior here makes this reference solver match the algorithmic
+        // contract we intend to validate against Falcon-style TrapGen.
+        if (bezout.gcd != 1) {
             return std::nullopt;
         }
 
-        const BigInt scale = q_ / bezout.gcd;
-        // bezout.u*f + bezout.v*g = gcd.  Therefore
-        //   G = u*(q/gcd), F = -v*(q/gcd)
+        // bezout.u*f + bezout.v*g = 1. Therefore
+        //   G = u*q, F = -v*q
         // gives fG - gF = q.
         NTRUSolution solution;
-        solution.F = ZPoly{-(bezout.v * scale)};
-        solution.G = ZPoly{bezout.u * scale};
+        solution.F = ZPoly{-(bezout.v * q_)};
+        solution.G = ZPoly{bezout.u * q_};
 
         if (!verify_ntru_relation_exact(ff, gg, solution.F, solution.G, q_, degree)) {
             throw std::logic_error("NTRUSolve base-case invariant failed");
