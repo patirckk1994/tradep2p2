@@ -18,6 +18,8 @@
 // relevant threshold (see kTailSigmas below). Slower than FALCON's table
 // trick; exactly as correct.
 
+#include "tradep2p/blindsig_blns7933_highreal.hpp"
+
 #include <cstdint>
 #include <random>
 #include <vector>
@@ -36,5 +38,20 @@ namespace tradep2p::blns7933 {
 // NTRUGen actually needs for one of f or g.
 [[nodiscard]] std::vector<std::int64_t> sample_discrete_gaussian_poly(
     std::size_t degree, long double sigma, std::mt19937_64& rng);
+
+// The general form falcon.pdf's SamplerZ(mu, sigma') (Algorithm 15)
+// specifies: samples from D_{Z,mu,sigma}, an ARBITRARY real center mu, not
+// just 0 - what ffSampling needs (its targets t0,t1 are generally
+// non-integer reals produced by the LDL-tree recursion), unlike
+// NTRUGen's mu=0 case above. A separate function, not a generalization of
+// sample_discrete_gaussian() in place, specifically so the
+// already-verified TrapGen call site above is untouched by this addition.
+// Still returns an integer z (falcon.pdf Algorithm 15's own return type is
+// z in Z, even though mu is real) - only sigma/mu are HighReal, since
+// callers here already hold both at full 256-digit precision from prior
+// real-ring computation and converting down to long double first would
+// throw away exactly the precision this module exists to preserve.
+[[nodiscard]] std::int64_t sample_discrete_gaussian_centered(
+    const HighReal& sigma, const HighReal& mu, std::mt19937_64& rng);
 
 } // namespace tradep2p::blns7933

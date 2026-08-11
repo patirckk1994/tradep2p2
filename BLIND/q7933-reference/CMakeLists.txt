@@ -15,6 +15,10 @@ add_library(tradep2p_blns7933_reference STATIC
     ../../src/blindsig_blns7933_babai_reduce.cpp
     ../../src/blindsig_blns7933_gaussian.cpp
     ../../src/blindsig_blns7933_quality.cpp
+    ../../src/blindsig_blns7933_real_ring.cpp
+    ../../src/blindsig_blns7933_ldl.cpp
+    ../../src/blindsig_blns7933_sampling.cpp
+    ../../src/blindsig_blns7933_sign.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ../../include
@@ -84,6 +88,36 @@ target_compile_options(tradep2p_blns7933_quality_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_real_ring_tests
+    ../../tests/blindsig_blns7933_real_ring_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_real_ring_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_real_ring_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_ldl_tests
+    ../../tests/blindsig_blns7933_ldl_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_ldl_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_ldl_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_sign_tests
+    ../../tests/blindsig_blns7933_sign_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 # Manual diagnostics: deliberately NOT registered with CTest.
 add_executable(tradep2p_blns7933_scaling_diagnostics
     scaling_diagnostics.cpp
@@ -145,6 +179,26 @@ target_compile_options(tradep2p_blns7933_trapgen_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_sign_diagnostic
+    sign_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_sign_512_diagnostic
+    sign_512_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_512_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_512_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 enable_testing()
 add_test(NAME tradep2p_blns7933_reference_tests COMMAND tradep2p_blns7933_reference_tests)
 add_test(NAME tradep2p_blns7933_ntrusolve_tests COMMAND tradep2p_blns7933_ntrusolve_tests)
@@ -152,3 +206,6 @@ add_test(NAME tradep2p_blns7933_reduce_tests COMMAND tradep2p_blns7933_reduce_te
 add_test(NAME tradep2p_blns7933_babai_reduce_tests COMMAND tradep2p_blns7933_babai_reduce_tests)
 add_test(NAME tradep2p_blns7933_gaussian_tests COMMAND tradep2p_blns7933_gaussian_tests)
 add_test(NAME tradep2p_blns7933_quality_tests COMMAND tradep2p_blns7933_quality_tests)
+add_test(NAME tradep2p_blns7933_real_ring_tests COMMAND tradep2p_blns7933_real_ring_tests)
+add_test(NAME tradep2p_blns7933_ldl_tests COMMAND tradep2p_blns7933_ldl_tests)
+add_test(NAME tradep2p_blns7933_sign_tests COMMAND tradep2p_blns7933_sign_tests)

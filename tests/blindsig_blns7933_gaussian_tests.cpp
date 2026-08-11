@@ -9,7 +9,9 @@
 
 namespace {
 
+using tradep2p::blns7933::HighReal;
 using tradep2p::blns7933::sample_discrete_gaussian;
+using tradep2p::blns7933::sample_discrete_gaussian_centered;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -97,6 +99,45 @@ void test_rejects_nonpositive_sigma() {
     require(threw, "sigma <= 0 must be rejected, not silently treated as a point mass");
 }
 
+// falcon.pdf's SamplerZ (Algorithm 15) samples from D_{Z,mu,sigma} for
+// arbitrary real mu, not just mu=0 - needed by ffSampling, unlike
+// NTRUGen's mu=0 case tested above. Confirms the shift actually lands
+// where it should, at a non-integer, non-zero center.
+void test_centered_sampler_mean_and_variance() {
+    const HighReal sigma("2.5");
+    const HighReal mu("3.7");
+    std::mt19937_64 rng(0xC0FFEEu);
+
+    constexpr std::size_t trials = 10000;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    for (std::size_t i = 0; i < trials; ++i) {
+        const std::int64_t z = sample_discrete_gaussian_centered(sigma, mu, rng);
+        sum += static_cast<double>(z);
+        sum_sq += static_cast<double>(z) * static_cast<double>(z);
+    }
+    const double mean = sum / static_cast<double>(trials);
+    const double variance = sum_sq / static_cast<double>(trials) - mean * mean;
+
+    // Standard error of the mean ~ 2.5/100 = 0.025; 0.15 is a wide,
+    // deliberately generous bound against flaking (~6 SE).
+    require(std::abs(mean - 3.7) < 0.15, "empirical mean should land near mu=3.7, not 0");
+    const double expected_variance = 2.5 * 2.5;
+    require(std::abs(variance - expected_variance) / expected_variance < 0.05,
+            "empirical variance should still match sigma^2 when centered away from 0");
+}
+
+void test_centered_sampler_rejects_nonpositive_sigma() {
+    std::mt19937_64 rng(11);
+    bool threw = false;
+    try {
+        (void)sample_discrete_gaussian_centered(HighReal(0), HighReal(1), rng);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "centered sampler: sigma <= 0 must be rejected");
+}
+
 } // namespace
 
 int main() {
@@ -104,6 +145,8 @@ int main() {
         test_mean_near_zero_at_falcon512_sigma();
         test_variance_scales_with_sigma();
         test_deterministic_given_same_rng_state();
+        test_centered_sampler_mean_and_variance();
+        test_centered_sampler_rejects_nonpositive_sigma();
         test_rejects_nonpositive_sigma();
         std::cout << "blindsig_blns7933_gaussian_tests: OK\n";
         return 0;

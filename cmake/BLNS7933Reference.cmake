@@ -36,6 +36,10 @@ add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933_babai_reduce.cpp
     src/blindsig_blns7933_gaussian.cpp
     src/blindsig_blns7933_quality.cpp
+    src/blindsig_blns7933_real_ring.cpp
+    src/blindsig_blns7933_ldl.cpp
+    src/blindsig_blns7933_sampling.cpp
+    src/blindsig_blns7933_sign.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -117,6 +121,42 @@ target_compile_options(tradep2p_blns7933_quality_tests PRIVATE
 add_test(NAME tradep2p_blns7933_quality_tests
     COMMAND tradep2p_blns7933_quality_tests)
 
+add_executable(tradep2p_blns7933_real_ring_tests
+    tests/blindsig_blns7933_real_ring_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_real_ring_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_real_ring_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_real_ring_tests
+    COMMAND tradep2p_blns7933_real_ring_tests)
+
+add_executable(tradep2p_blns7933_ldl_tests
+    tests/blindsig_blns7933_ldl_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_ldl_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_ldl_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_ldl_tests
+    COMMAND tradep2p_blns7933_ldl_tests)
+
+add_executable(tradep2p_blns7933_sign_tests
+    tests/blindsig_blns7933_sign_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_sign_tests
+    COMMAND tradep2p_blns7933_sign_tests)
+
 # Manual diagnostics target: deliberately not a CTest test. It compares the
 # exact coordinate baseline against the high-precision global reduction at
 # d=16/32/64 only and must be invoked explicitly.
@@ -189,5 +229,25 @@ target_link_libraries(tradep2p_blns7933_trapgen_diagnostic PRIVATE
     tradep2p_blns7933_reference
 )
 target_compile_options(tradep2p_blns7933_trapgen_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_sign_diagnostic
+    BLIND/q7933-reference/sign_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_diagnostic PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_sign_512_diagnostic
+    BLIND/q7933-reference/sign_512_diagnostic.cpp
+)
+target_link_libraries(tradep2p_blns7933_sign_512_diagnostic PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_sign_512_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )

@@ -1,6 +1,5 @@
 #include "tradep2p/blindsig_blns7933_gaussian.hpp"
 
-#include <boost/multiprecision/cpp_dec_float.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 
 #include <cmath>
@@ -8,9 +7,6 @@
 
 namespace tradep2p::blns7933 {
 namespace {
-
-using HighReal = boost::multiprecision::number<
-    boost::multiprecision::cpp_dec_float<256>>;
 
 // Tail cutoff: P(|Z| > kTailSigmas) <= exp(-kTailSigmas^2 / 2) ~ 1e-347 for
 // kTailSigmas = 40 - vastly below any threshold that matters here (the
@@ -69,6 +65,36 @@ std::vector<std::int64_t> sample_discrete_gaussian_poly(
         out.push_back(sample_discrete_gaussian(sigma, rng));
     }
     return out;
+}
+
+std::int64_t sample_discrete_gaussian_centered(
+    const HighReal& sigma, const HighReal& mu, std::mt19937_64& rng) {
+    if (!(sigma > 0)) {
+        throw std::invalid_argument("discrete Gaussian sigma must be positive");
+    }
+
+    // floor(mu) as an integer center for the candidate range - mu itself
+    // may be fractional (that's the whole point of the "centered" variant),
+    // but the CANDIDATE integers only need to bracket it widely enough for
+    // the same kTailSigmas margin used by the mu=0 case above.
+    const HighReal mu_floor_real = boost::multiprecision::floor(mu);
+    const auto mu_floor = static_cast<std::int64_t>(mu_floor_real.convert_to<long long>());
+
+    const auto tail = static_cast<std::int64_t>(
+        std::ceil(static_cast<double>(kTailSigmas) * static_cast<double>(sigma.convert_to<long double>())));
+    std::uniform_int_distribution<std::int64_t> candidate_dist(mu_floor - tail, mu_floor + tail + 1);
+
+    const HighReal two_sigma_sq = HighReal(2) * sigma * sigma;
+
+    while (true) {
+        const std::int64_t z = candidate_dist(rng);
+        const HighReal diff = HighReal(z) - mu;
+        const HighReal accept_probability = boost::multiprecision::exp(-(diff * diff) / two_sigma_sq);
+        const HighReal u = uniform_high_real(rng);
+        if (u < accept_probability) {
+            return z;
+        }
+    }
 }
 
 } // namespace tradep2p::blns7933
