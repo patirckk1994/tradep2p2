@@ -26,6 +26,7 @@ add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933.cpp
     src/blindsig_blns7933_integer_ring.cpp
     src/blindsig_blns7933_ntrusolve.cpp
+    src/blindsig_blns7933_reduce.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -58,3 +59,15 @@ target_compile_options(tradep2p_blns7933_ntrusolve_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_ntrusolve_tests
     COMMAND tradep2p_blns7933_ntrusolve_tests)
+
+add_executable(tradep2p_blns7933_reduce_tests
+    tests/blindsig_blns7933_reduce_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_reduce_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_reduce_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_reduce_tests
+    COMMAND tradep2p_blns7933_reduce_tests)
