@@ -46,6 +46,8 @@ ctest --preset blns7933-root --output-on-failure
 
 The q=7933 reference targets are still separate from the main `tradep2p` library; the preset merely compiles and tests them alongside the full experimental blind-signature tree.
 
+The current whole-repo checkpoint is 18/18 tests passing with the q=7933 reference, NTRUSolve, exact reducer, and global Babai reducer tests included.
+
 ## Controlled scaling diagnostics: d=16/32/64
 
 The first manual diagnostics executable compares the exact coordinate baseline, the 256-digit global reduction, and exact coordinate cleanup at `d=16`, `32`, and `64` with `q=7933`:
@@ -54,7 +56,25 @@ The first manual diagnostics executable compares the exact coordinate baseline, 
 ./build-blns7933-root/tradep2p_blns7933_scaling_diagnostics
 ```
 
-It is deliberately **not** registered with CTest. The deterministic sparse anchor has validated the global reducer through `d=64`: the global step reduces the lifted solution in a handful of rounds while the coordinate reducer remains only a slow correctness/cleanup oracle. The executable hard-checks `fG-gF=q` after the solver and after every reduction stage, checks exact squared-norm monotonicity, and prints recursion-level coefficient growth, global rounds, coordinate cleanup work, and wall-clock timings.
+It is deliberately **not** registered with CTest. The deterministic sparse anchor has validated the global reducer through `d=64`: the global step reduces the lifted solution in one accepted round on the current anchor while the coordinate reducer remains only a slow correctness/cleanup oracle. The executable hard-checks `fG-gF=q` after the solver and after every reduction stage, checks exact squared-norm monotonicity, and prints recursion-level coefficient growth, global rounds, coordinate cleanup work, and wall-clock timings.
+
+## Deterministic small-coefficient corpus
+
+A second manual executable exercises a reproducible corpus at `d=16`, `32`, and `64`. Each degree includes the known sparse anchor plus five fixed-seed sparse small-coefficient candidates.
+
+```sh
+cmake --build --preset blns7933-root \
+  --target tradep2p_blns7933_corpus_diagnostics \
+  --parallel 2
+
+./build-blns7933-root/tradep2p_blns7933_corpus_diagnostics
+```
+
+Candidate rejection is expected behavior and is reported as `REJECT`, not as a test failure. For every accepted candidate, the diagnostic requires exact `fG-gF=q` preservation through the global reducer and cleanup, exact non-increasing squared norms, and reports solver/reducer timing, coefficient/norm bit lengths, global rounds, cleanup steps, and convergence status.
+
+The first recorded corpus run accepted 1/6 candidates at `d=16`, 5/6 at `d=32`, and 5/6 at `d=64`. These counts are **not** an acceptance-rate estimate: the corpus is tiny and deterministic. More importantly for the current checkpoint, all accepted non-anchor `d=64` candidates were reduced from raw coefficient sizes above 200 bits to roughly 9-10 bits in one accepted global round, followed by small exact cleanup, while preserving the exact NTRU relation.
+
+This corpus is still a development diagnostic, not the final BLNS23 key distribution. It exists to move beyond the single `f=1+x, g=1+2x` anchor before opening larger dimension gates.
 
 ## Explicit d=128 gate
 
@@ -72,30 +92,28 @@ cmake --build --preset blns7933-root \
 ./build-blns7933-root/tradep2p_blns7933_scaling_128_diagnostic
 ```
 
-The same exact NTRU relation and monotonic-norm postconditions are enforced at `d=128`.
+The first recorded `d=128` run completed successfully: the deterministic anchor solved in about 9 ms, the global reduction in about 122 ms, one global round was accepted, and exact cleanup converged with the final coefficients at 12 bits and final squared-norm length at 25 bits. The same exact NTRU relation and monotonic-norm postconditions are enforced at every stage.
 
-## Deterministic small-coefficient corpus
+## Explicit d=256 gate
 
-A second manual executable exercises a reproducible corpus at `d=16`, `32`, and `64`. Each degree includes the known sparse anchor plus five fixed-seed sparse small-coefficient candidates.
+`d=256` is now a separate manual gate with the same deterministic sparse anchor and the same staged postconditions. It remains outside CTest and deliberately skips the raw coordinate baseline.
 
 ```sh
 cmake --build --preset blns7933-root \
-  --target tradep2p_blns7933_corpus_diagnostics \
+  --target tradep2p_blns7933_scaling_256_diagnostic \
   --parallel 2
 
-./build-blns7933-root/tradep2p_blns7933_corpus_diagnostics
+./build-blns7933-root/tradep2p_blns7933_scaling_256_diagnostic
 ```
 
-Candidate rejection is expected behavior and is reported as `REJECT`, not as a test failure. For every accepted candidate, the diagnostic requires exact `fG-gF=q` preservation through the global reducer and cleanup, exact non-increasing squared norms, and reports solver/reducer timing, coefficient/norm bit lengths, global rounds, cleanup steps, and convergence status.
-
-This corpus is still a development diagnostic, not the final BLNS23 key distribution. It exists to move beyond the single `f=1+x, g=1+2x` anchor before opening larger dimension gates.
+This is a machinery and precision checkpoint only. A successful `d=256` anchor does not by itself validate TrapGen sampling, trapdoor quality, or the BLNS23 Gaussian preimage sampler.
 
 ## Next implementation order
 
 1. Keep the exact ring, NTRUSolve, oracle, coordinate-reducer, and global-reducer tests green.
-2. Run the deterministic small-coefficient corpus through `d=64` and inspect acceptance/rejection plus reducer behavior.
-3. Run the explicit `d=128` gate. If its solver growth, global rounds, exact cleanup work, and runtime remain sane, add a separate `d=256` gate.
-4. Run a single deterministic `d=512, q=7933` diagnostic before implementing a random TrapGen rejection loop.
+2. Keep the deterministic small-coefficient corpus as a reproducible regression diagnostic, without interpreting its tiny accept/reject counts statistically.
+3. Run the explicit `d=256` gate and inspect solver growth, global-reduction rounds, exact cleanup work, and runtime.
+4. Only after a clean `d=256` checkpoint, add a single deterministic `d=512, q=7933` diagnostic before implementing a random TrapGen rejection loop.
 5. Add candidate `f,g` generation and trapdoor-quality analysis tied to the BLNS23/Falcon-style Gaussian sampling requirements; exact equation correctness alone is not sufficient.
 6. Add toy `ffLDL` / preimage sampling behind a separate interface.
 7. Validate distributional properties and the `sigma=232` proof obligations at the actual parameters.
