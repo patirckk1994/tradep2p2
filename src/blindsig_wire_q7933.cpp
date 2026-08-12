@@ -9,9 +9,6 @@
 namespace tradep2p::blindsig {
 namespace {
 
-// Local copy of blindsig_wire.cpp's own Writer/Reader pattern (see that
-// file's own comment on why this is duplicated rather than shared).
-
 class Writer {
 public:
     void u8(std::uint8_t value) { out_.push_back(value); }
@@ -79,8 +76,9 @@ public:
 
     [[nodiscard]] std::uint16_t u16() {
         require(2U);
-        const auto result = static_cast<std::uint16_t>((static_cast<std::uint16_t>(input_[position_]) << 8U) |
-                                                        static_cast<std::uint16_t>(input_[position_ + 1U]));
+        const auto result = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(input_[position_]) << 8U) |
+            static_cast<std::uint16_t>(input_[position_ + 1U]));
         position_ += 2U;
         return result;
     }
@@ -127,8 +125,9 @@ public:
             throw std::runtime_error("encoded byte field exceeds protocol limit");
         }
         require(length);
-        std::vector<std::uint8_t> result(input_.begin() + static_cast<std::ptrdiff_t>(position_),
-                                          input_.begin() + static_cast<std::ptrdiff_t>(position_ + length));
+        std::vector<std::uint8_t> result(
+            input_.begin() + static_cast<std::ptrdiff_t>(position_),
+            input_.begin() + static_cast<std::ptrdiff_t>(position_ + length));
         position_ += length;
         return result;
     }
@@ -163,7 +162,8 @@ private:
 
 } // namespace
 
-std::vector<std::uint8_t> encode_q7933_blindsig_info_response(const Q7933BlindSigInfoResponse& message) {
+std::vector<std::uint8_t> encode_q7933_blindsig_info_response(
+    const Q7933BlindSigInfoResponse& message) {
     Writer writer;
     writer.u8(message.enabled ? 1U : 0U);
     writer.u16_array(message.t);
@@ -171,7 +171,8 @@ std::vector<std::uint8_t> encode_q7933_blindsig_info_response(const Q7933BlindSi
     return writer.take();
 }
 
-Q7933BlindSigInfoResponse decode_q7933_blindsig_info_response(std::span<const std::uint8_t> bytes) {
+Q7933BlindSigInfoResponse decode_q7933_blindsig_info_response(
+    std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
     Q7933BlindSigInfoResponse message;
     message.enabled = reader.u8() != 0U;
@@ -181,7 +182,8 @@ Q7933BlindSigInfoResponse decode_q7933_blindsig_info_response(std::span<const st
     return message;
 }
 
-std::vector<std::uint8_t> encode_q7933_blindsig_response(const Q7933BlindSigResponse& message) {
+std::vector<std::uint8_t> encode_q7933_blindsig_response(
+    const Q7933BlindSigResponse& message) {
     Writer writer;
     writer.u8(static_cast<std::uint8_t>(message.status));
     writer.i16_array(message.s0);
@@ -207,9 +209,11 @@ Q7933BlindSigResponse decode_q7933_blindsig_response(std::span<const std::uint8_
     return message;
 }
 
-std::vector<std::uint8_t> encode_q7933_blindsig_assembled_request(const Q7933BlindSigAssembledRequest& request) {
+std::vector<std::uint8_t> encode_q7933_blindsig_assembled_request(
+    const Q7933BlindSigAssembledRequest& request) {
     if (request.pi1_receipt.size() > kMaxBlindSigRequestBytes) {
-        throw std::invalid_argument("q7933 blind-sig assembled request's receipt exceeds protocol limit");
+        throw std::invalid_argument(
+            "q7933 blind-sig assembled request's receipt exceeds protocol limit");
     }
     Writer writer;
     writer.u16_array(request.c);
@@ -220,11 +224,15 @@ std::vector<std::uint8_t> encode_q7933_blindsig_assembled_request(const Q7933Bli
     writer.u16_array(request.ct2_r);
     writer.u16_array(request.ct1_mu);
     writer.u16_array(request.ct2_mu);
+    writer.u8(request.credential_issuance ? 1U : 0U);
+    writer.fixed_bytes(request.issuance_room_id);
+    writer.u32(request.credential_epoch);
     writer.bytes(request.pi1_receipt);
     return writer.take();
 }
 
-Q7933BlindSigAssembledRequest decode_q7933_blindsig_assembled_request(std::span<const std::uint8_t> bytes) {
+Q7933BlindSigAssembledRequest decode_q7933_blindsig_assembled_request(
+    std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
     Q7933BlindSigAssembledRequest request;
     request.c = reader.u16_array<kQ7933RingDegree>();
@@ -235,18 +243,35 @@ Q7933BlindSigAssembledRequest decode_q7933_blindsig_assembled_request(std::span<
     request.ct2_r = reader.u16_array<kQ7933RingDegree>();
     request.ct1_mu = reader.u16_array<kQ7933RingDegree>();
     request.ct2_mu = reader.u16_array<kQ7933RingDegree>();
+    const auto credential_flag = reader.u8();
+    if (credential_flag > 1U) {
+        throw std::runtime_error("invalid q7933 credential issuance flag");
+    }
+    request.credential_issuance = credential_flag == 1U;
+    request.issuance_room_id = reader.fixed_bytes<32U>();
+    request.credential_epoch = reader.u32();
     request.pi1_receipt = reader.bytes(kMaxBlindSigRequestBytes);
     reader.require_finished();
+
+    if (!request.credential_issuance) {
+        const std::array<std::uint8_t, 32> zero_room{};
+        if (request.issuance_room_id != zero_room || request.credential_epoch != 0U) {
+            throw std::runtime_error(
+                "raw q7933 blind-signature request carries credential-only metadata");
+        }
+    }
     return request;
 }
 
-std::vector<std::uint8_t> encode_q7933_blindsig_ticket_poll(const Q7933BlindSigTicketPoll& message) {
+std::vector<std::uint8_t> encode_q7933_blindsig_ticket_poll(
+    const Q7933BlindSigTicketPoll& message) {
     Writer writer;
     writer.fixed_bytes(message.ticket_id);
     return writer.take();
 }
 
-Q7933BlindSigTicketPoll decode_q7933_blindsig_ticket_poll(std::span<const std::uint8_t> bytes) {
+Q7933BlindSigTicketPoll decode_q7933_blindsig_ticket_poll(
+    std::span<const std::uint8_t> bytes) {
     Reader reader(bytes);
     Q7933BlindSigTicketPoll message;
     message.ticket_id = reader.fixed_bytes<32U>();
