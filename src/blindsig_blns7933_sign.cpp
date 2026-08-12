@@ -68,15 +68,15 @@ PolyQ hash_to_point(const RingArithmetic& ring, const std::string& message) {
     return out;
 }
 
-Signature sign(
+Signature sign_target(
     const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
-    const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
+    const PolyQ& target, const BigInt& norm_bound_squared, CryptoRng& rng,
     std::size_t max_attempts) {
     const std::size_t degree = ring.degree();
     const RealRingArithmetic real_ring(degree);
     const HighReal q_real(ring.modulus());
 
-    const PolyQ c = hash_to_point(ring, message);
+    const PolyQ& c = target;
     const RealPoly c_real = to_real_poly(c);
     const RealPoly g_real = to_real_poly(key.g);
     const RealPoly f_real = to_real_poly(key.f);
@@ -129,8 +129,16 @@ Signature sign(
         "BLNS7933 sign(): exceeded max_attempts without producing a signature within the norm bound");
 }
 
-bool verify(
-    const RingArithmetic& ring, const PublicKey& public_key, const std::string& message,
+Signature sign(
+    const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
+    const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
+    std::size_t max_attempts) {
+    return sign_target(ring, key, tree, hash_to_point(ring, message), norm_bound_squared, rng,
+                        max_attempts);
+}
+
+bool verify_target(
+    const RingArithmetic& ring, const PublicKey& public_key, const PolyQ& target,
     const Signature& signature, const BigInt& norm_bound_squared) {
     BigInt norm_squared = 0;
     for (const auto v : signature.s0) {
@@ -143,10 +151,15 @@ bool verify(
         return false;
     }
 
-    // A.s = c (mod q), A=(t_pub,1): t_pub*s0 + s1 == c (mod q).
-    const PolyQ c = hash_to_point(ring, message);
+    // A.s = target (mod q), A=(t_pub,1): t_pub*s0 + s1 == target (mod q).
     const PolyQ lhs = ring.add(ring.mul(public_key.t, signature.s0), signature.s1);
-    return ring.equal(lhs, c);
+    return ring.equal(lhs, target);
+}
+
+bool verify(
+    const RingArithmetic& ring, const PublicKey& public_key, const std::string& message,
+    const Signature& signature, const BigInt& norm_bound_squared) {
+    return verify_target(ring, public_key, hash_to_point(ring, message), signature, norm_bound_squared);
 }
 
 } // namespace tradep2p::blns7933

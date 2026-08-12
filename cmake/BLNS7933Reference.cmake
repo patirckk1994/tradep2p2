@@ -273,6 +273,16 @@ target_compile_options(tradep2p_blns7933_sign_512_diagnostic PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
+add_executable(tradep2p_blns7933_rust_crosscheck_dump_512
+    BLIND/q7933-reference/rust_crosscheck_dump_512.cpp
+)
+target_link_libraries(tradep2p_blns7933_rust_crosscheck_dump_512 PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_rust_crosscheck_dump_512 PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
 # Statistical/distributional validation of sign()'s output against the
 # target discrete Gaussian - a distinct question from the algebraic
 # correctness already covered by the sign tests/diagnostics above.

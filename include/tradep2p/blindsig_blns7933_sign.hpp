@@ -76,18 +76,48 @@ struct Signature {
 // 10's own rejection loop (lines 4-8), same reasoning: ffSampling's
 // output is Gaussian-distributed but not UNCONDITIONALLY short, so a
 // norm check with resampling is required, not optional.
+//
+// Signs an ARBITRARY target polynomial `target`, not a message this
+// function hashes itself. This is what a real blind signer actually
+// needs: in the blind-signature protocol, the signer only ever receives
+// an opaque blinded target `c` from the client (see specs.txt SS9.3a /
+// the NIZK1 blinding relation) and must never learn, let alone hash, the
+// underlying message - a signer that internally re-derived its own
+// hash_to_point(message) would defeat blindness entirely. sign(message,
+// ...) below is the plain (non-blind) convenience wrapper used by this
+// reference substrate's own tests/diagnostics so far; sign_target() is
+// the one a real signer, or a genuine end-to-end blind-signature test,
+// needs to call.
+[[nodiscard]] Signature sign_target(
+    const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
+    const PolyQ& target, const BigInt& norm_bound_squared, CryptoRng& rng,
+    std::size_t max_attempts = 100U);
+
+// Plain (non-blind) convenience wrapper: signs hash_to_point(message)
+// via sign_target(). What every test/diagnostic in this reference
+// substrate has used so far, and still fine for exercising the
+// algebraic sign/verify relation in isolation - just not what a real
+// blind signer would ever call.
 [[nodiscard]] Signature sign(
     const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
     const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
     std::size_t max_attempts = 100U);
 
-// Checks A.s = c (mod q) (this project's own verification equation,
+// Checks A.s = target (mod q) (this project's own verification equation,
 // A=(f*g^-1,1)) AND ||s||^2 <= norm_bound_squared, exactly mirroring
 // falcon.pdf's own two-part Verify (norm bound + algebraic relation) -
 // this project's blindsig_blns7933.hpp already has
 // NTRUTrapdoorGenerator::verify_ntru_relation() for the trapdoor's OWN
 // relation; this is the analogous check for a SIGNATURE against a
-// PUBLIC key, taking no trapdoor material at all.
+// PUBLIC key, taking no trapdoor material at all. See sign_target()'s
+// own comment for why an arbitrary target (not a message this function
+// hashes itself) is the one a real verifier over a blinded target needs.
+[[nodiscard]] bool verify_target(
+    const RingArithmetic& ring, const PublicKey& public_key, const PolyQ& target,
+    const Signature& signature, const BigInt& norm_bound_squared);
+
+// Plain (non-blind) convenience wrapper: verifies against
+// hash_to_point(message) via verify_target().
 [[nodiscard]] bool verify(
     const RingArithmetic& ring, const PublicKey& public_key, const std::string& message,
     const Signature& signature, const BigInt& norm_bound_squared);
