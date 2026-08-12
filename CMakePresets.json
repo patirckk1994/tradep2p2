@@ -4,11 +4,11 @@
     {
       "name": "blns7933-root",
       "displayName": "BLNS7933 whole-repo integration",
-      "description": "Build the full experimental blind-signature tree plus the isolated q=7933 reference solver/tests without wiring it into the live signer.",
+      "description": "Build the full experimental blind-signature tree plus the isolated q=7933 reference substrate and its host-side integration adapters without replacing the existing q=12289 signer.",
       "binaryDir": "${sourceDir}/build-blns7933-root",
       "cacheVariables": {
         "TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL": "ON",
-        "CMAKE_PROJECT_INCLUDE": "${sourceDir}/cmake/BLNS7933Reference.cmake"
+        "CMAKE_PROJECT_INCLUDE": "${sourceDir}/cmake/BLNS7933Integration.cmake"
       }
     }
   ],
