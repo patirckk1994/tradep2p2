@@ -17,6 +17,16 @@ has also been upgraded from its old `std::hash`/LCG placeholder to the
 SHAKE256 rejection-sampling construction. Blind signing continues to use
 `sign_target()` and does not hash a message inside the signer.
 
+The q=7933 host CLI is now present and builds on the reference machine.
+Its deterministic fast harness passed, and a real CLI NIZK2 run produced
+a roughly 2 MiB receipt which `verify-signature` accepted with
+`{"ok":true,"verified":true}`. The first instrumented NIZK2 harness run
+also caught a host-integration bug: with `RUST_LOG=info`, tracing output
+could contaminate stdout before the JSON response. The CLI now explicitly
+routes tracing to stderr and explicitly flushes its single JSON stdout
+response before exit. This is exactly the subprocess contract the future
+C++ mediator relies on.
+
 These are implementation/execution checkpoints, not a claim that the
 remaining distributional/security-reduction validation work is complete.
 
@@ -27,6 +37,7 @@ remaining distributional/security-reduction validation work is complete.
 - `methods/examples/`: execution/proving/cross-language diagnostics.
 - `prover/`: JSON-over-stdio host CLI for C++ mediator/client integration.
 - `scripts/test_cli_deterministic.sh`: deterministic CLI regression harness.
+- `scripts/analyze_cli_artifacts.py`: post-run inspection of retained CLI artifacts.
 
 ## CLI contract
 
@@ -101,3 +112,23 @@ identical inputs and requires byte-equivalent parsed JSON, then checks the
 CLI's failure contract. The proof modes additionally persist `pi1.receipt`
 or `pi2.receipt` and require the corresponding verify subcommand to return
 `{"ok":true,"verified":true}`.
+
+For an interrupted or partially-failed harness run, inspect everything it
+left behind without rerunning an expensive proof:
+
+```sh
+python3 scripts/analyze_cli_artifacts.py cli-test-artifacts-nizk2
+```
+
+## Integration boundary
+
+The Rust-side Phase 0 integration prerequisite is now complete enough to
+hand to the C++ side: the stable subprocess entry point exists, q=7933
+schemas are explicit, deterministic/error-contract testing exists, and
+both underlying RISC0 guests have completed real STARK proof checkpoints.
+
+The next repository phase is therefore the mediator-side q=7933 adapter:
+a thin C++ wrapper over the existing trapdoor/signing substrate, a new
+versioned encrypted keystore for `{f,g,F,G,t,B}`, and a long-lived signing
+tree built once at mediator startup rather than once per signature. The
+existing q=12289/FALCON keystore and signer path remain untouched.
