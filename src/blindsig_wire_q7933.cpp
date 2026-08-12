@@ -160,6 +160,11 @@ private:
     std::size_t position_{0U};
 };
 
+template <std::size_t N>
+bool all_zero(const std::array<std::uint8_t, N>& value) {
+    return std::all_of(value.begin(), value.end(), [](std::uint8_t byte) { return byte == 0U; });
+}
+
 } // namespace
 
 std::vector<std::uint8_t> encode_q7933_blindsig_info_response(
@@ -215,6 +220,26 @@ std::vector<std::uint8_t> encode_q7933_blindsig_assembled_request(
         throw std::invalid_argument(
             "q7933 blind-sig assembled request's receipt exceeds protocol limit");
     }
+    if (request.credential_issuance) {
+        if (request.issuance_completion_receipt.empty()) {
+            throw std::invalid_argument(
+                "q7933 credential request is missing its completion receipt");
+        }
+        if (request.issuance_completion_receipt.size() > kMaxFramePayload) {
+            throw std::invalid_argument(
+                "q7933 credential completion receipt exceeds protocol limit");
+        }
+    } else {
+        const std::array<std::uint8_t, 32> zero_room{};
+        if (request.issuance_room_id != zero_room || request.credential_epoch != 0U ||
+            !request.issuance_completion_receipt.empty() ||
+            !all_zero(request.issuance_authorization_signature) ||
+            !all_zero(request.issuance_authorization_signature_mldsa65)) {
+            throw std::invalid_argument(
+                "raw q7933 blind-signature request carries credential-only metadata");
+        }
+    }
+
     Writer writer;
     writer.u16_array(request.c);
     writer.u16_array(request.b);
@@ -227,6 +252,11 @@ std::vector<std::uint8_t> encode_q7933_blindsig_assembled_request(
     writer.u8(request.credential_issuance ? 1U : 0U);
     writer.fixed_bytes(request.issuance_room_id);
     writer.u32(request.credential_epoch);
+    if (request.credential_issuance) {
+        writer.bytes(request.issuance_completion_receipt);
+        writer.fixed_bytes(request.issuance_authorization_signature);
+        writer.fixed_bytes(request.issuance_authorization_signature_mldsa65);
+    }
     writer.bytes(request.pi1_receipt);
     return writer.take();
 }
@@ -250,6 +280,16 @@ Q7933BlindSigAssembledRequest decode_q7933_blindsig_assembled_request(
     request.credential_issuance = credential_flag == 1U;
     request.issuance_room_id = reader.fixed_bytes<32U>();
     request.credential_epoch = reader.u32();
+    if (request.credential_issuance) {
+        request.issuance_completion_receipt = reader.bytes(kMaxFramePayload);
+        if (request.issuance_completion_receipt.empty()) {
+            throw std::runtime_error("q7933 credential request has empty completion receipt");
+        }
+        request.issuance_authorization_signature =
+            reader.fixed_bytes<kReceiptSignatureLength>();
+        request.issuance_authorization_signature_mldsa65 =
+            reader.fixed_bytes<kReceiptSignatureLengthMlDsa65>();
+    }
     request.pi1_receipt = reader.bytes(kMaxBlindSigRequestBytes);
     reader.require_finished();
 
