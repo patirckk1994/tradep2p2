@@ -30,8 +30,7 @@ fn print_json_and_exit(v: &Value) -> ! {
     // is too important to leave to buffering behaviour. In particular,
     // long-running RISC0 proving commands are commonly invoked with stdout
     // redirected to a file by the C++ sidecar/harness. Explicitly write and
-    // flush the one JSON line before exiting so a successful proof can never
-    // leave an empty response file merely because stdout was still buffered.
+    // flush the one JSON line before exiting.
     let write_result = {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -102,7 +101,14 @@ fn run(subcommand: &str, args: &[String]) -> Value {
 }
 
 fn main() {
+    // Critical sidecar invariant: stdout belongs exclusively to the one JSON
+    // response. RISC0 emits useful tracing events during proving when RUST_LOG
+    // is enabled, so force the tracing subscriber to stderr explicitly rather
+    // than relying on its default writer. Without this, an INFO line can be
+    // prepended to an otherwise-valid JSON response and break the C++/test
+    // parser even though proving and receipt verification succeeded.
     let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .try_init();
 
