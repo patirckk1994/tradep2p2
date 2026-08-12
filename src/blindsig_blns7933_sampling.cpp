@@ -15,7 +15,7 @@ namespace {
 // directly per falcon.pdf's own (T,n)-indexed recursion.
 SamplingResult sample_child(
     const SamplingTarget& target, const FalconTreeChild& child, std::size_t child_degree,
-    std::mt19937_64& rng) {
+    CryptoRng& rng) {
     if (std::holds_alternative<HighReal>(child)) {
         if (child_degree != 1U) {
             throw std::logic_error(
@@ -42,7 +42,7 @@ SamplingResult sample_child(
 
 SamplingResult ff_sampling(
     const SamplingTarget& target, const FalconTreeNode& node, std::size_t degree,
-    std::mt19937_64& rng) {
+    CryptoRng& rng) {
     if (degree < 2U) {
         throw std::logic_error("ff_sampling: degree must be >= 2 at an internal node");
     }

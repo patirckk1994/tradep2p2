@@ -3,12 +3,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <random>
 #include <stdexcept>
 #include <vector>
 
 namespace {
 
+using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::HighReal;
 using tradep2p::blns7933::sample_discrete_gaussian;
 using tradep2p::blns7933::sample_discrete_gaussian_centered;
@@ -31,7 +31,7 @@ struct SampleStats {
     double variance{};
 };
 
-SampleStats collect_stats(long double sigma, std::size_t trials, std::mt19937_64& rng) {
+SampleStats collect_stats(long double sigma, std::size_t trials, CryptoRng& rng) {
     double sum = 0.0;
     double sum_sq = 0.0;
     for (std::size_t i = 0; i < trials; ++i) {
@@ -49,7 +49,7 @@ void test_mean_near_zero_at_falcon512_sigma() {
     const long double sigma = 1.17L * std::sqrt(7933.0L / (2.0L * 512.0L));
     require(sigma > 3.0L && sigma < 3.5L, "sanity check on the sigma_{f,g} constant itself");
 
-    std::mt19937_64 rng(0xC0FFEEu);
+    CryptoRng rng(0xC0FFEEu);
     const auto stats = collect_stats(sigma, 10000, rng);
 
     // Standard error of the mean at this sample size is sigma/sqrt(n) ~
@@ -70,7 +70,7 @@ void test_mean_near_zero_at_falcon512_sigma() {
 void test_variance_scales_with_sigma() {
     // Catches a sampler that silently ignores its sigma argument (e.g. a
     // hardcoded constant left over from development/testing).
-    std::mt19937_64 rng(1);
+    CryptoRng rng(1);
     const auto narrow = collect_stats(2.0L, 10000, rng);
     const auto wide = collect_stats(8.0L, 10000, rng);
     require(wide.variance > narrow.variance * 8.0, "variance must grow with sigma, not stay fixed");
@@ -79,8 +79,8 @@ void test_variance_scales_with_sigma() {
 void test_deterministic_given_same_rng_state() {
     // Same seed, same sequence of draws - a basic reproducibility check
     // useful for debugging, not a security property.
-    std::mt19937_64 rng_a(42);
-    std::mt19937_64 rng_b(42);
+    CryptoRng rng_a(42);
+    CryptoRng rng_b(42);
     for (int i = 0; i < 500; ++i) {
         const auto a = sample_discrete_gaussian(3.26L, rng_a);
         const auto b = sample_discrete_gaussian(3.26L, rng_b);
@@ -89,7 +89,7 @@ void test_deterministic_given_same_rng_state() {
 }
 
 void test_rejects_nonpositive_sigma() {
-    std::mt19937_64 rng(7);
+    CryptoRng rng(7);
     bool threw = false;
     try {
         (void)sample_discrete_gaussian(0.0L, rng);
@@ -106,7 +106,7 @@ void test_rejects_nonpositive_sigma() {
 void test_centered_sampler_mean_and_variance() {
     const HighReal sigma("2.5");
     const HighReal mu("3.7");
-    std::mt19937_64 rng(0xC0FFEEu);
+    CryptoRng rng(0xC0FFEEu);
 
     constexpr std::size_t trials = 10000;
     double sum = 0.0;
@@ -128,7 +128,7 @@ void test_centered_sampler_mean_and_variance() {
 }
 
 void test_centered_sampler_rejects_nonpositive_sigma() {
-    std::mt19937_64 rng(11);
+    CryptoRng rng(11);
     bool threw = false;
     try {
         (void)sample_discrete_gaussian_centered(HighReal(0), HighReal(1), rng);

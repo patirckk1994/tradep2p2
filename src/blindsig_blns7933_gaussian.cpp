@@ -3,6 +3,7 @@
 #include <boost/multiprecision/cpp_int.hpp>
 
 #include <cmath>
+#include <random>
 #include <stdexcept>
 
 namespace tradep2p::blns7933 {
@@ -17,12 +18,12 @@ namespace {
 // concern.
 constexpr long double kTailSigmas = 40.0L;
 
-// A uniform draw in [0,1) built from 256 bits of std::mt19937_64 output,
+// A uniform draw in [0,1) built from 256 bits of CryptoRng output,
 // converted to 256-digit-precision HighReal. Deliberately not a plain
 // double: the accept/reject comparison below is only as trustworthy as its
 // least-precise input, and a double's ~53 bits would silently reintroduce
 // the exact class of quantization bias this module exists to avoid.
-HighReal uniform_high_real(std::mt19937_64& rng) {
+HighReal uniform_high_real(CryptoRng& rng) {
     boost::multiprecision::cpp_int bits = 0;
     for (int word = 0; word < 4; ++word) {
         bits <<= 64;
@@ -35,7 +36,7 @@ HighReal uniform_high_real(std::mt19937_64& rng) {
 
 } // namespace
 
-std::int64_t sample_discrete_gaussian(long double sigma, std::mt19937_64& rng) {
+std::int64_t sample_discrete_gaussian(long double sigma, CryptoRng& rng) {
     if (!(sigma > 0.0L) || !std::isfinite(static_cast<double>(sigma))) {
         throw std::invalid_argument("discrete Gaussian sigma must be positive and finite");
     }
@@ -58,7 +59,7 @@ std::int64_t sample_discrete_gaussian(long double sigma, std::mt19937_64& rng) {
 }
 
 std::vector<std::int64_t> sample_discrete_gaussian_poly(
-    std::size_t degree, long double sigma, std::mt19937_64& rng) {
+    std::size_t degree, long double sigma, CryptoRng& rng) {
     std::vector<std::int64_t> out;
     out.reserve(degree);
     for (std::size_t i = 0; i < degree; ++i) {
@@ -68,7 +69,7 @@ std::vector<std::int64_t> sample_discrete_gaussian_poly(
 }
 
 std::int64_t sample_discrete_gaussian_centered(
-    const HighReal& sigma, const HighReal& mu, std::mt19937_64& rng) {
+    const HighReal& sigma, const HighReal& mu, CryptoRng& rng) {
     if (!(sigma > 0)) {
         throw std::invalid_argument("discrete Gaussian sigma must be positive");
     }

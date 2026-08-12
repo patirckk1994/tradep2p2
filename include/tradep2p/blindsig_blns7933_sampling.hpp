@@ -11,9 +11,8 @@
 // Entirely in real coefficient domain, per this reference substrate's
 // standing choice - see blindsig_blns7933_real_ring.hpp.
 
+#include "tradep2p/blindsig_blns7933_csprng.hpp"
 #include "tradep2p/blindsig_blns7933_ldl.hpp"
-
-#include <random>
 
 namespace tradep2p::blns7933 {
 
@@ -36,6 +35,6 @@ struct SamplingResult {
 // need to construct a FalconTreeChild themselves).
 [[nodiscard]] SamplingResult ff_sampling(
     const SamplingTarget& target, const FalconTreeNode& node, std::size_t degree,
-    std::mt19937_64& rng);
+    CryptoRng& rng);
 
 } // namespace tradep2p::blns7933

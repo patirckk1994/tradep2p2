@@ -27,10 +27,10 @@
 // requires.
 
 #include "tradep2p/blindsig_blns7933.hpp"
+#include "tradep2p/blindsig_blns7933_csprng.hpp"
 #include "tradep2p/blindsig_blns7933_integer_ring.hpp"
 #include "tradep2p/blindsig_blns7933_ldl.hpp"
 
-#include <random>
 #include <string>
 
 namespace tradep2p::blns7933 {
@@ -78,7 +78,7 @@ struct Signature {
 // norm check with resampling is required, not optional.
 [[nodiscard]] Signature sign(
     const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
-    const std::string& message, const BigInt& norm_bound_squared, std::mt19937_64& rng,
+    const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
     std::size_t max_attempts = 100U);
 
 // Checks A.s = c (mod q) (this project's own verification equation,

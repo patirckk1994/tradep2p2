@@ -70,7 +70,7 @@ PolyQ hash_to_point(const RingArithmetic& ring, const std::string& message) {
 
 Signature sign(
     const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
-    const std::string& message, const BigInt& norm_bound_squared, std::mt19937_64& rng,
+    const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
     std::size_t max_attempts) {
     const std::size_t degree = ring.degree();
     const RealRingArithmetic real_ring(degree);

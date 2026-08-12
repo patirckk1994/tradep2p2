@@ -197,7 +197,7 @@ bool RingArithmetic::equal(const PolyQ& a, const PolyQ& b) const {
 NTRUTrapdoorGenerator::NTRUTrapdoorGenerator(RingArithmetic ring)
     : ring_(std::move(ring)) {}
 
-TrapdoorKey NTRUTrapdoorGenerator::generate(std::mt19937_64& rng) const {
+TrapdoorKey NTRUTrapdoorGenerator::generate(CryptoRng& rng) const {
     const std::size_t degree = ring_.degree();
     const BigInt q{ring_.modulus()};
     // sigma_{f,g} = 1.17*sqrt(q/2n), falcon.pdf eq. (3.27) - chosen so

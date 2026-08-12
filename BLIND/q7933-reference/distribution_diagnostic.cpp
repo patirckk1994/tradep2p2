@@ -34,7 +34,6 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -89,7 +88,7 @@ int main() {
 
         const RingArithmetic ring(kDegree, kQ);
         NTRUTrapdoorGenerator generator(ring);
-        std::mt19937_64 rng(2027);
+        CryptoRng rng(2027);
 
         const auto trapgen_start = std::chrono::steady_clock::now();
         const TrapdoorKey key = generator.generate(rng);

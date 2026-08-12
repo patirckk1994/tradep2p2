@@ -18,10 +18,10 @@
 // relevant threshold (see kTailSigmas below). Slower than FALCON's table
 // trick; exactly as correct.
 
+#include "tradep2p/blindsig_blns7933_csprng.hpp"
 #include "tradep2p/blindsig_blns7933_highreal.hpp"
 
 #include <cstdint>
-#include <random>
 #include <vector>
 
 namespace tradep2p::blns7933 {
@@ -32,12 +32,12 @@ namespace tradep2p::blns7933 {
 // compared at 256-digit precision against a high-precision uniform draw (not
 // a plain double) so the accept/reject decision carries no double-precision
 // quantization bias. sigma must be positive and finite.
-[[nodiscard]] std::int64_t sample_discrete_gaussian(long double sigma, std::mt19937_64& rng);
+[[nodiscard]] std::int64_t sample_discrete_gaussian(long double sigma, CryptoRng& rng);
 
 // Samples `degree` independent coefficients from D_{Z,sigma,0} - what
 // NTRUGen actually needs for one of f or g.
 [[nodiscard]] std::vector<std::int64_t> sample_discrete_gaussian_poly(
-    std::size_t degree, long double sigma, std::mt19937_64& rng);
+    std::size_t degree, long double sigma, CryptoRng& rng);
 
 // The general form falcon.pdf's SamplerZ(mu, sigma') (Algorithm 15)
 // specifies: samples from D_{Z,mu,sigma}, an ARBITRARY real center mu, not
@@ -52,6 +52,6 @@ namespace tradep2p::blns7933 {
 // real-ring computation and converting down to long double first would
 // throw away exactly the precision this module exists to preserve.
 [[nodiscard]] std::int64_t sample_discrete_gaussian_centered(
-    const HighReal& sigma, const HighReal& mu, std::mt19937_64& rng);
+    const HighReal& sigma, const HighReal& mu, CryptoRng& rng);
 
 } // namespace tradep2p::blns7933

@@ -8,6 +8,7 @@
 namespace {
 
 using tradep2p::blns7933::BigInt;
+using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::HighReal;
 using tradep2p::blns7933::PublicKey;
 using tradep2p::blns7933::RingArithmetic;
@@ -52,7 +53,7 @@ void test_sign_verify_round_trip_toy() {
 
     const PublicKey public_key = tradep2p::blns7933::NTRUTrapdoorGenerator(ring).derive_public(key);
 
-    std::mt19937_64 rng(123);
+    CryptoRng rng(123);
     const Signature signature =
         sign(ring, key, *tree, "hello blns7933", BigInt(kToyNormBoundSquared), rng);
 
@@ -66,7 +67,7 @@ void test_verify_rejects_wrong_message() {
     const auto tree = build_signing_tree(ring, key, kToySigma);
     const PublicKey public_key = tradep2p::blns7933::NTRUTrapdoorGenerator(ring).derive_public(key);
 
-    std::mt19937_64 rng(456);
+    CryptoRng rng(456);
     const Signature signature = sign(ring, key, *tree, "message A", BigInt(kToyNormBoundSquared), rng);
 
     require(!verify(ring, public_key, "message B", signature, BigInt(kToyNormBoundSquared)),
@@ -79,7 +80,7 @@ void test_verify_rejects_corrupted_signature() {
     const auto tree = build_signing_tree(ring, key, kToySigma);
     const PublicKey public_key = tradep2p::blns7933::NTRUTrapdoorGenerator(ring).derive_public(key);
 
-    std::mt19937_64 rng(789);
+    CryptoRng rng(789);
     Signature signature = sign(ring, key, *tree, "tamper test", BigInt(kToyNormBoundSquared), rng);
     require(verify(ring, public_key, "tamper test", signature, BigInt(kToyNormBoundSquared)),
             "sanity: genuine signature must verify before corrupting it");

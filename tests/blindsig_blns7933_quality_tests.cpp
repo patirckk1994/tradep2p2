@@ -4,13 +4,13 @@
 
 #include <cmath>
 #include <iostream>
-#include <random>
 #include <stdexcept>
 
 namespace {
 
 using tradep2p::blns7933::BigInt;
 using tradep2p::blns7933::compute_trapdoor_quality;
+using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::hermitian_adjoint;
 using tradep2p::blns7933::sample_discrete_gaussian_poly;
 using tradep2p::blns7933::ZPoly;
@@ -96,7 +96,7 @@ void test_quality_at_real_falcon512_parameters_gives_plausible_gamma() {
     // e.g. NaN, negative, or off by many orders of magnitude - the kind of
     // gross error a real implementation bug would produce.
     const long double sigma = 1.17L * std::sqrt(7933.0L / (2.0L * 512.0L));
-    std::mt19937_64 rng(0xBEEFu);
+    CryptoRng rng(0xBEEFu);
     const auto f_raw = sample_discrete_gaussian_poly(512, sigma, rng);
     const auto g_raw = sample_discrete_gaussian_poly(512, sigma, rng);
     ZPoly f;

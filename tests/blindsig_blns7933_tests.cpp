@@ -1,11 +1,11 @@
 #include "tradep2p/blindsig_blns7933.hpp"
 
 #include <iostream>
-#include <random>
 #include <stdexcept>
 
 namespace {
 
+using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::NTRUTrapdoorGenerator;
 using tradep2p::blns7933::PolyQ;
 using tradep2p::blns7933::PublicKey;
@@ -78,7 +78,7 @@ void test_ntru_relation_oracle_toy() {
 void test_generate_produces_valid_trapdoor_toy() {
     RingArithmetic ring(4, 17);
     NTRUTrapdoorGenerator gen(ring);
-    std::mt19937_64 rng(1);
+    CryptoRng rng(1);
     const TrapdoorKey key = gen.generate(rng);
 
     require(gen.verify_ntru_relation(key),
@@ -97,8 +97,8 @@ void test_generate_is_repeatable_with_same_rng_seed() {
     // fixed seed, useful for reproducing a specific run while debugging.
     RingArithmetic ring(4, 17);
     NTRUTrapdoorGenerator gen(ring);
-    std::mt19937_64 rng_a(99);
-    std::mt19937_64 rng_b(99);
+    CryptoRng rng_a(99);
+    CryptoRng rng_b(99);
     const TrapdoorKey key_a = gen.generate(rng_a);
     const TrapdoorKey key_b = gen.generate(rng_b);
     require(key_a.f == key_b.f && key_a.g == key_b.g &&

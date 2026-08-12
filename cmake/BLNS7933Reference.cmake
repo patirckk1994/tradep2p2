@@ -28,6 +28,13 @@ if(NOT TRADEP2P_HAVE_BOOST_MULTIPRECISION_CPP_DEC_FLOAT)
         "BLNS7933 global reducer requires boost/multiprecision/cpp_dec_float.hpp")
 endif()
 
+# This file runs via CMAKE_PROJECT_INCLUDE, immediately after project() and
+# therefore BEFORE the root CMakeLists.txt reaches its own
+# find_package(OpenSSL...) call - so CryptoRng (blindsig_blns7933_csprng.cpp)
+# needs its own find_package here rather than assuming the root's has
+# already run. Safe/idempotent alongside the root's later call.
+find_package(OpenSSL REQUIRED)
+
 add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933.cpp
     src/blindsig_blns7933_integer_ring.cpp
@@ -40,10 +47,12 @@ add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933_ldl.cpp
     src/blindsig_blns7933_sampling.cpp
     src/blindsig_blns7933_sign.cpp
+    src/blindsig_blns7933_csprng.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_link_libraries(tradep2p_blns7933_reference PUBLIC OpenSSL::Crypto)
 target_compile_features(tradep2p_blns7933_reference PUBLIC cxx_std_20)
 target_compile_options(tradep2p_blns7933_reference PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
@@ -156,6 +165,18 @@ target_compile_options(tradep2p_blns7933_sign_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_sign_tests
     COMMAND tradep2p_blns7933_sign_tests)
+
+add_executable(tradep2p_blns7933_csprng_tests
+    tests/blindsig_blns7933_csprng_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_csprng_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_csprng_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_csprng_tests
+    COMMAND tradep2p_blns7933_csprng_tests)
 
 # Manual diagnostics target: deliberately not a CTest test. It compares the
 # exact coordinate baseline against the high-precision global reduction at

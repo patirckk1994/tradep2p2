@@ -23,12 +23,12 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <random>
 #include <stdexcept>
 
 namespace {
 
 using tradep2p::blns7933::BigInt;
+using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::NTRUTrapdoorGenerator;
 using tradep2p::blns7933::RingArithmetic;
 using tradep2p::blns7933::ZPoly;
@@ -64,7 +64,7 @@ int main() {
         std::cout << "BLNS7933 TrapGen diagnostic, d=" << kDegree << ", q=" << kQ << '\n';
         std::cout << "  sigma_{f,g} = " << static_cast<double>(sigma_fg) << '\n';
 
-        std::mt19937_64 rng(2026);
+        CryptoRng rng(2026);
         std::size_t invertibility_rejections = 0U;
         std::size_t quality_rejections = 0U;
         std::size_t solve_rejections = 0U;
@@ -112,7 +112,7 @@ int main() {
         // sequence of rejected-then-accepted candidates just shown above,
         // this time through the real API and properly timed.
         NTRUTrapdoorGenerator generator(ring);
-        std::mt19937_64 full_rng(2026);
+        CryptoRng full_rng(2026);
         const auto solve_start = std::chrono::steady_clock::now();
         const auto key = generator.generate(full_rng);
         const auto solve_end = std::chrono::steady_clock::now();

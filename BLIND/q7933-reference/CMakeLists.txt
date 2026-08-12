@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Boost REQUIRED)
 
+find_package(OpenSSL REQUIRED)
+
 add_library(tradep2p_blns7933_reference STATIC
     ../../src/blindsig_blns7933.cpp
     ../../src/blindsig_blns7933_integer_ring.cpp
@@ -19,11 +21,13 @@ add_library(tradep2p_blns7933_reference STATIC
     ../../src/blindsig_blns7933_ldl.cpp
     ../../src/blindsig_blns7933_sampling.cpp
     ../../src/blindsig_blns7933_sign.cpp
+    ../../src/blindsig_blns7933_csprng.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
     ../../include
     ${Boost_INCLUDE_DIRS}
 )
+target_link_libraries(tradep2p_blns7933_reference PUBLIC OpenSSL::Crypto)
 target_compile_options(tradep2p_blns7933_reference PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
@@ -115,6 +119,16 @@ target_link_libraries(tradep2p_blns7933_sign_tests PRIVATE
     tradep2p_blns7933_reference
 )
 target_compile_options(tradep2p_blns7933_sign_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+
+add_executable(tradep2p_blns7933_csprng_tests
+    ../../tests/blindsig_blns7933_csprng_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_csprng_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_csprng_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
 
@@ -229,3 +243,4 @@ add_test(NAME tradep2p_blns7933_quality_tests COMMAND tradep2p_blns7933_quality_
 add_test(NAME tradep2p_blns7933_real_ring_tests COMMAND tradep2p_blns7933_real_ring_tests)
 add_test(NAME tradep2p_blns7933_ldl_tests COMMAND tradep2p_blns7933_ldl_tests)
 add_test(NAME tradep2p_blns7933_sign_tests COMMAND tradep2p_blns7933_sign_tests)
+add_test(NAME tradep2p_blns7933_csprng_tests COMMAND tradep2p_blns7933_csprng_tests)

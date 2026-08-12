@@ -12,10 +12,11 @@
 // not speed.  No NTT assumptions are made: q=7933 is not a 512-dimensional
 // negacyclic-NTT-friendly modulus.
 
+#include "tradep2p/blindsig_blns7933_csprng.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -92,17 +93,18 @@ public:
     // NTRUGen restart-on-failure loop (falcon.pdf Algorithm 5), not an
     // adjust-and-retry strategy.
     //
-    // SECURITY CAVEAT, not yet resolved: `rng` is whatever the caller
-    // supplies, and every test/diagnostic in this codebase currently
-    // passes a plain std::mt19937_64 - NOT a cryptographically secure
-    // generator. That's acceptable for the statistical/correctness testing
-    // this module exists for so far, but f,g ARE the secret trapdoor: this
-    // must be backed by a real CSPRNG (e.g. this project's existing
-    // OpenSSL RAND_bytes usage) before generate() is used for anything
-    // beyond development/testing. Precision of the sampling distribution
-    // and unpredictability of the randomness feeding it are different
-    // properties - this type only addresses the former.
-    [[nodiscard]] TrapdoorKey generate(std::mt19937_64& rng) const;
+    // RNG: `rng` must be a CryptoRng (blindsig_blns7933_csprng.hpp), backed
+    // by OpenSSL's RAND_bytes for real use (its default constructor) or a
+    // fixed seed for reproducible tests/diagnostics only (its explicit
+    // std::uint64_t constructor - NOT secure on its own, see that
+    // constructor's own doc comment). f,g ARE the secret trapdoor, so this
+    // was a real, previously-open gap (this type used to take a plain
+    // std::mt19937_64&, which is not cryptographically secure), now closed.
+    // Precision of the sampling distribution and unpredictability of the
+    // randomness feeding it are different properties - CryptoRng addresses
+    // the latter; the Gaussian sampler's own 256-digit precision (see
+    // blindsig_blns7933_gaussian.hpp) addresses the former.
+    [[nodiscard]] TrapdoorKey generate(CryptoRng& rng) const;
 
     // BLNS23 public key orientation: t = f * g^{-1} mod q.
     [[nodiscard]] PublicKey derive_public(const TrapdoorKey& key) const;

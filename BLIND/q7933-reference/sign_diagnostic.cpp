@@ -12,7 +12,6 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
-#include <random>
 #include <stdexcept>
 
 namespace {
@@ -42,7 +41,7 @@ int main() {
 
         const RingArithmetic ring(kDegree, kQ);
         NTRUTrapdoorGenerator generator(ring);
-        std::mt19937_64 rng(4);
+        CryptoRng rng(4);
 
         const auto trapgen_start = std::chrono::steady_clock::now();
         const TrapdoorKey key = generator.generate(rng);
