@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -22,9 +23,9 @@ constexpr char kCredentialMuPrefix[] = "tradep2p-q7933-credential-v1:";
 
 std::string u16_array_to_hex(const std::array<std::uint16_t, kQ7933RingDegree>& v) {
     std::string out;
-    out.reserve(v.size() * 4);
+    out.reserve(v.size() * 4U);
     char buf[5];
-    for (auto x : v) {
+    for (const auto x : v) {
         std::snprintf(buf, sizeof buf, "%04x", x);
         out += buf;
     }
@@ -70,7 +71,10 @@ std::string make_temp_path(const char* label) {
     if (fd < 0) {
         throw std::runtime_error(std::string("failed to create temp file: ") + std::strerror(errno));
     }
-    ::close(fd);
+    if (::close(fd) != 0) {
+        ::unlink(path.c_str());
+        throw std::runtime_error(std::string("failed to close temp file: ") + std::strerror(errno));
+    }
     return path;
 }
 
@@ -115,23 +119,31 @@ void Q7933BlindSigClientSession::on_info_response(const Q7933BlindSigInfoRespons
 }
 
 void Q7933BlindSigClientSession::start_request(std::string message) {
-    start_request_internal(std::move(message), false, RoomId{}, 0U, std::nullopt);
+    start_request_internal(std::move(message), false, RoomId{}, 0U, std::nullopt, {});
 }
 
 void Q7933BlindSigClientSession::start_credential_request(
-    const RoomId& completed_room_id, std::uint32_t credential_epoch) {
+    const RoomId& completed_room_id,
+    std::uint32_t credential_epoch,
+    Q7933CredentialAuthorizationProvider authorization_provider) {
+    if (!authorization_provider) {
+        throw std::invalid_argument(
+            "q7933 credential request requires a completion authorization provider");
+    }
+
     q7933_credential::CredentialPayload payload;
     payload.version = q7933_credential::kCredentialVersion;
     // issuer_scope=0 means "the q7933 signer whose t/B were obtained for
-    // this live mediator session". The present v1 substrate only carries a
-    // one-byte scope; do not pretend it is a globally unique issuer id.
+    // this mediator session". The v1 substrate only carries a one-byte
+    // scope; do not pretend it is a globally unique issuer identifier.
     payload.issuer_scope = 0U;
     payload.epoch = credential_epoch;
     payload.serial = q7933_credential::generate_serial();
 
     const auto encoded = q7933_credential::encode_credential_for_blind(payload);
     const std::string mu = std::string(kCredentialMuPrefix) + bytes_to_hex(encoded);
-    start_request_internal(mu, true, completed_room_id, credential_epoch, payload);
+    start_request_internal(mu, true, completed_room_id, credential_epoch, payload,
+                           std::move(authorization_provider));
 }
 
 void Q7933BlindSigClientSession::start_request_internal(
@@ -139,10 +151,15 @@ void Q7933BlindSigClientSession::start_request_internal(
     bool credential_issuance,
     RoomId issuance_room_id,
     std::uint32_t credential_epoch,
-    std::optional<q7933_credential::CredentialPayload> credential_payload) {
+    std::optional<q7933_credential::CredentialPayload> credential_payload,
+    Q7933CredentialAuthorizationProvider authorization_provider) {
     if (stage_.load() != Q7933BlindSigClientStage::kIdle) {
         throw std::logic_error(
             "q7933 blindsig client session: start_request() called outside kIdle");
+    }
+    if (credential_issuance && !authorization_provider) {
+        throw std::invalid_argument(
+            "q7933 credential request is missing completion authorization");
     }
     if (worker_.joinable()) {
         worker_.join();
@@ -158,6 +175,7 @@ void Q7933BlindSigClientSession::start_request_internal(
     issuance_room_id_ = issuance_room_id;
     credential_epoch_ = credential_epoch;
     credential_payload_ = std::move(credential_payload);
+    credential_authorization_provider_ = std::move(authorization_provider);
 
     stage_.store(Q7933BlindSigClientStage::kBlindingAndProvingNizk1);
     worker_ = std::thread(&Q7933BlindSigClientSession::run_blind_and_prove_nizk1, this,
@@ -213,8 +231,29 @@ void Q7933BlindSigClientSession::run_blind_and_prove_nizk1(std::string message) 
         assembled.credential_issuance = credential_issuance_;
         assembled.issuance_room_id = issuance_room_id_;
         assembled.credential_epoch = credential_epoch_;
-        assembled.pi1_receipt = read_file_bytes(pi1_path);
 
+        if (credential_issuance_) {
+            if (!credential_authorization_provider_) {
+                throw std::logic_error(
+                    "q7933 credential authorization provider disappeared before use");
+            }
+            auto authorization = credential_authorization_provider_(assembled.c);
+            if (authorization.completion_receipt.empty()) {
+                throw std::runtime_error(
+                    "q7933 credential authorization provider returned no completion receipt");
+            }
+            assembled.issuance_completion_receipt =
+                std::move(authorization.completion_receipt);
+            assembled.issuance_authorization_signature = authorization.signature;
+            assembled.issuance_authorization_signature_mldsa65 =
+                authorization.signature_mldsa65;
+            // The callback may capture DashboardClient and room key state;
+            // drop it immediately after the single authorization so the
+            // long operator-approval wait does not retain extra ownership.
+            credential_authorization_provider_ = {};
+        }
+
+        assembled.pi1_receipt = read_file_bytes(pi1_path);
         send_chunked(encode_q7933_blindsig_assembled_request(assembled));
         stage_.store(Q7933BlindSigClientStage::kAwaitingInitialResponse);
     } catch (const std::exception& e) {
@@ -223,6 +262,9 @@ void Q7933BlindSigClientSession::run_blind_and_prove_nizk1(std::string message) 
 }
 
 void Q7933BlindSigClientSession::send_chunked(const std::vector<std::uint8_t>& assembled_bytes) {
+    if (assembled_bytes.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("q7933 assembled blind-signature request exceeds u32 wire length");
+    }
     const auto total_length = static_cast<std::uint32_t>(assembled_bytes.size());
     const std::uint32_t total_chunks = static_cast<std::uint32_t>(
         (assembled_bytes.size() + kChunkPayloadSize - 1U) / kChunkPayloadSize);
