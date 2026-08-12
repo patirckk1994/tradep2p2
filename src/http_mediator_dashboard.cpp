@@ -135,6 +135,10 @@ bool is_valid_room_id_hex(const std::string& value) {
     });
 }
 
+bool is_valid_ticket_id_hex(const std::string& value) {
+    return is_valid_room_id_hex(value);
+}
+
 std::uint16_t parse_port(const std::string& value) {
     std::size_t used = 0U;
     const auto parsed = std::stoul(value, &used, 10);
@@ -215,12 +219,20 @@ button:disabled{opacity:.5;cursor:default}
     <table><thead><tr><th>Room</th><th>State</th><th>Round</th><th>Sender</th><th>Sell</th><th>Buy</th><th></th></tr></thead>
     <tbody id="rooms"><tr><td colspan="7" class="muted">waiting for snapshot</td></tr></tbody></table>
   </section>
+  <section class="panel">
+    <h2>// q7933 blind-signature queue</h2>
+    <div id="blindsig-summary" class="muted">loading&hellip;</div>
+    <table><thead><tr><th>Ticket</th><th>Received</th><th>Actions</th></tr></thead>
+    <tbody id="blindsig-tickets"><tr><td colspan="3" class="muted">waiting for admin query</td></tr></tbody></table>
+    <div id="blindsig-detail" class="muted" style="margin-top:12px">select a ticket to view details</div>
+  </section>
 </div>
 <script>
 const ADMIN_ENABLED=__ADMIN_ENABLED__;
 const TOKEN="__TOKEN__";
 const esc=(v)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const short_=(v)=>{v=String(v??'');return v.length>22?v.slice(0,10)+'…'+v.slice(-10):v};
+const fmtTs=(v)=>{v=Number(v)||0;return v?new Date(v*1000).toLocaleString():'-'};
 async function confirmFee(roomId,btn){
   btn.disabled=true;btn.textContent='confirming…';
   try{
@@ -231,6 +243,47 @@ async function confirmFee(roomId,btn){
   }catch(e){
     btn.disabled=false;btn.textContent='Confirm fee received';
     alert('could not confirm: '+e.message);
+  }
+}
+async function loadBlindsigDetails(ticketId){
+  try{
+    const r=await fetch('/api/blindsig/details?ticket_id='+encodeURIComponent(ticketId),{cache:'no-store'});
+    const body=await r.json();
+    if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));
+    const t=body.ticket;
+    document.getElementById('blindsig-detail').innerHTML='<b>'+esc(short_(t.ticket_id))+'</b><br>received: '+esc(fmtTs(t.received_at))+'<br><span class="mono-break">'+esc(t.c_hex)+'</span>';
+  }catch(e){
+    document.getElementById('blindsig-detail').innerHTML='<span class="error">'+esc(e.message)+'</span>';
+  }
+}
+async function signBlindsig(ticketId,btn){
+  btn.disabled=true;btn.textContent='signing…';
+  try{
+    const r=await fetch('/api/blindsig/sign',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-TradeP2P-Token':TOKEN},body:new URLSearchParams({ticket_id:ticketId})});
+    const body=await r.json().catch(()=>({ok:false,error:'invalid response'}));
+    if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));
+    btn.textContent='signed';
+    refreshBlindsig();
+  }catch(e){
+    btn.disabled=false;btn.textContent='Sign ticket';
+    alert('could not sign ticket: '+e.message);
+  }
+}
+async function refreshBlindsig(){
+  try{
+    if(!ADMIN_ENABLED){
+      document.getElementById('blindsig-summary').textContent='admin actions disabled - restart this dashboard with --admin-token to inspect or sign q7933 tickets';
+      document.getElementById('blindsig-tickets').innerHTML='<tr><td colspan="3" class="muted">admin actions disabled</td></tr>';
+      return;
+    }
+    const r=await fetch('/api/blindsig/pending',{cache:'no-store'});
+    const body=await r.json();
+    if(!r.ok||!body.ok)throw new Error(body.error||('HTTP '+r.status));
+    const tickets=body.tickets||[];
+    document.getElementById('blindsig-summary').textContent=tickets.length+' pending q7933 ticket(s)';
+    document.getElementById('blindsig-tickets').innerHTML=tickets.length?tickets.map(t=>`<tr><td title="${esc(t.ticket_id)}">${esc(short_(t.ticket_id))}</td><td>${esc(fmtTs(t.received_at||0))}</td><td><button onclick="loadBlindsigDetails('${esc(t.ticket_id)}')">Details</button> <button onclick="signBlindsig('${esc(t.ticket_id)}',this)">Sign ticket</button></td></tr>`).join(''):'<tr><td colspan="3" class="muted">No pending q7933 blind-signature tickets.</td></tr>';
+  }catch(e){
+    document.getElementById('blindsig-summary').innerHTML='<span class="error">q7933 blind-signature query failed: '+esc(e.message)+'</span>';
   }
 }
 async function refresh(){
@@ -273,7 +326,7 @@ async function refresh(){
     document.getElementById('summary').innerHTML='<span class="error">dashboard refresh failed: '+esc(e.message)+'</span>';
   }
 }
-refresh();setInterval(refresh,1500);
+refresh();refreshBlindsig();setInterval(refresh,1500);setInterval(refreshBlindsig,2000);
 </script>
 </body>
 </html>)HTML";
@@ -389,6 +442,100 @@ int main(int argc, char** argv) {
                                  "application/json; charset=utf-8");
         });
 
+        server.Get("/api/blindsig/pending", [&](const httplib::Request& request,
+                                                httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            if (!host_allowed(request)) {
+                response.status = 403;
+                return;
+            }
+            if (!admin_enabled) {
+                response.status = 403;
+                response.set_content("{\"ok\":false,\"error\":\"admin actions are not enabled on this dashboard\"}",
+                                     "application/json; charset=utf-8");
+                return;
+            }
+            const auto ids = admin_query(
+                admin_host, static_cast<std::uint16_t>(admin_port),
+                "LISTPENDINGBLINDSIGS " + admin_token);
+            if (!ids.ok) {
+                response.status = 502;
+                response.set_content("{\"ok\":false,\"error\":\"" + json_escape(ids.raw_or_error) + "\"}",
+                                     "application/json; charset=utf-8");
+                return;
+            }
+            std::ostringstream json;
+            json << "{\"ok\":true,\"tickets\":[";
+            const std::string payload =
+                ids.raw_or_error.rfind("OK ", 0) == 0 ? ids.raw_or_error.substr(3) : std::string{};
+            bool first = true;
+            if (payload != "NONE" && !payload.empty()) {
+                std::istringstream stream(payload);
+                std::string ticket_id;
+                while (std::getline(stream, ticket_id, ',')) {
+                    const auto detail = admin_query(
+                        admin_host, static_cast<std::uint16_t>(admin_port),
+                        "BLINDSIGDETAILS " + admin_token + " " + ticket_id);
+                    if (!detail.ok) {
+                        continue;
+                    }
+                    const std::string detail_payload =
+                        detail.raw_or_error.rfind("OK ", 0) == 0 ? detail.raw_or_error.substr(3) : std::string{};
+                    std::istringstream detail_stream(detail_payload);
+                    std::uint64_t received_at = 0;
+                    detail_stream >> received_at;
+                    if (!first) {
+                        json << ',';
+                    }
+                    first = false;
+                    json << "{\"ticket_id\":\"" << json_escape(ticket_id)
+                         << "\",\"received_at\":" << received_at << "}";
+                }
+            }
+            json << "]}";
+            response.set_content(json.str(), "application/json; charset=utf-8");
+        });
+
+        server.Get("/api/blindsig/details", [&](const httplib::Request& request,
+                                                httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            if (!host_allowed(request)) {
+                response.status = 403;
+                return;
+            }
+            const auto fail = [&](int status, const std::string& error) {
+                response.status = status;
+                response.set_content("{\"ok\":false,\"error\":\"" + json_escape(error) + "\"}",
+                                     "application/json; charset=utf-8");
+            };
+            if (!admin_enabled) {
+                fail(403, "admin actions are not enabled on this dashboard - restart it with --admin-token");
+                return;
+            }
+            const std::string ticket_id = request.get_param_value("ticket_id");
+            if (!is_valid_ticket_id_hex(ticket_id)) {
+                fail(400, "invalid ticket_id");
+                return;
+            }
+            const auto detail = admin_query(
+                admin_host, static_cast<std::uint16_t>(admin_port),
+                "BLINDSIGDETAILS " + admin_token + " " + ticket_id);
+            if (!detail.ok) {
+                fail(502, detail.raw_or_error);
+                return;
+            }
+            const std::string payload =
+                detail.raw_or_error.rfind("OK ", 0) == 0 ? detail.raw_or_error.substr(3) : std::string{};
+            std::istringstream stream(payload);
+            std::uint64_t received_at = 0;
+            std::string c_hex;
+            stream >> received_at >> c_hex;
+            response.set_content("{\"ok\":true,\"ticket\":{\"ticket_id\":\"" + json_escape(ticket_id) +
+                                     "\",\"received_at\":" + std::to_string(received_at) +
+                                     ",\"c_hex\":\"" + json_escape(c_hex) + "\"}}",
+                                 "application/json; charset=utf-8");
+        });
+
         server.Post("/api/confirm-fee", [&](const httplib::Request& request,
                                             httplib::Response& response) {
             response.set_header("Cache-Control", "no-store");
@@ -419,6 +566,41 @@ int main(int argc, char** argv) {
             const auto result = admin_query(
                 admin_host, static_cast<std::uint16_t>(admin_port),
                 "CONFIRMFEE " + admin_token + " " + room_id);
+            if (!result.ok) {
+                fail(502, result.raw_or_error);
+                return;
+            }
+            response.set_content("{\"ok\":true}", "application/json; charset=utf-8");
+        });
+
+        server.Post("/api/blindsig/sign", [&](const httplib::Request& request,
+                                              httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            const auto fail = [&](int status, const std::string& error) {
+                response.status = status;
+                response.set_content("{\"ok\":false,\"error\":\"" + json_escape(error) + "\"}",
+                                     "application/json; charset=utf-8");
+            };
+            if (!host_allowed(request)) {
+                fail(403, "forbidden host");
+                return;
+            }
+            if (!admin_enabled) {
+                fail(403, "admin actions are not enabled on this dashboard - restart it with --admin-token");
+                return;
+            }
+            if (request.get_header_value("X-TradeP2P-Token") != session_token) {
+                fail(403, "invalid dashboard token");
+                return;
+            }
+            const std::string ticket_id = request.get_param_value("ticket_id");
+            if (!is_valid_ticket_id_hex(ticket_id)) {
+                fail(400, "invalid ticket_id");
+                return;
+            }
+            const auto result = admin_query(
+                admin_host, static_cast<std::uint16_t>(admin_port),
+                "SIGNBLINDSIG " + admin_token + " " + ticket_id);
             if (!result.ok) {
                 fail(502, result.raw_or_error);
                 return;

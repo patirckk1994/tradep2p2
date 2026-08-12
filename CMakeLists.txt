@@ -85,15 +85,22 @@ target_compile_options(tradep2p PRIVATE
 )
 
 if(TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
+    if(NOT TARGET tradep2p_blns7933_reference)
+        include(${CMAKE_SOURCE_DIR}/cmake/BLNS7933Integration.cmake)
+    endif()
     target_sources(tradep2p PRIVATE
         src/blindsig_wire.cpp
+        src/blindsig_wire_q7933.cpp
         src/blindsig_falcon.cpp
         src/blindsig_keystore.cpp
         src/blindsig_subprocess.cpp
         src/blindsig_signer.cpp
+        src/blindsig_signer_q7933.cpp
         src/blindsig_client.cpp
+        src/blindsig_client_q7933.cpp
     )
     target_link_libraries(tradep2p PRIVATE tradep2p_falcon_vendor)
+    target_link_libraries(tradep2p PUBLIC tradep2p_blns7933_reference)
     target_include_directories(tradep2p PRIVATE third_party/nlohmann-json)
     target_compile_definitions(tradep2p PUBLIC TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL=1)
 endif()
@@ -243,6 +250,13 @@ if(TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
     )
     add_test(NAME tradep2p_blindsig_wire_tests COMMAND tradep2p_blindsig_wire_tests)
 
+    add_executable(tradep2p_blindsig_wire_q7933_tests tests/blindsig_wire_q7933_tests.cpp)
+    target_link_libraries(tradep2p_blindsig_wire_q7933_tests PRIVATE tradep2p)
+    target_compile_options(tradep2p_blindsig_wire_q7933_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+    )
+    add_test(NAME tradep2p_blindsig_wire_q7933_tests COMMAND tradep2p_blindsig_wire_q7933_tests)
+
     add_executable(tradep2p_blindsig_keystore_tests tests/blindsig_keystore_tests.cpp)
     target_link_libraries(tradep2p_blindsig_keystore_tests PRIVATE tradep2p)
     target_compile_options(tradep2p_blindsig_keystore_tests PRIVATE
@@ -274,11 +288,14 @@ endif()
 # itself - required because tradep2p privately links it whenever
 # TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL is on, and CMake requires every
 # target a to-be-exported target links (even PRIVATE) to itself be part
-# of an export set. Harmless when the option is off: the target still
-# exists (see its unconditional add_library() above) and installs a
-# handful of small vendored .c files' resulting archive, whether or not
-# anything actually links against it.
-install(TARGETS tradep2p tradep2p_falcon_vendor
+# of an export set. When the q=7933 reference target exists, export it
+# alongside the main library; when the experimental option is off, it may
+# not exist at all, so build the install target list conditionally.
+set(tradep2p_install_targets tradep2p tradep2p_falcon_vendor)
+if(TARGET tradep2p_blns7933_reference)
+    list(APPEND tradep2p_install_targets tradep2p_blns7933_reference)
+endif()
+install(TARGETS ${tradep2p_install_targets}
     EXPORT tradep2pTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

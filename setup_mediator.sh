@@ -142,6 +142,28 @@ Options:
                         request's own mediator-side cost is fast; see
                         specs.txt SS9.3a. Only meaningful with
                         --blindsig-enable.
+  --blindsig-q7933-enable
+                        turn on the EXPERIMENTAL, UNREVIEWED q=7933 blind-
+                        signature path. Requires
+                        --blindsig-q7933-keystore-file,
+                        --blindsig-q7933-prover-path, and
+                        --blindsig-q7933-ticket-store-dir. You will be
+                        prompted for the q7933 keystore passphrase on every
+                        start.
+  --blindsig-q7933-keystore-file PATH
+                        path to an EXISTING q7933 blind-signature keystore,
+                        created beforehand with:
+                        `tradep2p_cli blindsig-q7933-keygen PATH PASSPHRASE`
+  --blindsig-q7933-prover-path PATH
+                        path to the blindsig-prover-q7933 sidecar binary
+                        (normally `blindsig-prover-q7933/target/release/blindsig-prover-q7933`)
+  --blindsig-q7933-ticket-store-dir PATH
+                        directory for durable pending/signed q7933 blind-sign
+                        tickets; created if needed and survives mediator
+                        restart by design
+  --blindsig-q7933-queue-size N
+                        q7933 blind-sign request queue capacity before the
+                        mediator replies Busy (default 8)
   -h, --help            show this help
 
 Settings are read from the config file first, then overridden by any flags
@@ -185,6 +207,11 @@ BLINDSIG_ENABLE="0"
 BLINDSIG_KEYSTORE_FILE=""
 BLINDSIG_PROVER_PATH=""
 BLINDSIG_QUEUE_SIZE=""
+BLINDSIG_Q7933_ENABLE="0"
+BLINDSIG_Q7933_KEYSTORE_FILE=""
+BLINDSIG_Q7933_PROVER_PATH=""
+BLINDSIG_Q7933_TICKET_STORE_DIR=""
+BLINDSIG_Q7933_QUEUE_SIZE=""
 
 # Pre-scan for --config so it can actually select which file gets sourced
 # below - the real flag-parsing loop further down runs AFTER sourcing (so
@@ -240,6 +267,11 @@ while [[ $# -gt 0 ]]; do
         --blindsig-keystore-file) BLINDSIG_KEYSTORE_FILE="$2"; shift 2 ;;
         --blindsig-prover-path) BLINDSIG_PROVER_PATH="$2"; shift 2 ;;
         --blindsig-queue-size) BLINDSIG_QUEUE_SIZE="$2"; shift 2 ;;
+        --blindsig-q7933-enable) BLINDSIG_Q7933_ENABLE="1"; shift ;;
+        --blindsig-q7933-keystore-file) BLINDSIG_Q7933_KEYSTORE_FILE="$2"; shift 2 ;;
+        --blindsig-q7933-prover-path) BLINDSIG_Q7933_PROVER_PATH="$2"; shift 2 ;;
+        --blindsig-q7933-ticket-store-dir) BLINDSIG_Q7933_TICKET_STORE_DIR="$2"; shift 2 ;;
+        --blindsig-q7933-queue-size) BLINDSIG_Q7933_QUEUE_SIZE="$2"; shift 2 ;;
         -h|--help) print_usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; print_usage; exit 1 ;;
     esac
@@ -310,6 +342,11 @@ BLINDSIG_ENABLE="$BLINDSIG_ENABLE"
 BLINDSIG_KEYSTORE_FILE="$BLINDSIG_KEYSTORE_FILE"
 BLINDSIG_PROVER_PATH="$BLINDSIG_PROVER_PATH"
 BLINDSIG_QUEUE_SIZE="$BLINDSIG_QUEUE_SIZE"
+BLINDSIG_Q7933_ENABLE="$BLINDSIG_Q7933_ENABLE"
+BLINDSIG_Q7933_KEYSTORE_FILE="$BLINDSIG_Q7933_KEYSTORE_FILE"
+BLINDSIG_Q7933_PROVER_PATH="$BLINDSIG_Q7933_PROVER_PATH"
+BLINDSIG_Q7933_TICKET_STORE_DIR="$BLINDSIG_Q7933_TICKET_STORE_DIR"
+BLINDSIG_Q7933_QUEUE_SIZE="$BLINDSIG_Q7933_QUEUE_SIZE"
 EOF
     echo "wrote $CONFIG_FILE"
 }
@@ -342,12 +379,41 @@ if [[ "$BLINDSIG_ENABLE" == "1" ]]; then
         exit 1
     fi
 fi
+if [[ "$BLINDSIG_Q7933_ENABLE" == "1" ]]; then
+    if [[ -z "$BLINDSIG_Q7933_KEYSTORE_FILE" || -z "$BLINDSIG_Q7933_PROVER_PATH" || -z "$BLINDSIG_Q7933_TICKET_STORE_DIR" ]]; then
+        echo "fatal: --blindsig-q7933-enable requires --blindsig-q7933-keystore-file, --blindsig-q7933-prover-path, and --blindsig-q7933-ticket-store-dir" >&2
+        exit 1
+    fi
+    if [[ ! -f "$BLINDSIG_Q7933_KEYSTORE_FILE" ]]; then
+        echo "fatal: --blindsig-q7933-keystore-file $BLINDSIG_Q7933_KEYSTORE_FILE does not exist - run: tradep2p_cli blindsig-q7933-keygen $BLINDSIG_Q7933_KEYSTORE_FILE PASSPHRASE" >&2
+        exit 1
+    fi
+    if [[ ! -x "$BLINDSIG_Q7933_PROVER_PATH" ]]; then
+        echo "fatal: --blindsig-q7933-prover-path $BLINDSIG_Q7933_PROVER_PATH is not an executable file" >&2
+        exit 1
+    fi
+    mkdir -p "$BLINDSIG_Q7933_TICKET_STORE_DIR"
+fi
 
-CLI="$ROOT/build/tradep2p_cli"
-DASHBOARD_BIN="$ROOT/build/tradep2p-mediator-dashboard"
+DEFAULT_CLI="$ROOT/build/tradep2p_cli"
+DEFAULT_DASHBOARD_BIN="$ROOT/build/tradep2p-mediator-dashboard"
+if [[ -x "$ROOT/build-blns7933-root/tradep2p_cli" ]]; then
+    DEFAULT_CLI="$ROOT/build-blns7933-root/tradep2p_cli"
+    DEFAULT_DASHBOARD_BIN="$ROOT/build-blns7933-root/tradep2p-mediator-dashboard"
+fi
+CLI="${TRADEP2P_BIN:-$DEFAULT_CLI}"
+DASHBOARD_BIN="${TRADEP2P_MEDIATOR_DASHBOARD_BIN:-$DEFAULT_DASHBOARD_BIN}"
 if [[ ! -x "$CLI" || ( "$RUN_DASHBOARD" == "1" && ! -x "$DASHBOARD_BIN" ) ]]; then
     echo "building the project (first run only)..."
     "$ROOT/scripts/build.sh"
+fi
+if [[ "$BLINDSIG_Q7933_ENABLE" == "1" ]]; then
+    CLI_USAGE="$("$CLI" 2>&1 || true)"
+    if ! grep -q "blindsig-q7933-keygen" <<<"$CLI_USAGE"; then
+        echo "fatal: selected mediator binary does not include q7933 experimental support: $CLI" >&2
+        echo "build and use the q7933-enabled output (e.g. build-blns7933-root/tradep2p_cli)" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$(dirname "$MEDIATOR_CERT")" "$(dirname "$MEDIATOR_STATE_FILE")"
@@ -415,6 +481,12 @@ if [[ "$BLINDSIG_ENABLE" == "1" ]]; then
     echo "                     see specs.txt SS9.3a - you will be prompted for the keystore"
     echo "                     passphrase below (no echo)"
 fi
+if [[ "$BLINDSIG_Q7933_ENABLE" == "1" ]]; then
+    echo "  q7933 blind-sig (EXPERIMENTAL, unreviewed): enabled, prover at $BLINDSIG_Q7933_PROVER_PATH"
+    echo "                     ticket store: $BLINDSIG_Q7933_TICKET_STORE_DIR"
+    echo "                     operator actions available through the dashboard/admin channel"
+    echo "                     you will be prompted for the q7933 keystore passphrase below"
+fi
 if [[ -n "$REGISTRY_ENDPOINT" ]]; then
     if [[ -n "$REGISTRY_PROXY" ]]; then
         echo "  registry:          $REGISTRY_ENDPOINT via SOCKS5 $REGISTRY_PROXY (advertising ${ADVERTISED_ENDPOINT:-$MEDIATOR_BIND})"
@@ -478,6 +550,15 @@ if [[ "$BLINDSIG_ENABLE" == "1" ]]; then
     export TRADEP2P_BLINDSIG_PROVER_PATH="$BLINDSIG_PROVER_PATH"
     if [[ -n "$BLINDSIG_QUEUE_SIZE" ]]; then
         export TRADEP2P_BLINDSIG_QUEUE_SIZE="$BLINDSIG_QUEUE_SIZE"
+    fi
+fi
+if [[ "$BLINDSIG_Q7933_ENABLE" == "1" ]]; then
+    export TRADEP2P_BLINDSIG_Q7933_ENABLE="1"
+    export TRADEP2P_BLINDSIG_Q7933_KEYSTORE_FILE="$BLINDSIG_Q7933_KEYSTORE_FILE"
+    export TRADEP2P_BLINDSIG_Q7933_PROVER_PATH="$BLINDSIG_Q7933_PROVER_PATH"
+    export TRADEP2P_BLINDSIG_Q7933_TICKET_STORE_DIR="$BLINDSIG_Q7933_TICKET_STORE_DIR"
+    if [[ -n "$BLINDSIG_Q7933_QUEUE_SIZE" ]]; then
+        export TRADEP2P_BLINDSIG_Q7933_QUEUE_SIZE="$BLINDSIG_Q7933_QUEUE_SIZE"
     fi
 fi
 

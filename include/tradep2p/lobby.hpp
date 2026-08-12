@@ -4,9 +4,12 @@
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 #include "tradep2p/blindsig_keystore.hpp"
+#include "tradep2p/blindsig_keystore_q7933.hpp"
 #endif
 
+#include <cstddef>
 #include <memory>
+#include <string>
 
 namespace tradep2p {
 
@@ -30,6 +33,10 @@ public:
     // here or via any env var - see blindsig_keystore.hpp's file comment
     // for why).
     void enable_blindsig_signer(blindsig::BlindSigKeystore keystore);
+    void enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                      const std::string& prover_path,
+                                      const std::string& ticket_store_directory,
+                                      std::size_t queue_capacity);
 #endif
 
 private:

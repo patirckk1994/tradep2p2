@@ -1,7 +1,10 @@
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 #include "tradep2p/blindsig_client.hpp"
+#include "tradep2p/blindsig_client_q7933.hpp"
 #include "tradep2p/blindsig_falcon.hpp"
 #include "tradep2p/blindsig_keystore.hpp"
+#include "tradep2p/blindsig_keystore_q7933.hpp"
+#include "tradep2p/blindsig_ntru_q7933.hpp"
 #endif
 #include "tradep2p/disclosure.hpp"
 #include "tradep2p/ephemeral.hpp"
@@ -228,6 +231,14 @@ void print_client_help() {
         << "      requires TRADEP2P_BLINDSIG_PROVER_PATH set to a local blindsig-prover binary;\n"
         << "      request blinds+proves NIZK1 (~100-200s in the background), then automatically\n"
         << "      finalizes+proves NIZK2 once the mediator responds - check progress with status\n"
+        << "  /blindsig-q7933 info\n"
+        << "  /blindsig-q7933 request <message>\n"
+        << "  /blindsig-q7933 poll\n"
+        << "  /blindsig-q7933 status\n"
+        << "      EXPERIMENTAL, UNREVIEWED q=7933 blind signature path - requires\n"
+        << "      TRADEP2P_BLINDSIG_Q7933_PROVER_PATH set to a local blindsig-prover-q7933 binary;\n"
+        << "      request blinds+proves NIZK1 locally, the mediator returns a pending ticket,\n"
+        << "      then poll later after operator approval to finalize+prove NIZK2 locally\n"
 #endif
         << "  /journal status\n"
         << "      requires an unlocked keystore; opens/verifies this identity's local journal\n"
@@ -420,6 +431,8 @@ struct ClientState {
     // a client needs its own local blindsig-prover binary to do anything
     // with this feature at all (see specs.txt SS9.3a).
     std::string blindsig_prover_path;
+    std::optional<tradep2p::blindsig::Q7933BlindSigClientSession> q7933_blindsig_session;
+    std::string q7933_blindsig_prover_path;
 #endif
 };
 
@@ -455,6 +468,35 @@ std::string blindsig_u16_array_to_hex(const std::array<std::uint16_t, tradep2p::
     return out;
 }
 
+const char* q7933_blindsig_stage_name(tradep2p::blindsig::Q7933BlindSigClientStage stage) {
+    using tradep2p::blindsig::Q7933BlindSigClientStage;
+    switch (stage) {
+    case Q7933BlindSigClientStage::kIdle: return "idle";
+    case Q7933BlindSigClientStage::kAwaitingInfo: return "awaiting-info";
+    case Q7933BlindSigClientStage::kBlindingAndProvingNizk1: return "blinding-and-proving-nizk1";
+    case Q7933BlindSigClientStage::kAwaitingInitialResponse: return "awaiting-initial-response";
+    case Q7933BlindSigClientStage::kAwaitingOperatorApproval: return "awaiting-operator-approval";
+    case Q7933BlindSigClientStage::kAwaitingPolledSignature: return "awaiting-polled-signature";
+    case Q7933BlindSigClientStage::kFinalizingAndProvingNizk2: return "finalizing-and-proving-nizk2";
+    case Q7933BlindSigClientStage::kVerifyingOwnSignature: return "verifying-own-signature";
+    case Q7933BlindSigClientStage::kReady: return "ready";
+    case Q7933BlindSigClientStage::kFailed: return "failed";
+    }
+    return "unknown";
+}
+
+template <std::size_t N>
+std::string blindsig_hex_encode(const std::array<std::uint8_t, N>& bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(N * 2U);
+    for (const auto byte : bytes) {
+        out.push_back(digits[(byte >> 4U) & 0x0fU]);
+        out.push_back(digits[byte & 0x0fU]);
+    }
+    return out;
+}
+
 // Rejection sampling for an unbiased uniform value mod q=12289 (not a
 // power of two, so a naive modulo would be very slightly biased) - the
 // same construction the original research prototype's
@@ -472,6 +514,38 @@ std::array<std::uint16_t, tradep2p::blindsig::kRingDegree> blindsig_random_ring_
         if (raw < (65536U / 12289U) * 12289U) {
             out[i++] = static_cast<std::uint16_t>(raw % 12289U);
         }
+    }
+    return out;
+}
+
+std::vector<std::int64_t> q7933_random_ring_element() {
+    constexpr std::uint16_t q = 7933U;
+    constexpr std::size_t degree = tradep2p::blindsig::kQ7933RingDegree;
+    std::vector<std::int64_t> out;
+    out.reserve(degree);
+    while (out.size() < degree) {
+        std::uint8_t buf[2];
+        if (RAND_bytes(buf, sizeof buf) != 1) {
+            throw std::runtime_error("RAND_bytes failed while generating a q7933 blind-signature ring element");
+        }
+        const auto raw = static_cast<std::uint16_t>(buf[0] | (static_cast<std::uint16_t>(buf[1]) << 8));
+        if (raw < (65536U / q) * q) {
+            out.push_back(static_cast<std::int64_t>(raw % q));
+        }
+    }
+    return out;
+}
+
+std::string q7933_u16_poly_to_hex(const std::vector<std::int64_t>& value) {
+    char buf[5];
+    std::string out;
+    out.reserve(value.size() * 4U);
+    for (const auto coefficient : value) {
+        if (coefficient < 0 || coefficient > 0xffff) {
+            throw std::runtime_error("q7933 public material coefficient exceeds hex rendering range");
+        }
+        std::snprintf(buf, sizeof buf, "%04x", static_cast<unsigned int>(coefficient));
+        out += buf;
     }
     return out;
 }
@@ -532,6 +606,53 @@ void maybe_enable_blindsig_signer(tradep2p::LobbyServer& server) {
               << ", b[0]=" << keystore.b()[0] << "). Enabling signer...\n";
     server.enable_blindsig_signer(std::move(keystore));
     std::cout << "Blind-signature signer enabled.\n";
+}
+
+std::size_t configured_q7933_blindsig_queue_size_from_env() {
+    const std::string text = blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_QUEUE_SIZE");
+    if (text.empty()) {
+        return 8U;
+    }
+    std::size_t size = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), size, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || size == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_BLINDSIG_Q7933_QUEUE_SIZE");
+    }
+    return size;
+}
+
+void maybe_enable_q7933_blindsig_signer(tradep2p::LobbyServer& server) {
+    if (blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_ENABLE").empty()) {
+        return;
+    }
+    const std::string keystore_path = blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_KEYSTORE_FILE");
+    if (keystore_path.empty()) {
+        throw std::invalid_argument(
+            "TRADEP2P_BLINDSIG_Q7933_ENABLE is set but TRADEP2P_BLINDSIG_Q7933_KEYSTORE_FILE is not");
+    }
+    const std::string prover_path = blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_PROVER_PATH");
+    if (prover_path.empty()) {
+        throw std::invalid_argument(
+            "TRADEP2P_BLINDSIG_Q7933_ENABLE is set but TRADEP2P_BLINDSIG_Q7933_PROVER_PATH is not");
+    }
+    const std::string ticket_store_dir =
+        blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_TICKET_STORE_DIR");
+    if (ticket_store_dir.empty()) {
+        throw std::invalid_argument(
+            "TRADEP2P_BLINDSIG_Q7933_ENABLE is set but TRADEP2P_BLINDSIG_Q7933_TICKET_STORE_DIR is not");
+    }
+    std::cout << "Q7933 blind-signature signer requested - EXPERIMENTAL, UNREVIEWED cryptography, "
+                 "see specs.txt SS9.3a before relying on this.\n";
+    const std::string passphrase =
+        blindsig_read_passphrase_no_echo("Enter q7933 blind-signature keystore passphrase: ");
+    auto keystore = tradep2p::blindsig::Q7933Keystore::unlock(keystore_path, passphrase);
+    std::cout << "Q7933 keystore unlocked (t[0]=" << keystore.public_key().t.at(0)
+              << ", b[0]=" << keystore.b().at(0) << "). Enabling signer...\n";
+    server.enable_q7933_blindsig_signer(std::move(keystore),
+                                        prover_path,
+                                        ticket_store_dir,
+                                        configured_q7933_blindsig_queue_size_from_env());
+    std::cout << "Q7933 blind-signature signer enabled.\n";
 }
 #endif
 
@@ -1234,6 +1355,40 @@ void handle_server_frame(SecureChannel& channel, const Frame& frame, ClientState
         state.blindsig_session->on_signer_response(response);
         break;
     }
+    case MessageType::Q7933BlindSigInfoResponse: {
+        const auto info = tradep2p::blindsig::decode_q7933_blindsig_info_response(frame.payload);
+        if (!state.q7933_blindsig_session.has_value()) {
+            std::cout << "  (unexpected Q7933BlindSigInfoResponse - no /blindsig-q7933 session active)\n";
+            break;
+        }
+        state.q7933_blindsig_session->on_info_response(info);
+        if (!info.enabled) {
+            std::cout << "  this mediator does not have the experimental q7933 blind-signature "
+                         "feature enabled\n";
+        } else {
+            std::cout << "  mediator q7933 blind-signature info: t[0]=" << info.t[0] << " b[0]=" << info.b[0]
+                      << " - ready for /blindsig-q7933 request <message>\n";
+        }
+        break;
+    }
+    case MessageType::Q7933BlindSigResponse: {
+        const auto response = tradep2p::blindsig::decode_q7933_blindsig_response(frame.payload);
+        if (!state.q7933_blindsig_session.has_value()) {
+            std::cout << "  (unexpected Q7933BlindSigResponse - no /blindsig-q7933 session active)\n";
+            break;
+        }
+        std::cout << "  q7933 signer response: status="
+                  << static_cast<int>(response.status) << " reason=\"" << response.reason << "\"\n";
+        if (response.status == tradep2p::blindsig::Q7933BlindSigResponse::Status::Pending) {
+            std::cout << "  operator approval pending, ticket_id="
+                      << blindsig_hex_encode(response.ticket_id)
+                      << " - use /blindsig-q7933 poll later\n";
+        } else if (response.status == tradep2p::blindsig::Q7933BlindSigResponse::Status::Ok) {
+            std::cout << "  q7933 signature received - finalizing (proving NIZK2)...\n";
+        }
+        state.q7933_blindsig_session->on_signer_response(response);
+        break;
+    }
 #endif
     default:
         throw std::runtime_error("unexpected server message");
@@ -1819,6 +1974,62 @@ bool handle_client_line(SecureChannel& channel,
         }
         return true;
     }
+
+    if (command == "/blindsig-q7933") {
+        std::string subcommand;
+        if (!(stream >> subcommand)) {
+            throw std::invalid_argument("usage: /blindsig-q7933 info|request <message>|poll|status");
+        }
+        if (state.q7933_blindsig_prover_path.empty()) {
+            throw std::invalid_argument(
+                "TRADEP2P_BLINDSIG_Q7933_PROVER_PATH is not set - cannot use the experimental "
+                "q7933 blind-signature feature");
+        }
+        if (!state.q7933_blindsig_session.has_value()) {
+            auto& bridge = state.blindsig_bridge;
+            state.q7933_blindsig_session.emplace(
+                state.q7933_blindsig_prover_path,
+                [&bridge](tradep2p::MessageType type, std::vector<std::uint8_t> payload) {
+                    bridge.push(type, std::move(payload));
+                });
+        }
+
+        if (subcommand == "info") {
+            state.q7933_blindsig_session->request_info();
+            std::cout << "requested q7933 blind-signature info from the mediator - EXPERIMENTAL, "
+                         "UNREVIEWED cryptography\n";
+        } else if (subcommand == "request") {
+            std::string message;
+            std::getline(stream, message);
+            const auto first_non_space = message.find_first_not_of(' ');
+            message = first_non_space == std::string::npos ? std::string{} : message.substr(first_non_space);
+            if (message.empty()) {
+                throw std::invalid_argument("usage: /blindsig-q7933 request <message>");
+            }
+            std::cout << "q7933 blinding and proving NIZK1 in the background - use /blindsig-q7933 "
+                         "status to check progress, then /blindsig-q7933 poll after operator approval...\n";
+            state.q7933_blindsig_session->start_request(message);
+        } else if (subcommand == "poll") {
+            state.q7933_blindsig_session->poll_ticket();
+            std::cout << "polled q7933 blind-signature ticket\n";
+        } else if (subcommand == "status") {
+            std::cout << "stage: " << q7933_blindsig_stage_name(state.q7933_blindsig_session->stage()) << '\n';
+            if (state.q7933_blindsig_session->stage() ==
+                tradep2p::blindsig::Q7933BlindSigClientStage::kFailed) {
+                std::cout << "  error: " << state.q7933_blindsig_session->last_error() << '\n';
+            }
+            if (const auto ticket_id = state.q7933_blindsig_session->pending_ticket_id(); ticket_id.has_value()) {
+                std::cout << "  pending ticket: " << blindsig_hex_encode(*ticket_id) << '\n';
+            }
+            if (const auto credential = state.q7933_blindsig_session->credential(); credential.has_value()) {
+                std::cout << "  credential ready: rho=" << credential->rho_hex
+                          << " pi2_path=" << credential->pi2_path << " mu=\"" << credential->mu << "\"\n";
+            }
+        } else {
+            throw std::invalid_argument("usage: /blindsig-q7933 info|request <message>|poll|status");
+        }
+        return true;
+    }
 #endif
 
     throw std::invalid_argument("unknown command; use /help");
@@ -1845,6 +2056,7 @@ void run_client(SecureChannel channel, std::string mediator_id) {
     state.mediator_id = mediator_id;
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
     state.blindsig_prover_path = blindsig_env_or_empty("TRADEP2P_BLINDSIG_PROVER_PATH");
+    state.q7933_blindsig_prover_path = blindsig_env_or_empty("TRADEP2P_BLINDSIG_Q7933_PROVER_PATH");
 #endif
     bool running = true;
     while (running) {
@@ -2071,6 +2283,9 @@ void print_usage(const char* program) {
         << "  " << program
         << " blindsig-keygen <keystore-path> <passphrase>   "
            "(EXPERIMENTAL, unreviewed - see specs.txt SS9.3a)\n"
+        << "  " << program
+        << " blindsig-q7933-keygen <keystore-path> <passphrase>   "
+           "(EXPERIMENTAL, unreviewed q=7933 path - slow)\n"
 #endif
         << "  " << program
         << " mediator <bind:port> <node-cert.pem> <node-key.pem>\n"
@@ -2249,6 +2464,37 @@ int main(int argc, char** argv) {
             std::cout << "h (public key):        " << blindsig_u16_array_to_hex(keypair.public_key.h) << "\n";
             std::cout << "B (blinding element):  " << blindsig_u16_array_to_hex(b) << "\n";
         }
+        else if (mode == "blindsig-q7933-keygen") {
+            if (argc != 4) {
+                throw std::invalid_argument("wrong blindsig-q7933-keygen argument count");
+            }
+            const std::string keystore_path = argv[2];
+            const std::string passphrase = argv[3];
+
+            tradep2p::blns7933::CryptoRng rng;
+            tradep2p::blns7933::NTRUTrapdoorGenerator generator;
+            const auto trapdoor = generator.generate(rng);
+            const auto public_key = generator.derive_public(trapdoor);
+            const auto b = q7933_random_ring_element();
+
+            tradep2p::blindsig::Q7933NTRUSigner signer(trapdoor, b);
+            const auto probe_target = q7933_random_ring_element();
+            const auto probe_sig = signer.sign_target(probe_target);
+            if (!signer.verify_target(probe_target, probe_sig)) {
+                throw std::runtime_error(
+                    "freshly generated q7933 keypair failed its own self-check - this should never happen");
+            }
+
+            (void)tradep2p::blindsig::Q7933Keystore::create(keystore_path, passphrase, trapdoor,
+                                                            public_key, b);
+
+            std::cout << "Q7933 blind-signature trapdoor generated and saved to " << keystore_path << "\n";
+            std::cout << "EXPERIMENTAL, UNREVIEWED cryptography - see specs.txt SS9.3a before "
+                         "relying on this.\n\n";
+            std::cout << "Publish these values out-of-band:\n";
+            std::cout << "t (public key):        " << q7933_u16_poly_to_hex(public_key.t) << "\n";
+            std::cout << "B (blinding element):  " << q7933_u16_poly_to_hex(b) << "\n";
+        }
 #endif
         else if (mode == "mediator") {
             if (argc != 5) {
@@ -2259,6 +2505,7 @@ int main(int argc, char** argv) {
                 ServerTlsIdentity{argv[3], argv[4]});
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
             maybe_enable_blindsig_signer(server);
+            maybe_enable_q7933_blindsig_signer(server);
 #endif
             server.run();
         } else if (mode == "mediator-registered") {
@@ -2281,6 +2528,7 @@ int main(int argc, char** argv) {
                 ServerTlsIdentity{argv[3], argv[4]});
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
             maybe_enable_blindsig_signer(server);
+            maybe_enable_q7933_blindsig_signer(server);
 #endif
             server.run();
         } else if (mode == "mediator-registered-tor") {

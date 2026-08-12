@@ -205,6 +205,16 @@ enum class MessageType : std::uint16_t {
     BlindSigInfoResponse = 42,
     BlindSigRequestChunk = 43,
     BlindSigResponse = 44,
+    // Parallel q=7933 experimental blind-signature path. Like the q12289
+    // tags above, these numeric values are reserved unconditionally so
+    // frame numbering never depends on whether TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // was defined for a particular build. See blindsig_wire_q7933.hpp for
+    // the actual structs/codecs.
+    Q7933BlindSigInfoRequest = 45,
+    Q7933BlindSigInfoResponse = 46,
+    Q7933BlindSigRequestChunk = 47,
+    Q7933BlindSigResponse = 48,
+    Q7933BlindSigTicketPoll = 49,
 };
 
 struct Frame {

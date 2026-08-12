@@ -2,6 +2,8 @@
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 #include "tradep2p/blindsig_signer.hpp"
+#include "tradep2p/blindsig_signer_q7933.hpp"
+#include "tradep2p/blindsig_wire_q7933.hpp"
 #endif
 #include "tradep2p/ephemeral.hpp"
 #include "tradep2p/fee_plugin_abi.h"
@@ -38,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <deque>
 #include <iostream>
 #include <memory>
@@ -482,6 +485,9 @@ std::string configured_fee_plugin_path() { return env_or_empty("TRADEP2P_FEE_PLU
 // this constructor can do on its own, since unlocking a keystore needs a
 // human at a terminal, not an env var.
 std::string configured_blindsig_prover_path() { return env_or_empty("TRADEP2P_BLINDSIG_PROVER_PATH"); }
+std::string configured_q7933_blindsig_prover_path() {
+    return env_or_empty("TRADEP2P_BLINDSIG_Q7933_PROVER_PATH");
+}
 
 // Bounds concurrent in-flight blind-sign jobs - defensive (this is the
 // first code path in this codebase's history that shells out to an
@@ -500,6 +506,41 @@ std::size_t configured_blindsig_queue_size() {
         throw std::invalid_argument("invalid TRADEP2P_BLINDSIG_QUEUE_SIZE");
     }
     return size;
+}
+
+std::size_t configured_q7933_blindsig_queue_size() {
+    const std::string text = env_or_empty("TRADEP2P_BLINDSIG_Q7933_QUEUE_SIZE");
+    if (text.empty()) {
+        return 8U;
+    }
+    std::size_t size = 0U;
+    const auto [ptr, error] = std::from_chars(text.data(), text.data() + text.size(), size, 10);
+    if (error != std::errc{} || ptr != text.data() + text.size() || size == 0U) {
+        throw std::invalid_argument("invalid TRADEP2P_BLINDSIG_Q7933_QUEUE_SIZE");
+    }
+    return size;
+}
+
+std::string configured_q7933_blindsig_ticket_store_dir() {
+    return env_or_empty("TRADEP2P_BLINDSIG_Q7933_TICKET_STORE_DIR");
+}
+
+template <std::size_t N>
+std::array<std::int16_t, N> q7933_poly_to_i16_array(const tradep2p::blns7933::PolyQ& value,
+                                                    const char* field_name) {
+    if (value.size() != N) {
+        throw std::runtime_error(std::string(field_name) + " has unexpected degree");
+    }
+    std::array<std::int16_t, N> result{};
+    for (std::size_t index = 0; index < N; ++index) {
+        const auto coefficient = value[index];
+        if (coefficient < static_cast<std::int64_t>(std::numeric_limits<std::int16_t>::min()) ||
+            coefficient > static_cast<std::int64_t>(std::numeric_limits<std::int16_t>::max())) {
+            throw std::runtime_error(std::string(field_name) + " coefficient exceeds q7933 wire range");
+        }
+        result[index] = static_cast<std::int16_t>(coefficient);
+    }
+    return result;
 }
 #endif
 
@@ -690,6 +731,33 @@ public:
                 "TRADEP2P_BLINDSIG_PROVER_PATH must be set to enable the experimental blind-signature signer");
         }
         blindsig_signer_.emplace(std::move(keystore), prover_path, configured_blindsig_queue_size());
+    }
+
+    void enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                      std::string prover_path,
+                                      std::string ticket_store_directory,
+                                      std::size_t queue_capacity) {
+        if (prover_path.empty()) {
+            prover_path = configured_q7933_blindsig_prover_path();
+        }
+        if (prover_path.empty()) {
+            throw std::runtime_error(
+                "TRADEP2P_BLINDSIG_Q7933_PROVER_PATH must be set to enable the experimental q7933 blind-signature signer");
+        }
+        if (ticket_store_directory.empty()) {
+            ticket_store_directory = configured_q7933_blindsig_ticket_store_dir();
+        }
+        if (ticket_store_directory.empty()) {
+            throw std::runtime_error(
+                "TRADEP2P_BLINDSIG_Q7933_TICKET_STORE_DIR must be set to enable the experimental q7933 blind-signature signer");
+        }
+        if (queue_capacity == 0U) {
+            queue_capacity = configured_q7933_blindsig_queue_size();
+        }
+        q7933_signer_.emplace(keystore.trapdoor(), keystore.b());
+        q7933_ticket_store_.emplace(ticket_store_directory);
+        q7933_blindsig_signer_.emplace(
+            *q7933_signer_, *q7933_ticket_store_, std::move(prover_path), queue_capacity);
     }
 #endif
 
@@ -897,6 +965,7 @@ private:
         // different requests (see its own total_length/total_chunks
         // consistency check).
         std::optional<blindsig::BlindSigChunkAssembler> blindsig_assembler;
+        std::optional<blindsig::BlindSigChunkAssembler> q7933_blindsig_assembler;
 #endif
     };
 
@@ -1177,6 +1246,17 @@ private:
         case MessageType::BlindSigRequestChunk:
             handle_blindsig_request_chunk(client, blindsig::decode_blindsig_request_chunk(frame.payload));
             return;
+        case MessageType::Q7933BlindSigInfoRequest:
+            handle_q7933_blindsig_info_request(client);
+            return;
+        case MessageType::Q7933BlindSigRequestChunk:
+            handle_q7933_blindsig_request_chunk(
+                client, blindsig::decode_blindsig_request_chunk(frame.payload));
+            return;
+        case MessageType::Q7933BlindSigTicketPoll:
+            handle_q7933_blindsig_ticket_poll(
+                client, blindsig::decode_q7933_blindsig_ticket_poll(frame.payload));
+            return;
 #endif
         default:
             throw std::invalid_argument("message type is not accepted from clients");
@@ -1342,6 +1422,72 @@ private:
         blindsig_signer_->submit(request, [client](const blindsig::BlindSigResponse& response) {
             client->enqueue(MessageType::BlindSigResponse, blindsig::encode_blindsig_response(response));
         });
+    }
+
+    void handle_q7933_blindsig_info_request(const std::shared_ptr<Client>& client) {
+        blindsig::Q7933BlindSigInfoResponse response;
+        if (q7933_blindsig_signer_.has_value()) {
+            response = q7933_blindsig_signer_->info();
+        }
+        client->enqueue(MessageType::Q7933BlindSigInfoResponse,
+                        blindsig::encode_q7933_blindsig_info_response(response));
+    }
+
+    void handle_q7933_blindsig_request_chunk(const std::shared_ptr<Client>& client,
+                                             blindsig::BlindSigRequestChunk chunk) {
+        if (!q7933_blindsig_signer_.has_value()) {
+            throw BenignRejection("q7933 blind-signature signer is not enabled on this mediator");
+        }
+        if (!client->q7933_blindsig_assembler.has_value()) {
+            client->q7933_blindsig_assembler.emplace();
+        }
+        const bool complete = client->q7933_blindsig_assembler->add_chunk(chunk);
+        if (!complete) {
+            return;
+        }
+        const auto assembled_bytes = client->q7933_blindsig_assembler->assembled_bytes();
+        const auto request = blindsig::decode_q7933_blindsig_assembled_request(assembled_bytes);
+        client->q7933_blindsig_assembler.reset();
+
+        q7933_blindsig_signer_->submit(
+            request, [client](const blindsig::Q7933BlindSigResponse& response) {
+                client->enqueue(MessageType::Q7933BlindSigResponse,
+                                blindsig::encode_q7933_blindsig_response(response));
+            });
+    }
+
+    void handle_q7933_blindsig_ticket_poll(const std::shared_ptr<Client>& client,
+                                           blindsig::Q7933BlindSigTicketPoll poll) {
+        if (!q7933_ticket_store_.has_value()) {
+            throw BenignRejection("q7933 blind-signature signer is not enabled on this mediator");
+        }
+        blindsig::Q7933BlindSigResponse response;
+        const auto ticket = q7933_ticket_store_->find(poll.ticket_id);
+        if (!ticket.has_value()) {
+            response.status = blindsig::Q7933BlindSigResponse::Status::Error;
+            response.reason = "unknown or expired ticket";
+            client->enqueue(MessageType::Q7933BlindSigResponse,
+                            blindsig::encode_q7933_blindsig_response(response));
+            return;
+        }
+        if (ticket->status == blindsig::TicketStatus::kPending) {
+            response.status = blindsig::Q7933BlindSigResponse::Status::Pending;
+            response.ticket_id = ticket->ticket_id;
+            client->enqueue(MessageType::Q7933BlindSigResponse,
+                            blindsig::encode_q7933_blindsig_response(response));
+            return;
+        }
+        if (!ticket->signature.has_value()) {
+            throw std::logic_error("signed q7933 ticket missing signature payload");
+        }
+        response.status = blindsig::Q7933BlindSigResponse::Status::Ok;
+        response.s0 = q7933_poly_to_i16_array<blindsig::kQ7933RingDegree>(ticket->signature->s0,
+                                                                           "q7933 signature s0");
+        response.s1 = q7933_poly_to_i16_array<blindsig::kQ7933RingDegree>(ticket->signature->s1,
+                                                                           "q7933 signature s1");
+        client->enqueue(MessageType::Q7933BlindSigResponse,
+                        blindsig::encode_q7933_blindsig_response(response));
+        q7933_ticket_store_->remove(ticket->ticket_id);
     }
 #endif
 
@@ -1776,6 +1922,63 @@ private:
         std::uint64_t since{};
     };
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    struct PendingQ7933BlindSigDetail {
+        blindsig::TicketId ticket_id{};
+        tradep2p::blns7933::PolyQ c;
+        std::uint64_t received_at_unix_seconds{0};
+    };
+
+    static std::string q7933_ticket_id_to_hex(const blindsig::TicketId& ticket_id) {
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string out;
+        out.reserve(ticket_id.size() * 2U);
+        for (const auto byte : ticket_id) {
+            out.push_back(digits[(byte >> 4U) & 0x0fU]);
+            out.push_back(digits[byte & 0x0fU]);
+        }
+        return out;
+    }
+
+    static blindsig::TicketId q7933_ticket_id_from_hex(const std::string& text) {
+        if (text.size() != 64U) {
+            throw std::invalid_argument("ticket id must be exactly 64 hex characters");
+        }
+        auto decode_nibble = [](char ch) -> std::uint8_t {
+            if (ch >= '0' && ch <= '9') {
+                return static_cast<std::uint8_t>(ch - '0');
+            }
+            if (ch >= 'a' && ch <= 'f') {
+                return static_cast<std::uint8_t>(10 + ch - 'a');
+            }
+            if (ch >= 'A' && ch <= 'F') {
+                return static_cast<std::uint8_t>(10 + ch - 'A');
+            }
+            throw std::invalid_argument("ticket id must be hex");
+        };
+        blindsig::TicketId out{};
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = static_cast<std::uint8_t>((decode_nibble(text[i * 2U]) << 4U) |
+                                               decode_nibble(text[i * 2U + 1U]));
+        }
+        return out;
+    }
+
+    static std::string q7933_poly_to_hex(const tradep2p::blns7933::PolyQ& value) {
+        char buf[5];
+        std::string out;
+        out.reserve(value.size() * 4U);
+        for (const auto coefficient : value) {
+            if (coefficient < 0 || coefficient > 0xffff) {
+                throw std::logic_error("q7933 ticket coefficient exceeds hex rendering range");
+            }
+            std::snprintf(buf, sizeof buf, "%04x", static_cast<unsigned int>(coefficient));
+            out += buf;
+        }
+        return out;
+    }
+#endif
+
     // Admin-only (LISTPENDINGFEES/FEEDETAILS) and the in-process plugin
     // polling thread (Mode B) - every room currently sitting in
     // WaitingForFeeConfirmation, for a human operator or a plugin to check
@@ -1811,6 +2014,44 @@ private:
         }
         return out;
     }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    std::vector<PendingQ7933BlindSigDetail> pending_q7933_blindsig_details() {
+        std::vector<PendingQ7933BlindSigDetail> out;
+        if (!q7933_ticket_store_.has_value()) {
+            return out;
+        }
+        for (const auto& ticket_id : q7933_ticket_store_->list_pending()) {
+            const auto ticket = q7933_ticket_store_->find(ticket_id);
+            if (!ticket.has_value() || ticket->status != blindsig::TicketStatus::kPending) {
+                continue;
+            }
+            out.push_back(PendingQ7933BlindSigDetail{
+                ticket->ticket_id, ticket->c, ticket->received_at_unix_seconds});
+        }
+        std::sort(out.begin(), out.end(), [](const PendingQ7933BlindSigDetail& left,
+                                             const PendingQ7933BlindSigDetail& right) {
+            return q7933_ticket_id_to_hex(left.ticket_id) < q7933_ticket_id_to_hex(right.ticket_id);
+        });
+        return out;
+    }
+
+    bool try_sign_q7933_blindsig_locked(const blindsig::TicketId& ticket_id) {
+        if (!q7933_signer_.has_value() || !q7933_ticket_store_.has_value()) {
+            throw std::logic_error("q7933 blind-signature signer is not enabled");
+        }
+        const auto ticket = q7933_ticket_store_->find(ticket_id);
+        if (!ticket.has_value() || ticket->status != blindsig::TicketStatus::kPending) {
+            return false;
+        }
+        const auto signature = q7933_signer_->sign_target(ticket->c);
+        if (!q7933_signer_->verify_target(ticket->c, signature)) {
+            throw std::logic_error("q7933 signer produced a signature that failed verification");
+        }
+        q7933_ticket_store_->mark_signed(ticket_id, signature);
+        return true;
+    }
+#endif
 
     void handle_received(const std::shared_ptr<Client>& client,
                          const RoundSignalMessage& message) {
@@ -2660,6 +2901,72 @@ private:
             return;
         }
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        if (command == "LISTPENDINGBLINDSIGS") {
+            if (!q7933_ticket_store_.has_value()) {
+                send_admin_line(fd, "ERR q7933 blind-signature signer is not enabled");
+                return;
+            }
+            const auto pending = pending_q7933_blindsig_details();
+            if (pending.empty()) {
+                send_admin_line(fd, "OK NONE");
+            } else {
+                std::string ids;
+                for (const auto& detail : pending) {
+                    if (!ids.empty()) {
+                        ids += ',';
+                    }
+                    ids += q7933_ticket_id_to_hex(detail.ticket_id);
+                }
+                send_admin_line(fd, "OK " + ids);
+            }
+            return;
+        }
+
+        if (command == "BLINDSIGDETAILS") {
+            std::string ticket_id_hex;
+            stream >> ticket_id_hex;
+            try {
+                if (!q7933_ticket_store_.has_value()) {
+                    send_admin_line(fd, "ERR q7933 blind-signature signer is not enabled");
+                    return;
+                }
+                const blindsig::TicketId ticket_id = q7933_ticket_id_from_hex(ticket_id_hex);
+                const auto pending = pending_q7933_blindsig_details();
+                const auto it = std::find_if(
+                    pending.begin(), pending.end(),
+                    [&ticket_id](const PendingQ7933BlindSigDetail& detail) {
+                        return detail.ticket_id == ticket_id;
+                    });
+                if (it == pending.end()) {
+                    send_admin_line(fd, "ERR no pending q7933 blind-signature ticket with that id");
+                } else {
+                    send_admin_line(fd, "OK " + std::to_string(it->received_at_unix_seconds) + " " +
+                                            q7933_poly_to_hex(it->c));
+                }
+            } catch (const std::exception& error) {
+                send_admin_line(fd, std::string("ERR ") + error.what());
+            }
+            return;
+        }
+
+        if (command == "SIGNBLINDSIG") {
+            std::string ticket_id_hex;
+            stream >> ticket_id_hex;
+            try {
+                const blindsig::TicketId ticket_id = q7933_ticket_id_from_hex(ticket_id_hex);
+                if (try_sign_q7933_blindsig_locked(ticket_id)) {
+                    send_admin_line(fd, "OK");
+                } else {
+                    send_admin_line(fd, "ERR no pending q7933 blind-signature ticket with that id");
+                }
+            } catch (const std::exception& error) {
+                send_admin_line(fd, std::string("ERR ") + error.what());
+            }
+            return;
+        }
+#endif
+
         send_admin_line(fd, "ERR unknown command");
     }
 
@@ -3064,6 +3371,9 @@ private:
     // BlindSigSigner's own destructor cleanly joins its worker thread(s), so
     // no explicit teardown is needed in ~Impl() beyond this member existing.
     std::optional<blindsig::BlindSigSigner> blindsig_signer_;
+    std::optional<blindsig::Q7933NTRUSigner> q7933_signer_;
+    std::optional<blindsig::Q7933TicketStore> q7933_ticket_store_;
+    std::optional<blindsig::Q7933BlindSigSigner> q7933_blindsig_signer_;
 #endif
     // Bounded per-pair completed-trade price history - see
     // record_completed_trade()/handle_get_candles(). Key is "base/quote"
@@ -3107,6 +3417,16 @@ void LobbyServer::run() { impl_->run(); }
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 void LobbyServer::enable_blindsig_signer(blindsig::BlindSigKeystore keystore) {
     impl_->enable_blindsig_signer(std::move(keystore));
+}
+
+void LobbyServer::enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                               const std::string& prover_path,
+                                               const std::string& ticket_store_directory,
+                                               std::size_t queue_capacity) {
+    impl_->enable_q7933_blindsig_signer(std::move(keystore),
+                                        prover_path,
+                                        ticket_store_directory,
+                                        queue_capacity);
 }
 #endif
 

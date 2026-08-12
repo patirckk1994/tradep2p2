@@ -6,6 +6,7 @@
 #include <poll.h>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -19,6 +20,25 @@ namespace tradep2p::dashboard {
 namespace {
 constexpr std::size_t kMaxEvents = 160U;
 constexpr int kDashboardPollMilliseconds = 250;
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+const char* q7933_blindsig_stage_name(blindsig::Q7933BlindSigClientStage stage) {
+    using blindsig::Q7933BlindSigClientStage;
+    switch (stage) {
+    case Q7933BlindSigClientStage::kIdle: return "idle";
+    case Q7933BlindSigClientStage::kAwaitingInfo: return "awaiting-info";
+    case Q7933BlindSigClientStage::kBlindingAndProvingNizk1: return "blinding-and-proving-nizk1";
+    case Q7933BlindSigClientStage::kAwaitingInitialResponse: return "awaiting-initial-response";
+    case Q7933BlindSigClientStage::kAwaitingOperatorApproval: return "awaiting-operator-approval";
+    case Q7933BlindSigClientStage::kAwaitingPolledSignature: return "awaiting-polled-signature";
+    case Q7933BlindSigClientStage::kFinalizingAndProvingNizk2: return "finalizing-and-proving-nizk2";
+    case Q7933BlindSigClientStage::kVerifyingOwnSignature: return "verifying-own-signature";
+    case Q7933BlindSigClientStage::kReady: return "ready";
+    case Q7933BlindSigClientStage::kFailed: return "failed";
+    }
+    return "unknown";
+}
+#endif
 
 std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -39,6 +59,22 @@ std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
 std::string candle_pair_key(const std::string& asset_a, const std::string& asset_b) {
     return asset_a <= asset_b ? asset_a + "/" + asset_b : asset_b + "/" + asset_a;
 }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+std::string q7933_trade_commitment_message(const std::string& mediator_id, const RoomView& room) {
+    const auto terms_hash = trade_payload_hash(encode_terms(room.terms));
+    std::ostringstream out;
+    out << "tradep2p-q7933-trade-commitment-v1"
+        << "\nmediator_id=" << mediator_id
+        << "\nroom_id=" << room.room_id
+        << "\nparty=" << party_name(room.party)
+        << "\nterms_sha256=" << hex_encode_bytes(terms_hash)
+        << "\nfee_asset=" << room.fee.asset
+        << "\nfee_amount=" << room.fee.amount
+        << "\nfee_address=" << room.fee.address;
+    return out.str();
+}
+#endif
 } // namespace
 
 std::string json_escape(const std::string& text) {
@@ -255,6 +291,78 @@ void DashboardClient::set_recognition_key_provider(RecognitionKeyProvider provid
 void DashboardClient::set_recognition_outcome_handler(RecognitionOutcomeHandler handler) {
     recognition_outcome_handler_ = std::move(handler);
 }
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+void DashboardClient::enable_q7933_blindsig(std::string prover_path) {
+    q7933_blindsig_session_.emplace(
+        std::move(prover_path),
+        [this](MessageType type, std::vector<std::uint8_t> payload) {
+            enqueue(type, std::move(payload), "submitted q7933 blind-signature frame");
+        });
+}
+
+void DashboardClient::request_q7933_blindsig_info() {
+    if (!q7933_blindsig_session_.has_value()) {
+        throw std::logic_error("q7933 blind-signature client is not enabled");
+    }
+    q7933_blindsig_session_->request_info();
+}
+
+void DashboardClient::start_q7933_blindsig_request(const std::string& message) {
+    if (!q7933_blindsig_session_.has_value()) {
+        throw std::logic_error("q7933 blind-signature client is not enabled");
+    }
+    q7933_blindsig_session_->start_request(message);
+}
+
+void DashboardClient::start_q7933_blindsig_trade_request(const std::string& room_text) {
+    if (!q7933_blindsig_session_.has_value()) {
+        throw std::logic_error("q7933 blind-signature client is not enabled");
+    }
+    const RoomId room_id = tradep2p::room_id_from_hex(room_text);
+    const std::string canonical = tradep2p::room_id_to_hex(room_id);
+    std::string message;
+    {
+        std::scoped_lock lock(state_mutex_);
+        const auto room_it = rooms_.find(canonical);
+        if (room_it == rooms_.end()) {
+            throw std::invalid_argument("room not found");
+        }
+        message = q7933_trade_commitment_message(mediator_id_, room_it->second);
+    }
+    q7933_blindsig_session_->start_request(message);
+}
+
+void DashboardClient::poll_q7933_blindsig_ticket() {
+    if (!q7933_blindsig_session_.has_value()) {
+        throw std::logic_error("q7933 blind-signature client is not enabled");
+    }
+    q7933_blindsig_session_->poll_ticket();
+}
+
+std::string DashboardClient::q7933_blindsig_state_json() const {
+    std::ostringstream json;
+    json << "{\"enabled\":" << (q7933_blindsig_session_.has_value() ? "true" : "false");
+    if (q7933_blindsig_session_.has_value()) {
+        json << ",\"stage\":\"" << q7933_blindsig_stage_name(q7933_blindsig_session_->stage()) << "\""
+             << ",\"error\":\"" << json_escape(q7933_blindsig_session_->last_error()) << "\"";
+        if (const auto ticket_id = q7933_blindsig_session_->pending_ticket_id(); ticket_id.has_value()) {
+            json << ",\"ticket_id\":\"" << json_escape(hex_encode_bytes(*ticket_id)) << "\"";
+        } else {
+            json << ",\"ticket_id\":\"\"";
+        }
+        if (const auto credential = q7933_blindsig_session_->credential(); credential.has_value()) {
+            json << ",\"credential\":{\"rho_hex\":\"" << json_escape(credential->rho_hex)
+                 << "\",\"pi2_path\":\"" << json_escape(credential->pi2_path)
+                 << "\",\"mu\":\"" << json_escape(credential->mu) << "\"}";
+        } else {
+            json << ",\"credential\":null";
+        }
+    }
+    json << "}";
+    return json.str();
+}
+#endif
 
 std::string DashboardClient::state_json() const {
     std::scoped_lock lock(state_mutex_);
@@ -744,6 +852,10 @@ void DashboardClient::handle_frame(const Frame& frame) {
     // is already this object's own state), but enqueue() cannot be called
     // while state_mutex_ is held.
     std::optional<ReceiptAckMessage> receipt_ack_to_send;
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    std::optional<tradep2p::blindsig::Q7933BlindSigInfoResponse> q7933_info_response;
+    std::optional<tradep2p::blindsig::Q7933BlindSigResponse> q7933_signer_response;
+#endif
     {
         std::scoped_lock lock(state_mutex_);
         switch (frame.type) {
@@ -1031,6 +1143,16 @@ void DashboardClient::handle_frame(const Frame& frame) {
                              room.recognized_fingerprint_hex);
             break;
         }
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        case MessageType::Q7933BlindSigInfoResponse:
+            q7933_info_response = tradep2p::blindsig::decode_q7933_blindsig_info_response(frame.payload);
+            add_event_locked("q7933 blind-signature info updated");
+            break;
+        case MessageType::Q7933BlindSigResponse:
+            q7933_signer_response = tradep2p::blindsig::decode_q7933_blindsig_response(frame.payload);
+            add_event_locked("q7933 blind-signature response received");
+            break;
+#endif
         default:
             add_event_locked("ignored unexpected mediator message type " +
                              std::to_string(static_cast<unsigned int>(frame.type)));
@@ -1154,6 +1276,14 @@ void DashboardClient::handle_frame(const Frame& frame) {
                 "acknowledged final-receipt gate for room " +
                     tradep2p::room_id_to_hex(receipt_ack_to_send->room_id));
     }
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    if (q7933_info_response.has_value() && q7933_blindsig_session_.has_value()) {
+        q7933_blindsig_session_->on_info_response(*q7933_info_response);
+    }
+    if (q7933_signer_response.has_value() && q7933_blindsig_session_.has_value()) {
+        q7933_blindsig_session_->on_signer_response(*q7933_signer_response);
+    }
+#endif
 }
 
 } // namespace tradep2p::dashboard

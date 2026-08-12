@@ -50,7 +50,8 @@ add_library(tradep2p_blns7933_reference STATIC
     src/blindsig_blns7933_csprng.cpp
 )
 target_include_directories(tradep2p_blns7933_reference PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(tradep2p_blns7933_reference PUBLIC OpenSSL::Crypto)
 target_compile_features(tradep2p_blns7933_reference PUBLIC cxx_std_20)
