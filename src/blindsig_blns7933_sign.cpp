@@ -4,11 +4,62 @@
 
 #include <boost/multiprecision/cpp_int.hpp>
 
+#include <openssl/err.h>
+#include <openssl/evp.h>
+
+#include <limits>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace tradep2p::blns7933 {
 namespace {
+
+constexpr std::size_t kShakePrefixChunkBytes = 4096U;
+
+[[noreturn]] void throw_openssl_error(const std::string& message) {
+    const unsigned long code = ERR_get_error();
+    char buffer[256]{};
+    if (code != 0U) {
+        ERR_error_string_n(code, buffer, sizeof(buffer));
+        throw std::runtime_error(message + ": " + buffer);
+    }
+    throw std::runtime_error(message);
+}
+
+struct EvpMdCtxDeleter {
+    void operator()(EVP_MD_CTX* ctx) const noexcept { EVP_MD_CTX_free(ctx); }
+};
+using EvpMdCtxPtr = std::unique_ptr<EVP_MD_CTX, EvpMdCtxDeleter>;
+
+// Return the first `output_size` bytes of SHAKE256(message). OpenSSL's
+// EVP_DigestFinalXOF() is a one-shot finalization API, so hash_to_point()
+// grows the requested prefix and replays the absorption when rejection
+// sampling needs more bytes. That is deliberately a little slower than a
+// multi-call squeeze API, but it is portable across the OpenSSL versions
+// this reference target already supports and yields the exact contiguous
+// SHAKE stream rather than inventing a refill construction.
+std::vector<std::uint8_t> shake256_prefix(const std::string& message, std::size_t output_size) {
+    EvpMdCtxPtr ctx(EVP_MD_CTX_new());
+    if (!ctx) {
+        throw_openssl_error("BLNS7933 hash_to_point: EVP_MD_CTX_new failed");
+    }
+    if (EVP_DigestInit_ex(ctx.get(), EVP_shake256(), nullptr) != 1) {
+        throw_openssl_error("BLNS7933 hash_to_point: EVP_DigestInit_ex(SHAKE256) failed");
+    }
+    if (!message.empty() &&
+        EVP_DigestUpdate(ctx.get(), message.data(), message.size()) != 1) {
+        throw_openssl_error("BLNS7933 hash_to_point: EVP_DigestUpdate(message) failed");
+    }
+
+    std::vector<std::uint8_t> out(output_size);
+    if (EVP_DigestFinalXOF(ctx.get(), out.data(), out.size()) != 1) {
+        throw_openssl_error("BLNS7933 hash_to_point: EVP_DigestFinalXOF failed");
+    }
+    return out;
+}
 
 RealPoly to_real_poly(const std::vector<std::int64_t>& raw) {
     RealPoly out;
@@ -55,15 +106,50 @@ std::unique_ptr<FalconTreeNode> build_signing_tree(
 }
 
 PolyQ hash_to_point(const RingArithmetic& ring, const std::string& message) {
-    // Deterministic, NOT a cryptographic hash-to-point - see this file's
-    // header comment. Sufficient for testing the algebraic sign/verify
-    // relation; a real HashToPoint (falcon.pdf Algorithm 3, SHAKE256-
-    // based) is a separate piece of work, not attempted here.
-    PolyQ out(ring.degree(), 0);
-    std::uint64_t state = std::hash<std::string>{}(message);
-    for (std::size_t i = 0; i < ring.degree(); ++i) {
-        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-        out[i] = static_cast<std::int64_t>(state % static_cast<std::uint64_t>(ring.modulus()));
+    // FALCON-style unbiased coefficient extraction, reparametrized for the
+    // supplied modulus: SHAKE256(message), consume 16-bit big-endian words,
+    // reject w >= 5*q, then reduce modulo q. Because the accepted interval
+    // contains exactly five complete residue classes, reduction introduces
+    // no modulo bias. At the real BLNS23 q=7933, 5*q=39665 < 2^16.
+    //
+    // This deliberately remains the deterministic *plain-message* helper:
+    // it has no per-signature salt field in its API. The blind-signature
+    // path does not call it at all; it signs an already-blinded target via
+    // sign_target().
+    const std::int64_t q = ring.modulus();
+    if (q <= 0 || q > (65535 / 5)) {
+        throw std::invalid_argument(
+            "BLNS7933 hash_to_point: modulus must satisfy 0 < 5*q < 2^16");
+    }
+    const auto reject_at = static_cast<std::uint32_t>(5 * q);
+    const auto q_u32 = static_cast<std::uint32_t>(q);
+
+    PolyQ out;
+    out.reserve(ring.degree());
+
+    std::size_t prefix_size = kShakePrefixChunkBytes;
+    std::vector<std::uint8_t> stream = shake256_prefix(message, prefix_size);
+    std::size_t pos = 0;
+
+    while (out.size() < ring.degree()) {
+        if (pos + 2U > stream.size()) {
+            const std::size_t old_size = stream.size();
+            if (old_size > std::numeric_limits<std::size_t>::max() - kShakePrefixChunkBytes) {
+                throw std::length_error("BLNS7933 hash_to_point: SHAKE256 prefix length overflow");
+            }
+            prefix_size = old_size + kShakePrefixChunkBytes;
+            stream = shake256_prefix(message, prefix_size);
+            pos = old_size;
+        }
+
+        const auto w = static_cast<std::uint32_t>(
+            (static_cast<std::uint32_t>(stream[pos]) << 8U) |
+            static_cast<std::uint32_t>(stream[pos + 1U]));
+        pos += 2U;
+
+        if (w < reject_at) {
+            out.push_back(static_cast<std::int64_t>(w % q_u32));
+        }
     }
     return out;
 }
