@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -69,9 +70,18 @@ std::string write_temp_receipt(std::span<const std::uint8_t> bytes) {
             throw std::runtime_error(std::string("failed to write q7933 temp receipt file: ") +
                                      std::strerror(errno));
         }
+        if (n == 0) {
+            ::close(fd);
+            ::unlink(path.c_str());
+            throw std::runtime_error("short write while creating q7933 temp receipt file");
+        }
         written += static_cast<std::size_t>(n);
     }
-    ::close(fd);
+    if (::close(fd) != 0) {
+        ::unlink(path.c_str());
+        throw std::runtime_error(std::string("failed to close q7933 temp receipt file: ") +
+                                 std::strerror(errno));
+    }
     return path;
 }
 
@@ -93,14 +103,18 @@ Q7933BlindSigSigner::Q7933BlindSigSigner(Q7933NTRUSigner& signer,
                                          std::size_t worker_count)
     : signer_(&signer),
       ticket_store_(&ticket_store),
+      issuance_store_(ticket_store.directory() + "/credential-issuance"),
       prover_path_(std::move(prover_path)),
       queue_capacity_(queue_capacity) {
     info_.enabled = true;
-    info_.t = poly_to_array<std::uint16_t, kQ7933RingDegree>(signer_->public_key().t, "q7933 public key t");
-    info_.b = poly_to_array<std::uint16_t, kQ7933RingDegree>(signer_->b(), "q7933 blinding element b");
+    info_.t = poly_to_array<std::uint16_t, kQ7933RingDegree>(signer_->public_key().t,
+                                                             "q7933 public key t");
+    info_.b = poly_to_array<std::uint16_t, kQ7933RingDegree>(signer_->b(),
+                                                             "q7933 blinding element b");
 
-    workers_.reserve(worker_count == 0 ? 1 : worker_count);
-    for (std::size_t index = 0; index < (worker_count == 0 ? 1 : worker_count); ++index) {
+    const std::size_t actual_worker_count = worker_count == 0U ? 1U : worker_count;
+    workers_.reserve(actual_worker_count);
+    for (std::size_t index = 0; index < actual_worker_count; ++index) {
         workers_.emplace_back(&Q7933BlindSigSigner::worker_loop, this);
     }
 }
@@ -127,7 +141,29 @@ void Q7933BlindSigSigner::submit(Q7933BlindSigAssembledRequest request,
             reply(busy);
             return;
         }
-        queue_.push_back(Job{std::move(request), std::move(reply)});
+        queue_.push_back(Job{std::move(request), std::nullopt, std::move(reply)});
+    }
+    queue_cv_.notify_one();
+}
+
+void Q7933BlindSigSigner::submit(
+    Q7933BlindSigAssembledRequest request,
+    q7933_credential::IssuanceContext issuance_context,
+    Q7933BlindSigReplyCallback reply) {
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (queue_.size() >= queue_capacity_) {
+            lock.unlock();
+            Q7933BlindSigResponse busy;
+            busy.status = Q7933BlindSigResponse::Status::Busy;
+            busy.reason = "q7933 blind-signature signer is at capacity, try again shortly";
+            reply(busy);
+            return;
+        }
+        queue_.push_back(Job{std::move(request),
+                             std::optional<q7933_credential::IssuanceContext>{
+                                 std::move(issuance_context)},
+                             std::move(reply)});
     }
     queue_cv_.notify_one();
 }
@@ -147,14 +183,37 @@ void Q7933BlindSigSigner::worker_loop() {
             job = std::move(queue_.front());
             queue_.pop_front();
         }
-        const Q7933BlindSigResponse response = process_job(job.request);
-        job.reply(response);
+        const Q7933BlindSigResponse response = process_job(job.request, job.issuance_context);
+        try {
+            job.reply(response);
+        } catch (...) {
+            // A disconnected client must not kill the signer worker. The
+            // pending ticket (if one was created) remains durable and can be
+            // recovered by the ordinary ticket-poll path while it exists.
+        }
     }
 }
 
 Q7933BlindSigResponse Q7933BlindSigSigner::process_job(
-    const Q7933BlindSigAssembledRequest& request) noexcept {
+    const Q7933BlindSigAssembledRequest& request,
+    const std::optional<q7933_credential::IssuanceContext>& issuance_context) noexcept {
     try {
+        if (request.credential_issuance != issuance_context.has_value()) {
+            Q7933BlindSigResponse response;
+            response.status = Q7933BlindSigResponse::Status::Rejected;
+            response.reason = "q7933 credential authorization metadata mismatch";
+            return response;
+        }
+        if (issuance_context.has_value()) {
+            if (issuance_context->room_id != request.issuance_room_id ||
+                issuance_context->epoch != request.credential_epoch) {
+                Q7933BlindSigResponse response;
+                response.status = Q7933BlindSigResponse::Status::Rejected;
+                response.reason = "q7933 credential authorization context mismatch";
+                return response;
+            }
+        }
+
         const std::string receipt_path = write_temp_receipt(request.pi1_receipt);
         TempFileGuard guard{receipt_path};
 
@@ -188,10 +247,33 @@ Q7933BlindSigResponse Q7933BlindSigSigner::process_job(
             return response;
         }
 
-        Q7933BlindSigResponse response;
-        response.status = Q7933BlindSigResponse::Status::Pending;
-        response.ticket_id = ticket_store_->submit(array_to_poly(request.c));
-        return response;
+        bool issuance_claimed = false;
+        if (issuance_context.has_value()) {
+            if (!issuance_store_.record_issuance(*issuance_context)) {
+                Q7933BlindSigResponse response;
+                response.status = Q7933BlindSigResponse::Status::Rejected;
+                response.reason = "credential already issued for this completed room/party/epoch";
+                return response;
+            }
+            issuance_claimed = true;
+        }
+
+        try {
+            Q7933BlindSigResponse response;
+            response.status = Q7933BlindSigResponse::Status::Pending;
+            response.ticket_id = ticket_store_->submit(array_to_poly(request.c));
+            return response;
+        } catch (...) {
+            // The issuance marker is committed immediately before the ticket.
+            // If the ticket itself never became durable, release that marker;
+            // otherwise a transient full/error condition would permanently
+            // burn a user's one issuance right without ever giving them a
+            // ticket to collect.
+            if (issuance_claimed && issuance_context.has_value()) {
+                issuance_store_.rollback_uncommitted_issuance(*issuance_context);
+            }
+            throw;
+        }
     } catch (const Q7933TicketStoreFullError& error) {
         Q7933BlindSigResponse response;
         response.status = Q7933BlindSigResponse::Status::Busy;
