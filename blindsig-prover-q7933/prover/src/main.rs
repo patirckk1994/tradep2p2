@@ -10,6 +10,7 @@ mod hex_codec;
 mod schema;
 
 use serde_json::{json, Value};
+use std::io::Write;
 
 fn get_flag(args: &[String], name: &str) -> Option<String> {
     let mut it = args.iter();
@@ -23,7 +24,24 @@ fn get_flag(args: &[String], name: &str) -> Option<String> {
 
 fn print_json_and_exit(v: &Value) -> ! {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-    println!("{}", v);
+
+    // Do not rely on implicit stdio cleanup here: std::process::exit()
+    // terminates the process immediately, and this CLI's stdout contract
+    // is too important to leave to buffering behaviour. In particular,
+    // long-running RISC0 proving commands are commonly invoked with stdout
+    // redirected to a file by the C++ sidecar/harness. Explicitly write and
+    // flush the one JSON line before exiting so a successful proof can never
+    // leave an empty response file merely because stdout was still buffered.
+    let write_result = {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        writeln!(out, "{}", v).and_then(|_| out.flush())
+    };
+    if let Err(e) = write_result {
+        eprintln!("blindsig-prover-q7933: failed to write JSON response to stdout: {e}");
+        std::process::exit(1);
+    }
+
     std::process::exit(if ok { 0 } else { 1 });
 }
 
