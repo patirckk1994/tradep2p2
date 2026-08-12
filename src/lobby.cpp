@@ -2,6 +2,9 @@
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 #include "tradep2p/blindsig_signer.hpp"
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+#include "tradep2p/blindsig_service_q7933.hpp"
+#endif
 #endif
 #include "tradep2p/ephemeral.hpp"
 #include "tradep2p/fee_plugin_abi.h"
@@ -215,17 +218,6 @@ std::string configured_state_file() {
     return value == nullptr ? std::string{} : std::string(value);
 }
 
-// Phase 3 (mediator-side room persistence, see
-// docs/identity-03-journal-recovery.md and room_persistence.hpp): a
-// SEPARATE file from TRADEP2P_LOBBY_STATE_FILE. That file is (and remains)
-// a lossy, JSON, for-display-only snapshot with no restore path and no
-// client ids or addresses - it must not be repurposed for recovery, since
-// it is deliberately missing the fields recovery needs. This is a distinct,
-// binary, security-relevant file (room/party/terms/progress, though never
-// receive addresses - see room_persistence.hpp's file comment for the full
-// privacy trade-off this implements) that IS read back on startup. Unset or
-// empty means persistence is disabled entirely: rooms_ starts empty on
-// every restart exactly as it does today, and no file is ever written.
 std::string configured_room_persistence_file() {
     const char* value = std::getenv("TRADEP2P_ROOM_STATE_FILE");
     return value == nullptr ? std::string{} : std::string(value);
@@ -236,32 +228,6 @@ std::string env_or_empty(const char* name) {
     return value == nullptr ? std::string{} : std::string(value);
 }
 
-// Phase 6 (mediator-signed staged receipts, see docs/identity-06-
-// receipts.md): the mediator's own receipt-signing identity. Receipts are
-// meant to "stay verifiable for years" (specs.txt SS11), so a key that
-// changes on every restart would make every previously-issued receipt
-// unverifiable against whatever public key the mediator currently
-// advertises - the same "silently destroys accumulated standing" problem
-// specs.txt SS5 already names for pseudonym keys, one layer up. If
-// TRADEP2P_MEDIATOR_RECEIPT_KEY_FILE is set, the key is loaded from (or,
-// on first run, generated and written to) that path as a raw 32-byte
-// private seed, 0600-permissioned - a materially WEAKER protection than
-// keystore.hpp's AEAD-encrypted, passphrase-derived storage (this is a
-// plaintext-on-disk operational key, not a user identity), which is an
-// honest, stated trade-off: encrypting it would require the mediator
-// operator to supply a passphrase on every restart, which most mediator
-// deployments (a long-running service process) are not set up for. If
-// unset, a fresh key is generated every process start - every receipt
-// issued that run becomes unverifiable against a later restart's key,
-// which is a real, named limitation of running without this option set,
-// not a silent one.
-// Shared by every "mediator identity key that must survive restarts, else
-// everything already signed with it becomes unverifiable" loader below -
-// same plaintext-0600-raw-seed tradeoff, same "unset means a fresh key
-// every restart" honesty, for every one of the mediator's persistent
-// signing identities (receipt Ed25519, receipt ML-DSA-65, auth ML-DSA-65).
-// Only the key type, its generator, and its seed-reload function differ per
-// identity - `label` exists purely so error messages stay identity-specific.
 template <typename KeyPair, typename Seed, std::size_t SeedLength>
 KeyPair load_or_create_mediator_key(const std::string& path, const std::string& label,
                                      KeyPair (*generate)(), KeyPair (*load_from_seed)(const Seed&)) {
@@ -277,9 +243,6 @@ KeyPair load_or_create_mediator_key(const std::string& path, const std::string& 
             throw std::runtime_error(label + " key file '" + path + "' is not exactly " +
                                      std::to_string(SeedLength) + " bytes");
         }
-        // Re-derives the public key from the loaded seed rather than
-        // storing it separately, so the file's only content is the one
-        // thing that actually needs protecting.
         return load_from_seed(Seed(raw));
     }
 
@@ -307,13 +270,6 @@ std::string configured_mediator_receipt_key_file() {
     return env_or_empty("TRADEP2P_MEDIATOR_RECEIPT_KEY_FILE");
 }
 
-// The hybrid-signing ML-DSA-65 half of the mediator's receipt identity - see
-// receipt.hpp's file comment. A deliberately SEPARATE key/file from both the
-// Ed25519 receipt key above and the unrelated mediator-auth ML-DSA-65 key
-// below (mediator_auth.hpp already documents why auth stays distinct from
-// receipt-scoped identity); a receipt is only fully verified once BOTH the
-// Ed25519 and this key's signatures check out, so losing continuity on
-// either one independently breaks every previously-issued receipt.
 MlDsa65KeyPair load_or_create_mediator_receipt_mldsa65_key(const std::string& path) {
     return load_or_create_mediator_key<MlDsa65KeyPair, MlDsa65PrivateSeed, kMlDsa65SeedLength>(
         path, "mediator receipt ML-DSA-65", generate_mldsa65_keypair, load_mldsa65_keypair);
@@ -323,13 +279,6 @@ std::string configured_mediator_receipt_mldsa65_key_file() {
     return env_or_empty("TRADEP2P_MEDIATOR_RECEIPT_MLDSA65_KEY_FILE");
 }
 
-// See mediator_auth.hpp's file comment. Line-for-line the same tradeoffs as
-// load_or_create_mediator_receipt_key() above (plaintext-on-disk operational
-// key, not a user identity; unset means a fresh key every restart, which
-// means every prior proof becomes unverifiable against the new one - a
-// real, named limitation, not a silent one) - only the algorithm differs
-// (ML-DSA-65 instead of Ed25519, since this key's whole purpose is to be
-// the mediator's post-quantum auth identity, see mediator_auth.hpp).
 MlDsa65KeyPair load_or_create_mediator_auth_key(const std::string& path) {
     return load_or_create_mediator_key<MlDsa65KeyPair, MlDsa65PrivateSeed, kMlDsa65SeedLength>(
         path, "mediator auth", generate_mldsa65_keypair, load_mldsa65_keypair);
@@ -340,9 +289,6 @@ std::uint64_t now_unix_seconds() {
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
 }
 
-// A mediator-wide fee configured by the operator through environment
-// variables, kept out of the CLI argument list so existing invocations stay
-// unchanged. Unset or empty TRADEP2P_FEE_ASSET means no fee is charged.
 FeeTerms configured_fee() {
     FeeTerms fee;
     fee.asset = env_or_empty("TRADEP2P_FEE_ASSET");
@@ -369,30 +315,8 @@ FeeTerms configured_fee() {
     return fee;
 }
 
-// Optional: if TRADEP2P_FEE_CONFIG_FILE is set, a live SETFEE (via the
-// admin channel) also rewrites that file's FEE_ASSET/FEE_AMOUNT/
-// FEE_ADDRESS lines in place, so the change survives a restart instead of
-// silently reverting to whatever the file said before - the original gap
-// this closes: SETFEE always took effect immediately, but a later
-// restart (deploy, crash, manual) would reload the OLD value from
-// mediator.conf with no warning, undoing a change the operator believed
-// was already saved. Off by default - see set_fee() below for how this
-// stays all-or-nothing (persist failure rolls back the in-memory change
-// too, rather than leaving a state the operator can't see is
-// non-durable). setup_mediator.sh wires this to the resolved
-// mediator.conf path automatically.
 std::string configured_fee_persist_file() { return env_or_empty("TRADEP2P_FEE_CONFIG_FILE"); }
 
-// Rewrites exactly the FEE_ASSET/FEE_AMOUNT/FEE_ADDRESS lines in `path`,
-// leaving every other line (including comments and unrelated settings
-// sharing the same file, e.g. ADMIN_TOKEN) untouched. Throws on any
-// failure - a caller that can't confirm this succeeded must not report
-// the fee change as durable. Rejects '"' outright: this file is sourced
-// as a shell script by setup_mediator.sh, and while validate_fee_terms()
-// already constrains what reaches here, that validation is enforced by
-// callers (e.g. the admin page), not by the admin channel itself - a
-// direct admin-channel connection must not be able to inject shell syntax
-// into mediator.conf via a crafted fee address.
 void persist_fee_to_file(const std::string& path, const FeeTerms& fee) {
     if (fee.asset.find('"') != std::string::npos ||
         fee.address.find('"') != std::string::npos) {
@@ -444,51 +368,13 @@ void persist_fee_to_file(const std::string& path, const FeeTerms& fee) {
     }
 }
 
-// Gates the live admin control channel (see Impl::admin_control_loop()
-// below). Unset (the default) disables the channel entirely - no listening
-// socket is even opened - rather than opening on a fixed port with a
-// guessable or empty token.
 std::string configured_admin_token() { return env_or_empty("TRADEP2P_ADMIN_TOKEN"); }
-
-// A second, more narrowly scoped token for the same channel - see
-// handle_admin_connection()'s auth check. A connection authenticating with
-// this token instead of TRADEP2P_ADMIN_TOKEN is restricted to
-// LISTPENDINGFEES/FEEDETAILS/CONFIRMFEE only (SETFEE and anything else is
-// rejected), so a fee-checking plugin process (Mode A - see plugins/) needs
-// a credential no more powerful than "read pending fees and confirm one",
-// never "rewrite the mediator's fee configuration". Unset (the default)
-// means only the full admin token works, unchanged from today; also
-// meaningless (never even compared against) if TRADEP2P_ADMIN_TOKEN itself
-// is unset, since the whole channel stays closed in that case regardless.
 std::string configured_admin_fee_token() { return env_or_empty("TRADEP2P_ADMIN_FEE_TOKEN"); }
-
-// Mode B (in-process fee plugin) - see include/tradep2p/fee_plugin_abi.h
-// and Impl::fee_plugin_thread_. Unset (the default) means dlopen() is
-// never even attempted - no in-process plugin code ever runs unless an
-// operator explicitly opts in by setting this. A plugin crash or hang
-// takes the whole mediator process down with it (inherent to running
-// dlopen'd code on the mediator's own thread) - operators wanting process
-// isolation instead should use Mode A (the admin-channel protocol - see
-// plugins/README.md) rather than this.
 std::string configured_fee_plugin_path() { return env_or_empty("TRADEP2P_FEE_PLUGIN_PATH"); }
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-// The experimental blind-signature primitive (specs.txt SS9.3a). Unlike
-// every configured_*() helper above, whether this feature is enabled at
-// all is NOT read from an env var here - see main.cpp's mediator startup
-// sequence, which reads TRADEP2P_BLINDSIG_ENABLE and, if set, prompts
-// interactively for the keystore passphrase before calling
-// LobbyServer::enable_blindsig_signer() - deliberately not something
-// this constructor can do on its own, since unlocking a keystore needs a
-// human at a terminal, not an env var.
 std::string configured_blindsig_prover_path() { return env_or_empty("TRADEP2P_BLINDSIG_PROVER_PATH"); }
 
-// Bounds concurrent in-flight blind-sign jobs - defensive (this is the
-// first code path in this codebase's history that shells out to an
-// external process at all), not because any one job is slow: proving is
-// entirely client-side, this signer's own per-job cost is one fast
-// receipt verification plus one fast FALCON sample. See
-// blindsig_signer.hpp's file comment.
 std::size_t configured_blindsig_queue_size() {
     const std::string text = env_or_empty("TRADEP2P_BLINDSIG_QUEUE_SIZE");
     if (text.empty()) {
@@ -516,25 +402,10 @@ std::uint16_t configured_admin_port() {
     return port;
 }
 
-// See mediator_auth.hpp. Unlike configured_mediator_receipt_key_file(),
-// unset does NOT mean "generate fresh every restart and move on quietly" in
-// the same low-stakes way - a mediator auth key that changes every restart
-// makes every previously-recorded proof from this mediator unverifiable
-// against the new one, defeating the entire point (continuity). Still
-// allowed (mirrors the receipt key's own honest, stated tradeoff) rather
-// than refusing to start, since an operator testing this feature locally
-// has no reason to be forced into persistence first.
 std::string configured_mediator_auth_key_file() {
     return env_or_empty("TRADEP2P_MEDIATOR_AUTH_KEY_FILE");
 }
 
-// Gates the mediator auth control channel (Impl::auth_control_loop() below).
-// Unlike the admin channel, there is no token - the whole point is that
-// ANY caller may request a fresh signed proof at any time (see
-// mediator_auth.hpp's file comment on why this is not a security problem:
-// nothing returned is sensitive). std::nullopt (the default, unset) disables
-// the channel entirely - no listening socket is even opened - so an
-// existing deployment never starts exposing a new port silently.
 std::optional<std::uint16_t> configured_mediator_auth_port() {
     const std::string text = env_or_empty("TRADEP2P_MEDIATOR_AUTH_PORT");
     if (text.empty()) {
@@ -548,22 +419,11 @@ std::optional<std::uint16_t> configured_mediator_auth_port() {
     return port;
 }
 
-// See mediator.hpp's SessionState::WaitingForFeeConfirmation. Off by
-// default - existing honor-system fee behavior is unchanged unless an
-// operator explicitly opts in. Meaningless (and ignored) if no fee is
-// configured at all.
 bool configured_require_fee_confirmation() {
     const std::string text = env_or_empty("TRADEP2P_FEE_REQUIRE_CONFIRMATION");
     return text == "1" || text == "true";
 }
 
-// See mediator.hpp's FeePosition. Defaults to AfterLastRound (today's only
-// behavior, honor-based, paid last) so every existing deployment is
-// unaffected unless an operator explicitly opts in - also the fallback for
-// an unset or unrecognized value, same fail-open-to-current-behavior posture
-// every other env-var parser in this file already has, rather than refusing
-// to start the mediator over a typo. Meaningless (and ignored) if no fee is
-// configured at all.
 FeePosition configured_fee_position() {
     const std::string text = env_or_empty("TRADEP2P_FEE_POSITION");
     if (text == "before-first") {
@@ -575,23 +435,6 @@ FeePosition configured_fee_position() {
     return FeePosition::AfterLastRound;
 }
 
-// The mediator's own identity string, bound into every receipt-ack
-// signature it verifies and every receipt it issues (receipt.hpp's
-// ReceiptAckFields/ReceiptFields.mediator_id) - it MUST be textually
-// identical to whatever address string each connecting client was told to
-// use as ITS mediator_id (main.cpp/http_dashboard.cpp's mediator_id_text,
-// taken verbatim from that client's own command line), or
-// verify_receipt_ack() silently and permanently fails for every room that
-// reaches the final-receipt-ack gate, with no way to recover except
-// restarting the mediator with a matching value - see handle_receipt_ack().
-// Defaulting to the bind address (as before this override existed) only
-// happens to work when bind and connect are the same string, which is
-// never true for a wildcard bind (0.0.0.0) or anything reached through a
-// proxy/onion address different from the local bind host - exactly the
-// Tor hidden-service deployment this project targets. Set
-// TRADEP2P_MEDIATOR_ID to whatever address clients actually connect
-// through (e.g. the onion address) to fix that; setup_mediator.sh wires
-// its --advertise flag to this for that reason.
 std::string configured_mediator_id(const Endpoint& bind_endpoint) {
     const std::string override_value = env_or_empty("TRADEP2P_MEDIATOR_ID");
     if (!override_value.empty()) {
@@ -600,11 +443,6 @@ std::string configured_mediator_id(const Endpoint& bind_endpoint) {
     return bind_endpoint.host + ":" + std::to_string(bind_endpoint.port);
 }
 
-// TradeTerms has no canonical base/quote concept - asset_a/asset_b are
-// whichever order the room's creator happened to type. This merges a
-// room's "A/B" and another room's "B/A" into the same price_history_
-// series rather than silently splitting one real pair into two -
-// lexicographically smaller asset code is always base.
 std::pair<std::string, std::string> canonical_pair(const std::string& asset_a,
                                                     const std::string& asset_b) {
     return asset_a <= asset_b ? std::pair{asset_a, asset_b} : std::pair{asset_b, asset_a};
@@ -652,23 +490,11 @@ public:
         }
     }
 
-    // fee_ is read from every client-handling thread (Welcome, offer
-    // creation, snapshot writes) and, once the admin control channel is
-    // enabled, written from that channel's own thread - so every access
-    // (read or write) goes through here rather than touching fee_ directly.
-    // Live changes only affect rooms/offers created AFTER the change - a
-    // room already past Welcome carries its own FeeTerms copy already (see
-    // WelcomeMessage/OfferCreated below), never a live reference back to
-    // this mediator-wide value.
     FeeTerms current_fee() const {
         std::scoped_lock lock(fee_mutex_);
         return fee_;
     }
 
-    // Throws (leaving fee_ unchanged) if persistence is configured and
-    // fails - see persist_fee_to_file()'s comment for why this is
-    // deliberately all-or-nothing rather than applying the live change
-    // and merely warning that it won't survive a restart.
     void set_fee(FeeTerms fee) {
         std::scoped_lock lock(fee_mutex_);
         if (!fee_persist_file_.empty()) {
@@ -678,11 +504,6 @@ public:
     }
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-    // Called from main.cpp's mediator startup sequence, before run(), at
-    // most once - `keystore` must already be unlocked (the interactive
-    // passphrase prompt happens there, not here - see that file). Throws
-    // if TRADEP2P_BLINDSIG_PROVER_PATH isn't set, since a signer with no
-    // way to reach the sidecar can never do anything useful.
     void enable_blindsig_signer(blindsig::BlindSigKeystore keystore) {
         const std::string prover_path = configured_blindsig_prover_path();
         if (prover_path.empty()) {
@@ -691,6 +512,19 @@ public:
         }
         blindsig_signer_.emplace(std::move(keystore), prover_path, configured_blindsig_queue_size());
     }
+
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+    void enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                      std::string ticket_directory,
+                                      std::string prover_path,
+                                      std::size_t queue_capacity) {
+        if (q7933_blindsig_service_) {
+            throw std::logic_error("q7933 blind-signature service is already enabled");
+        }
+        q7933_blindsig_service_ = std::make_unique<blindsig::Q7933BlindSigService>(
+            std::move(keystore), std::move(ticket_directory), std::move(prover_path), queue_capacity);
+    }
+#endif
 #endif
 
     void run() {
@@ -721,10 +555,6 @@ public:
         }
 
         if (!fee_plugin_path_.empty()) {
-            // Deliberately unguarded - a plugin that fails to load (bad
-            // path, missing symbols, ABI mismatch) must abort mediator
-            // startup, not silently run with fee confirmation still
-            // entirely manual. See load_fee_plugin()'s comment.
             load_fee_plugin();
             fee_plugin_running_.store(true);
             fee_plugin_thread_ = std::thread([this] { fee_plugin_loop(); });
@@ -740,6 +570,13 @@ public:
                          "who asks, see docs)\n";
         }
 
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+        if (q7933_blindsig_service_) {
+            std::cout << "q7933 deferred blind-signature service enabled; tickets: "
+                      << q7933_blindsig_service_->ticket_directory() << '\n';
+        }
+#endif
+
         load_persisted_rooms_at_startup();
 
         for (;;) {
@@ -747,10 +584,6 @@ public:
             try {
                 fd = listener.accept_raw();
             } catch (const std::exception& error) {
-                // Only a bare accept() failure lands here now; it does not
-                // block on a slow or hostile peer, so this cannot itself
-                // starve other connections the way the old combined
-                // accept-plus-handshake call could.
                 std::cerr << "accept failed: " << error.what() << '\n';
                 continue;
             }
@@ -767,10 +600,6 @@ public:
                     ~HandshakeGuard() { counter.fetch_sub(1U); }
                 } guard{pending_handshakes_};
 
-                // The handshake itself (and its up-to-10-second timeout) now
-                // runs here, on a per-connection thread, so one stalled peer
-                // can no longer block the accept loop from servicing anyone
-                // else.
                 SecureChannel channel;
                 try {
                     channel = listener.complete_handshake(fd);
@@ -888,15 +717,12 @@ private:
         std::atomic<bool> alive{true};
         unsigned int bad_messages{0U};
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-        // Reassembles this connection's BlindSigRequestChunk stream - see
-        // blindsig_wire.hpp's BlindSigChunkAssembler. One in-flight
-        // request at a time per connection (no request-id multiplexing):
-        // reset to std::nullopt once a request completes assembly, so the
-        // next BlindSigRequestChunk starts a fresh assembler; the
-        // assembler itself rejects a client trying to interleave two
-        // different requests (see its own total_length/total_chunks
-        // consistency check).
         std::optional<blindsig::BlindSigChunkAssembler> blindsig_assembler;
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+        // Kept separate from q12289's assembler so a client cannot splice or
+        // interleave chunks from the two schemes into one logical request.
+        std::optional<blindsig::BlindSigChunkAssembler> q7933_blindsig_assembler;
+#endif
 #endif
     };
 
@@ -944,26 +770,6 @@ private:
             session.join(JoinRoomMessage{offer.id, std::move(receive_address_b)});
         }
 
-        // Phase 3: reconstructs a room from mediator-side persisted state
-        // after a restart (see room_persistence.hpp). Deliberately built via
-        // MediatorSession::restore() rather than the normal
-        // constructor+join() flow above, since the persisted record never
-        // carries receive addresses (the chosen privacy option - see
-        // room_persistence.hpp's file comment) - both addresses come back
-        // as empty strings, which restore() explicitly allows and every
-        // later address-consuming path (encode_turn/encode_trade_ready)
-        // fails closed on if anything tries to use them for real
-        // settlement traffic before they are genuinely known again. `active`
-        // is false only for the states persistence never actually writes
-        // (Complete/Aborted are pruned immediately, not persisted - see
-        // LobbyServer::Impl::persist_room_upsert()), so this is here purely
-        // as a defensive default, not a path this constructor expects to
-        // exercise for those two states in practice.
-        // require_fee_confirmation is this mediator's CURRENT startup
-        // config, not anything read back from disk - see
-        // MediatorSession::restore()'s header comment for why that is
-        // correct (a room already past that gate stays exactly where its
-        // persisted `state` says regardless of this value).
         RoomEntry(const PersistedRoom& persisted, bool require_fee_confirmation,
                   FeePosition fee_position)
             : id(persisted.room_id),
@@ -983,37 +789,11 @@ private:
         MediatorSession session;
         std::mutex mutex;
         bool active{true};
-
-        // Phase 5/6: each party's announced ephemeral trade key (phase 5),
-        // passively cached the moment the mediator relays their
-        // TradeEphemeralKey announcement - see handle_room_relay(). Needed
-        // here (not just relayed and forgotten) so phase 6's receipts can
-        // bind both parties' ephemeral keys, and so a ReceiptAck's
-        // signature can be checked against the SAME key its party actually
-        // announced, never a key embedded in the ack itself.
         std::optional<Ed25519PublicKey> ephemeral_key_a;
         std::optional<Ed25519PublicKey> ephemeral_key_b;
-        // The ML-DSA-65 half of each party's dual-algorithm ephemeral
-        // identity (see ephemeral.hpp) - cached the same way and for the
-        // same reason as the Ed25519 halves above, now that receipt acks
-        // and receipts themselves are hybrid-signed/verified.
         std::optional<MlDsa65PublicKey> ephemeral_key_a_mldsa65;
         std::optional<MlDsa65PublicKey> ephemeral_key_b_mldsa65;
-        // Phase 6: the stage-3 ("penultimate obligations complete")
-        // receipt, once issued - kept so the stage-4 ("settlement
-        // completed") receipt can chain onto it via
-        // receipt_chain_link_hash(). Guarded by `mutex` like every other
-        // mutable field here.
         std::optional<IssuedReceipt> final_ack_receipt;
-        // Set the moment this room first lands in
-        // SessionState::WaitingForFeeConfirmation (see handle_sent()) -
-        // exposed to the admin channel's FEEDETAILS command and to the
-        // in-process plugin polling thread (Mode B) so a checker can decide
-        // how long a fee has been outstanding. Never persisted - like
-        // require_fee_confirmation_/fee_position_, a room already past this
-        // gate at restart has that fact baked into its persisted `state`,
-        // and a restart is a reasonable moment to lose "how long" precision
-        // for the (rare, operator-visible) rooms still waiting.
         std::optional<std::uint64_t> fee_confirmation_pending_since;
     };
 
@@ -1074,12 +854,6 @@ private:
                         try {
                             dispatch(client, frame);
                         } catch (const BenignRejection& error) {
-                            // An ordinary "no" that reveals nothing an
-                            // attacker couldn't already see (see the class
-                            // comment) - send the reason but don't count it
-                            // toward the disconnect threshold below, so a
-                            // stray misclick (e.g. joining your own offer
-                            // twice) can never by itself end the session.
                             send_error(client, error.what());
                         } catch (const std::exception& error) {
                             ++client->bad_messages;
@@ -1095,12 +869,6 @@ private:
                              processed < 16U);
                 }
 
-                // Unconditional: even when the loop above just set alive to
-                // false (Disconnect frame, 3rd strike), any reply already
-                // queued for this frame - e.g. the very Error explaining a
-                // disconnect-triggering rejection - must still go out before
-                // the socket closes below, or the client sees a bare "TLS
-                // read failed" with no idea why.
                 flush_outgoing(client);
             }
         } catch (const std::exception& error) {
@@ -1177,12 +945,24 @@ private:
         case MessageType::BlindSigRequestChunk:
             handle_blindsig_request_chunk(client, blindsig::decode_blindsig_request_chunk(frame.payload));
             return;
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+        case MessageType::Q7933BlindSigInfoRequest:
+            handle_q7933_blindsig_info_request(client);
+            return;
+        case MessageType::Q7933BlindSigRequestChunk:
+            handle_q7933_blindsig_request_chunk(
+                client, blindsig::decode_blindsig_request_chunk(frame.payload));
+            return;
+        case MessageType::Q7933BlindSigTicketPoll:
+            handle_q7933_blindsig_ticket_poll(
+                client, blindsig::decode_q7933_blindsig_ticket_poll(frame.payload));
+            return;
+#endif
 #endif
         default:
             throw std::invalid_argument("message type is not accepted from clients");
         }
     }
-
 
     void handle_create_offer(const std::shared_ptr<Client>& client,
                              const CreateOfferMessage& message) {
@@ -1266,12 +1046,6 @@ private:
         client->enqueue(MessageType::OfferList, std::move(encoded));
     }
 
-    // Public market data - the mediator's own retained price history for
-    // one asset pair (see price_history_/record_completed_trade()). No
-    // room/party check, same trust level as handle_list_offers() above:
-    // this reflects only trades this one mediator happened to settle,
-    // self-reported by the parties like everything else here - never an
-    // external price truth.
     void handle_get_candles(const std::shared_ptr<Client>& client,
                             const GetCandlesMessage& request) {
         const auto [base, quote] = canonical_pair(request.asset_a, request.asset_b);
@@ -1294,28 +1068,15 @@ private:
     }
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-    // Always answered, even when the feature is compiled in but not
-    // enabled at runtime - enabled=false (with h/b left zeroed) tells a
-    // client "not available here" without it needing to distinguish that
-    // from "this mediator doesn't have the feature compiled in at all"
-    // (which it can't observe directly anyway - see BlindSigInfoResponse's
-    // own doc comment in blindsig_wire.hpp).
     void handle_blindsig_info_request(const std::shared_ptr<Client>& client) {
         blindsig::BlindSigInfoResponse response;
         if (blindsig_signer_.has_value()) {
             response = blindsig_signer_->info();
         }
-        client->enqueue(MessageType::BlindSigInfoResponse, blindsig::encode_blindsig_info_response(response));
+        client->enqueue(MessageType::BlindSigInfoResponse,
+                        blindsig::encode_blindsig_info_response(response));
     }
 
-    // Accumulates this connection's chunk stream (client->blindsig_assembler)
-    // and, once a chunk completes assembly, hands the decoded request to
-    // the signer's queue - see blindsig_signer.hpp for what happens next.
-    // The reply callback captures `client` (keeping it alive) and runs on
-    // the SIGNER'S WORKER THREAD, not this one - Client::enqueue() is
-    // exactly the cross-thread-safe mechanism this needs (mutex-guarded
-    // queue + wake pipe), the same one every other relayed/async message
-    // in this file already uses.
     void handle_blindsig_request_chunk(const std::shared_ptr<Client>& client,
                                        blindsig::BlindSigRequestChunk chunk) {
         if (!blindsig_signer_.has_value()) {
@@ -1324,34 +1085,71 @@ private:
         if (!client->blindsig_assembler.has_value()) {
             client->blindsig_assembler.emplace();
         }
-        // Throws std::runtime_error on any inconsistency (see
-        // BlindSigChunkAssembler::add_chunk's own doc comment) - caught by
-        // the generic std::exception handler around dispatch(), which
-        // counts it toward this connection's bad_messages threshold like
-        // any other malformed input, not a BenignRejection (unlike the
-        // "not enabled" case above, a broken chunk stream is a protocol
-        // violation, not an ordinary "no").
         const bool complete = client->blindsig_assembler->add_chunk(chunk);
         if (!complete) {
             return;
         }
         const auto assembled_bytes = client->blindsig_assembler->assembled_bytes();
         const auto request = blindsig::decode_blindsig_assembled_request(assembled_bytes);
-        client->blindsig_assembler.reset(); // ready for a fresh request next time
+        client->blindsig_assembler.reset();
 
         blindsig_signer_->submit(request, [client](const blindsig::BlindSigResponse& response) {
-            client->enqueue(MessageType::BlindSigResponse, blindsig::encode_blindsig_response(response));
+            client->enqueue(MessageType::BlindSigResponse,
+                            blindsig::encode_blindsig_response(response));
         });
     }
+
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+    void handle_q7933_blindsig_info_request(const std::shared_ptr<Client>& client) {
+        blindsig::Q7933BlindSigInfoResponse response;
+        if (q7933_blindsig_service_) {
+            response = q7933_blindsig_service_->info();
+        }
+        client->enqueue(MessageType::Q7933BlindSigInfoResponse,
+                        blindsig::encode_q7933_blindsig_info_response(response));
+    }
+
+    void handle_q7933_blindsig_request_chunk(const std::shared_ptr<Client>& client,
+                                             blindsig::BlindSigRequestChunk chunk) {
+        if (!q7933_blindsig_service_) {
+            throw BenignRejection("q7933 blind-signature service is not enabled on this mediator");
+        }
+        if (!client->q7933_blindsig_assembler.has_value()) {
+            client->q7933_blindsig_assembler.emplace();
+        }
+        const bool complete = client->q7933_blindsig_assembler->add_chunk(chunk);
+        if (!complete) {
+            return;
+        }
+        const auto assembled_bytes = client->q7933_blindsig_assembler->assembled_bytes();
+        const auto request = blindsig::decode_q7933_blindsig_assembled_request(assembled_bytes);
+        client->q7933_blindsig_assembler.reset();
+
+        q7933_blindsig_service_->submit(
+            request, [client](const blindsig::Q7933BlindSigResponse& response) {
+                client->enqueue(MessageType::Q7933BlindSigResponse,
+                                blindsig::encode_q7933_blindsig_response(response));
+            });
+    }
+
+    void handle_q7933_blindsig_ticket_poll(
+        const std::shared_ptr<Client>& client,
+        const blindsig::Q7933BlindSigTicketPoll& message) {
+        if (!q7933_blindsig_service_) {
+            throw BenignRejection("q7933 blind-signature service is not enabled on this mediator");
+        }
+
+        const auto result = q7933_blindsig_service_->poll(message.ticket_id);
+        const bool accepted = client->enqueue(
+            MessageType::Q7933BlindSigResponse,
+            blindsig::encode_q7933_blindsig_response(result.response));
+        if (accepted && result.consume_after_delivery) {
+            q7933_blindsig_service_->consume_ticket(message.ticket_id);
+        }
+    }
+#endif
 #endif
 
-    // Called once a room genuinely completes (see handle_sent()/
-    // handle_received()/handle_confirm_fee()), always with room->session.
-    // terms() - fixed at room construction and never mutated afterward
-    // (mediator.hpp), so safe to read here without room->mutex, always
-    // after that lock has already been released (never held together with
-    // price_history_mutex_). Always the real trade's own TradeTerms, never
-    // a fee leg's amount/asset.
     void record_completed_trade(const TradeTerms& terms) {
         const auto [base, quote] = canonical_pair(terms.asset_a, terms.asset_b);
         const bool swapped = terms.asset_a != base;
@@ -1365,9 +1163,6 @@ private:
         auto it = price_history_.find(key);
         if (it == price_history_.end()) {
             if (price_history_.size() >= kMaxTrackedPairs) {
-                // Evict whichever tracked pair went longest without a new
-                // trade - a linear scan is fine at this bound
-                // (kMaxTrackedPairs), no need for a real LRU structure.
                 auto oldest = price_history_.begin();
                 for (auto candidate = price_history_.begin();
                      candidate != price_history_.end(); ++candidate) {
@@ -1414,9 +1209,6 @@ private:
             offer = offer_it->second;
             party_a = creator_it->second;
 
-            // Promote the accepted offer directly into an active settlement room.
-            // The room id published in /offers remains stable for both parties and
-            // for all later /sent, /received and /abort messages.
             room = std::make_shared<RoomEntry>(offer, client->id,
                                                message.receive_address_b, current_fee(),
                                                require_fee_confirmation_, fee_position_);
@@ -1424,10 +1216,6 @@ private:
             offers_.erase(offer_it);
         }
 
-        // Persist the newly-created room's state machine BEFORE either
-        // party is told the room is ready, so a crash right after this
-        // point can never leave a client believing a room exists that the
-        // mediator has no memory of on restart.
         {
             std::scoped_lock room_lock(room->mutex);
             persist_room_upsert(*room);
@@ -1500,9 +1288,6 @@ private:
                 throw BenignRejection("too many pending invitations from this client");
             }
 
-            // Client ids are broadcast to every connected client via
-            // ListPeers just above, so this reveals nothing a target-id
-            // guess couldn't already learn from that listing.
             const auto target_it = clients_.find(client_id_to_hex(message.target));
             if (target_it == clients_.end()) {
                 throw BenignRejection("target client is not connected");
@@ -1578,8 +1363,6 @@ private:
             invites_.erase(invite_it);
         }
 
-        // Same durability-before-acknowledgement ordering as
-        // handle_join_offer() above.
         {
             std::scoped_lock room_lock(room->mutex);
             persist_room_upsert(*room);
@@ -1624,16 +1407,6 @@ private:
         std::shared_ptr<Client> receiver;
         bool complete = false;
         bool awaiting_fee_confirmation = false;
-        // True only when an early-positioned fee leg (FeePosition::
-        // BeforeFirstRound/BeforeLastRound - see mediator.hpp) was just
-        // reported sent and real trade rounds remain: sender_reported_sent()
-        // then lands back in WaitingForSent, which a NORMAL (non-fee) sent
-        // report can never do (that always goes to WaitingForReceived
-        // instead) - so this state uniquely identifies "resume trading with
-        // a fresh Turn", not "forward a Sent signal to the counterparty".
-        // The mediator is the fee's recipient, not the other party, so the
-        // ordinary receiver->enqueue(Sent, ...) relay below would be wrong
-        // here - the counterparty has nothing to acknowledge about the fee.
         bool resumed_trading_after_early_fee = false;
         TurnMessage resumed_turn;
         std::optional<IssuedReceipt> completion_receipt;
@@ -1645,19 +1418,6 @@ private:
             const Party reporting_party = party_for(*room, client->id);
             room->session.sender_reported_sent(reporting_party, message);
             receiver = client_for_party(*room, other_party(reporting_party));
-            // Reporting a mediator fee as sent can complete the room directly,
-            // since the mediator (not the counterparty) is the recipient of
-            // that leg and needs no separate receipt acknowledgement. By the
-            // time this room could ever be in WaitingForFeeSent at all with
-            // FeePosition::AfterLastRound, it already passed through the
-            // final-receipt-ack gate (phase 6 - see mediator.hpp's
-            // SessionState::WaitingForFinalReceiptAck), so issuing the
-            // stage-4 "settlement completed" receipt here is never premature
-            // - see receipt.hpp's file comment. Unless the operator opted
-            // into require_fee_confirmation, in which case the session lands
-            // in WaitingForFeeConfirmation instead - see try_confirm_fee_locked()
-            // for where completion actually happens in that case. An early
-            // fee position instead lands in WaitingForSent, handled below.
             const SessionState new_state = room->session.state();
             complete = new_state == SessionState::Complete;
             awaiting_fee_confirmation = new_state == SessionState::WaitingForFeeConfirmation;
@@ -1670,22 +1430,12 @@ private:
             } else if (resumed_trading_after_early_fee) {
                 resumed_turn = room->session.current_turn();
             }
-            // Durably record the new state (or drop it - see
-            // persist_room_remove()'s comment - once it is Complete)
-            // BEFORE either enqueueing a forwarded Sent signal to the
-            // counterparty or announcing completion below: the mediator
-            // must never tell a client about a transition it could still
-            // forget on the very next crash.
             if (!complete) {
                 persist_room_upsert(*room);
             }
         }
 
         if (complete) {
-            // terms() is fixed at room construction and never mutated
-            // afterward (mediator.hpp) - safe to read here with room->mutex
-            // already released, and always the real trade's own terms,
-            // never the fee leg's.
             record_completed_trade(room->session.terms());
             persist_room_remove(room->id);
             erase_room(room->id, room);
@@ -1699,10 +1449,6 @@ private:
         }
 
         if (awaiting_fee_confirmation) {
-            // Neither party has anything to do right now but wait for the
-            // operator - deliberately NOT relayed as an ordinary Sent signal
-            // (the counterparty never sent or received anything here, the
-            // fee's recipient is the mediator operator, not them).
             send_to_room(room, MessageType::FeeConfirmationPending,
                         encode_fee_confirmation_pending(FeeConfirmationPendingMessage{room->id}));
             return;
@@ -1720,18 +1466,6 @@ private:
         receiver->enqueue(MessageType::Sent, encode_round_signal(message));
     }
 
-    // Admin-only (see Impl::admin_control_loop()'s CONFIRMFEE command) and
-    // the in-process plugin polling thread (Mode B - see fee_plugin_thread_)
-    // - there is no client-facing wire message for this, matching
-    // MediatorSession::confirm_fee_received()'s own comment. Looks the room
-    // up directly by id rather than via find_room_for(), since this is not
-    // acting on behalf of either connected party. Returns false (and
-    // changes nothing) if no room with this id is currently in
-    // WaitingForFeeConfirmation - the caller reports that back (over the
-    // admin channel, or simply tries again next poll) rather than this
-    // throwing, since "you asked about a room that isn't in that state" is
-    // a normal outcome for a caller racing its own external payment check,
-    // not a bug.
     bool try_confirm_fee_locked(const RoomId& room_id) {
         std::shared_ptr<RoomEntry> room;
         {
@@ -1766,20 +1500,12 @@ private:
         return true;
     }
 
-    // A pending fee leg's own frozen terms (captured at room creation - see
-    // RoomEntry's constructors, never the mediator's current live-configured
-    // fee, which SETFEE can change between a room's creation and its fee
-    // leg becoming due) plus how long it has been waiting.
     struct PendingFeeDetail {
         RoomId room_id;
         FeeTerms fee;
         std::uint64_t since{};
     };
 
-    // Admin-only (LISTPENDINGFEES/FEEDETAILS) and the in-process plugin
-    // polling thread (Mode B) - every room currently sitting in
-    // WaitingForFeeConfirmation, for a human operator or a plugin to check
-    // against whatever they use to actually verify a payment arrived.
     std::vector<PendingFeeDetail> pending_fee_details_locked() {
         std::vector<PendingFeeDetail> out;
         std::vector<std::shared_ptr<RoomEntry>> snapshot;
@@ -1802,8 +1528,6 @@ private:
         return out;
     }
 
-    // LISTPENDINGFEES only needs the ids - kept as a thin projection of
-    // pending_fee_details_locked() rather than a second room scan.
     std::vector<RoomId> pending_fee_confirmations() {
         std::vector<RoomId> out;
         for (auto& detail : pending_fee_details_locked()) {
@@ -1817,7 +1541,7 @@ private:
         const auto room = find_room_for(client->id, message.room_id);
         std::shared_ptr<Client> sender;
         bool complete = false;
-        bool gating = false; // phase 6: entered SessionState::WaitingForFinalReceiptAck
+        bool gating = false;
         TurnMessage next_turn;
         std::optional<IssuedReceipt> completion_receipt;
 
@@ -1838,16 +1562,6 @@ private:
             } else if (!gating) {
                 next_turn = room->session.current_turn();
             }
-            // `gating` intentionally fetches no Turn - see mediator.hpp's
-            // SessionState::WaitingForFinalReceiptAck: no Turn is issuable
-            // until both parties submit a ReceiptAck (MessageType::
-            // ReceiptAckRequired, sent below, is the explicit signal that
-            // tells clients this - not silence they must interpret).
-            //
-            // Same durability-before-acknowledgement ordering as
-            // handle_sent() above - this is the call that advances
-            // round/leg, so it is the one that matters most for the
-            // "mediator restart mid-room" recovery windows.
             if (!complete) {
                 persist_room_upsert(*room);
             }
@@ -1875,23 +1589,6 @@ private:
         }
     }
 
-    // A generic client-to-counterparty relay for identity-layer room
-    // messages that carry their own client-verified meaning and need no
-    // mediator interpretation: phase 4b's RecognitionChallenge/
-    // RecognitionResponse (docs/identity-04b-counterparty-recognition.md)
-    // and phase 5's TradeEphemeralKey (docs/identity-05-ephemeral-trade-
-    // identity.md) all share this exact shape, and later phases (6/8's
-    // receipt exchange) are expected to reuse it too rather than each
-    // growing their own copy. Relays `payload` from `client` to the OTHER
-    // party in `room_id`, verbatim - exactly the same decode-validate-then-
-    // relay-raw-payload shape handle_sent()/handle_received() already use
-    // for Sent/Received. This mediator never signs, verifies, or interprets
-    // the payload's meaning; it only confirms `client` is actually a member
-    // of `room_id` (via find_room_for(), the same membership check every
-    // other in-room message already requires) before forwarding the
-    // already-decoded-and-therefore-well-formed bytes on to the
-    // counterparty. All cryptographic verification happens only on each
-    // client (recognition.hpp / ephemeral.hpp).
     void handle_room_relay(const std::shared_ptr<Client>& client, MessageType type,
                            const RoomId& room_id, const std::vector<std::uint8_t>& payload) {
         const auto room = find_room_for(client->id, room_id);
@@ -1903,13 +1600,6 @@ private:
         receiver->enqueue(type, payload);
     }
 
-    // Phase 5/6: like handle_room_relay(), but additionally caches the
-    // announced key on the room (see RoomEntry::ephemeral_key_a/b) before
-    // relaying - phase 6's receipts need to know both parties' ephemeral
-    // keys, and the only honest source for "what key does party X actually
-    // control" is the announcement that party itself sent, passively
-    // observed here, never a key supplied later by someone claiming to
-    // speak for that party.
     void handle_trade_ephemeral_key(const std::shared_ptr<Client>& client,
                                     const TradeEphemeralKeyMessage& message,
                                     const std::vector<std::uint8_t>& payload) {
@@ -1932,13 +1622,6 @@ private:
         handle_room_relay(client, MessageType::TradeEphemeralKey, message.room_id, payload);
     }
 
-    // Phase 6: a party's signed acknowledgement of the "penultimate
-    // obligations complete" stage - see mediator.hpp's SessionState::
-    // WaitingForFinalReceiptAck and receipt.hpp's file comment for the
-    // withholding fix this implements. Verifies the signature against the
-    // ephemeral key THAT PARTY announced (never a key supplied in the ack
-    // itself), records the ack, and - once both parties have acked - issues
-    // the stage-3 receipt to both and unblocks the now-issuable final Turn.
     void handle_receipt_ack(const std::shared_ptr<Client>& client, const ReceiptAckMessage& message) {
         const auto room = find_room_for(client->id, message.room_id);
         const Party party = party_for(*room, client->id);
@@ -1977,9 +1660,8 @@ private:
                 throw std::invalid_argument("receipt acknowledgement signature does not verify");
             }
 
-            room->session.acknowledge_final_receipt(party); // throws on a duplicate ack
+            room->session.acknowledge_final_receipt(party);
             if (room->session.state() != SessionState::WaitingForFinalReceiptAck) {
-                // Both parties have now acked - the gate just opened.
                 stage3_receipt = issue_receipt(*room, ReceiptStage::PenultimateObligationsComplete, false);
                 unblocked_turn = room->session.current_turn();
             }
@@ -2000,19 +1682,6 @@ private:
         abort_room(room, message.reason);
     }
 
-    // Phase 3 recovery protocol. Deliberately does NOT go through
-    // find_room_for()/party_for(): those enforce that the CURRENT
-    // connection's ClientId matches a party already on file, which is
-    // exactly the check a mediator restart or client reconnect breaks (a
-    // fresh TLS connection always gets a fresh, unrelated ClientId - see
-    // the MessageType::RecoveryStateRequest enum comment in protocol.hpp).
-    // Authorization here is knowledge of the 32-byte random room id alone,
-    // the same bearer-credential trust level every other room operation in
-    // this protocol already relies on. This is a read-only status query: it
-    // never mutates `room`, never rebinds a connection to a party slot, and
-    // never re-solicits an address - see room_persistence.hpp's file
-    // comment for why actually resuming a recovered room is out of scope
-    // for this phase.
     void handle_recovery_state_request(const std::shared_ptr<Client>& client,
                                        const RecoveryStateRequestMessage& message) {
         std::shared_ptr<RoomEntry> room;
@@ -2045,13 +1714,6 @@ private:
             if (room->session.state() == SessionState::Aborted) {
                 response.reason = room->session.abort_reason();
             }
-        }
-        // The room's OWN committed fee (captured at creation, see
-        // RoomEntry's constructors above), never the mediator-wide live
-        // value - a fee change after this room was created must not alter
-        // what this room itself already agreed to.
-        {
-            std::scoped_lock lock(room->mutex);
             response.fee = room->session.fee();
         }
         response.party_a_connected = client_for_party(*room, Party::A) != nullptr;
@@ -2088,15 +1750,6 @@ private:
         send_to_room(room, MessageType::Turn, encode_turn(turn));
     }
 
-    // Phase 6: builds, mediator-signs, and returns an IssuedReceipt for
-    // `stage`. PRECONDITION: caller already holds `room.mutex` (this reads
-    // room.session/ephemeral keys and, for the stage-3 case, writes
-    // room.final_ack_receipt so stage 4 can later chain onto it). Throws if
-    // either party's ephemeral key hasn't been announced yet - by
-    // construction this cannot happen on the call paths that actually
-    // reach this (see mediator.hpp's SessionState::WaitingForFinalReceiptAck
-    // comment: reaching either stage 3 or stage 4 already required passing
-    // through the ack gate, which itself requires both keys to exist).
     IssuedReceipt issue_receipt(RoomEntry& room, ReceiptStage stage, bool completed) {
         if (!room.ephemeral_key_a.has_value() || !room.ephemeral_key_b.has_value() ||
             !room.ephemeral_key_a_mldsa65.has_value() || !room.ephemeral_key_b_mldsa65.has_value()) {
@@ -2194,9 +1847,6 @@ private:
                 room->session.abort(reason);
             }
         }
-        // An aborted room has no recovery value left (nothing further can
-        // be resumed), so it is pruned from the persisted snapshot exactly
-        // like a completed one - see persist_room_remove()'s comment.
         persist_room_remove(room->id);
         erase_room(room->id, room);
         send_to_room(
@@ -2213,12 +1863,6 @@ private:
         }
     }
 
-    // --- Phase 3: mediator-side room persistence -------------------------
-    //
-    // Builds the durable, address-free snapshot of one room's current
-    // state. PRECONDITION: caller already holds `room.mutex` (mirrors the
-    // existing informal convention write_state_snapshot() already uses for
-    // reading room->session under that same lock).
     static PersistedRoom persisted_room_snapshot(const RoomEntry& room) {
         PersistedRoom snapshot;
         snapshot.room_id = room.id;
@@ -2232,20 +1876,10 @@ private:
         const auto now = std::chrono::system_clock::now();
         snapshot.updated_at =
             static_cast<std::uint64_t>(std::chrono::system_clock::to_time_t(now));
-        // The room's OWN committed fee (MediatorSession::fee()), never the
-        // mediator-wide live value - persisted state must reflect what this
-        // room actually agreed to, not whatever the fee happens to be (now
-        // live-changeable, see Impl::set_fee()) at persistence time.
         snapshot.fee = room.session.fee();
         return snapshot;
     }
 
-    // Durably records/updates one room's persisted snapshot - called with
-    // `room.mutex` already held, immediately after mutating that room's
-    // session state and BEFORE any resulting frame is enqueued to a client,
-    // so a crash between "we decided the new state" and "we told a client
-    // about it" can never leave disk behind what a client was already told.
-    // No-op if persistence is disabled (room_persistence_path_ empty).
     void persist_room_upsert(const RoomEntry& room) {
         if (room_persistence_path_.empty()) {
             return;
@@ -2256,12 +1890,6 @@ private:
         write_persisted_rooms_locked();
     }
 
-    // Removes a room from the persisted snapshot - called once a room
-    // reaches Complete or Aborted (see the file comment in
-    // room_persistence.hpp for why finished rooms are pruned rather than
-    // left to accumulate: there is no recovery value left once a room
-    // cannot be resumed, so keeping it on disk would be pure unnecessary
-    // exposure). No-op if persistence is disabled.
     void persist_room_remove(const RoomId& room_id) {
         if (room_persistence_path_.empty()) {
             return;
@@ -2271,7 +1899,6 @@ private:
         write_persisted_rooms_locked();
     }
 
-    // PRECONDITION: persistence_mutex_ already held.
     void write_persisted_rooms_locked() {
         PersistedRoomFile file;
         file.rooms.reserve(persisted_rooms_.size());
@@ -2282,22 +1909,11 @@ private:
         write_persisted_rooms(room_persistence_path_, file);
     }
 
-    // Reads back whatever was persisted before this process started (if
-    // anything) and reconstructs `rooms_` from it, so a restart no longer
-    // silently starts from total amnesia for rooms that were still open.
-    // Called once, from run(), before the accept loop starts. Deliberately
-    // NOT reusing snapshot_loop()/write_state_snapshot() - see this file's
-    // configured_room_persistence_file() comment for why that JSON display
-    // feed is the wrong file for this.
     void load_persisted_rooms_at_startup() {
         if (room_persistence_path_.empty()) {
             return;
         }
-        PersistedRoomFile file; // throws PersistenceFormatError on a malformed file -
-                                 // deliberately NOT caught here, so a corrupted
-                                 // persistence file fails the mediator's startup
-                                 // loudly rather than silently discarding rooms an
-                                 // operator might still be able to recover by hand.
+        PersistedRoomFile file;
         file = load_persisted_rooms(room_persistence_path_);
         rooms_restored_at_startup_ = 0U;
         if (file.rooms.empty()) {
@@ -2310,7 +1926,7 @@ private:
         for (const auto& persisted : file.rooms) {
             const std::string key = room_id_to_hex(persisted.room_id);
             if (rooms_.contains(key)) {
-                continue; // should never happen this early, but never clobber
+                continue;
             }
             rooms_.emplace(key, std::make_shared<RoomEntry>(persisted, require_fee_confirmation_,
                                                              fee_position_));
@@ -2370,16 +1986,6 @@ private:
             for (auto it = rooms_.begin(); it != rooms_.end();) {
                 if (it->second->party_a == client_id ||
                     it->second->party_b == client_id) {
-                    // A room already parked in WaitingForFeeConfirmation is
-                    // waiting on the operator (or a plugin - see
-                    // fee_plugin_loop()/admin_control_loop()), not on
-                    // either party - by this point both have already done
-                    // everything the protocol asks of them, and
-                    // disconnecting is the expected, harmless next thing a
-                    // client does. Aborting here would silently defeat the
-                    // entire point of --fee-require-confirmation, since a
-                    // room that never survives its own parties
-                    // disconnecting can never actually wait for anyone.
                     bool keep_room = false;
                     {
                         std::scoped_lock room_lock(it->second->mutex);
@@ -2432,9 +2038,6 @@ private:
             if (already_inactive) {
                 continue;
             }
-            // Same pruning as abort_room(): this room was already removed
-            // from rooms_ above (under hub_mutex_), but the persisted
-            // snapshot is a separate cache that must be told explicitly.
             persist_room_remove(room->id);
             send_to_room(
                 room, MessageType::Abort,
@@ -2455,19 +2058,6 @@ private:
         std::string current_sender;
     };
 
-    // A plain (non-TLS - loopback traffic only, never leaves the machine),
-    // line-based control channel, entirely separate from the anonymous
-    // trading protocol on bind_endpoint_. Deliberately hardcoded to
-    // 127.0.0.1 - not configurable to bind elsewhere - since its only
-    // purpose is letting a co-located, already-authenticated-some-other-way
-    // process (the admin page, via its own admin token) change the fee
-    // live, without a mediator restart that would drop every active
-    // connection and room.
-    //
-    // One line in, one line out, connection closed - deliberately not
-    // request/response over a persistent connection, so a slow or hostile
-    // client can only ever tie up one accept() cycle's worth of a thread,
-    // never the whole listener.
     void admin_control_loop() {
         const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd < 0) {
@@ -2544,11 +2134,6 @@ private:
         std::string token;
         stream >> command >> token;
 
-        // Two credential levels on one channel - see
-        // configured_admin_fee_token()'s comment. fee_scoped_only stays
-        // false (full access) whenever the connection authenticated with
-        // the full admin token, even if TRADEP2P_ADMIN_FEE_TOKEN also
-        // happens to be configured.
         bool fee_scoped_only = false;
         if (!admin_token_.empty() && token.size() == admin_token_.size() &&
             CRYPTO_memcmp(token.data(), admin_token_.data(), token.size()) == 0) {
@@ -2663,14 +2248,6 @@ private:
         send_admin_line(fd, "ERR unknown command");
     }
 
-    // See mediator_auth.hpp's file comment for the full design. Structurally
-    // identical to admin_control_loop() above (one line in, one line out,
-    // connection closed - same reasoning: a slow or hostile caller can only
-    // ever tie up one accept() cycle's worth of a thread) but bound to this
-    // mediator's own bind host rather than hardcoded to loopback - the whole
-    // point is remote reachability - and with no token check at all, since
-    // nothing this channel ever returns is sensitive (see
-    // configured_mediator_auth_port()'s comment).
     void auth_control_loop() {
         const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd < 0) {
@@ -2733,10 +2310,6 @@ private:
                 return;
             }
             line.append(buffer, static_cast<std::size_t>(received));
-            // A nonce request is short (command + 64 hex chars); this cap is
-            // generous headroom against a hostile caller sending an
-            // unbounded stream that never contains a newline, not a
-            // realistic operating limit.
             if (line.find('\n') != std::string::npos || line.size() > 1024U) {
                 break;
             }
@@ -2792,13 +2365,6 @@ private:
         }
     }
 
-    // Mode B (in-process fee plugin) - dlopen()s fee_plugin_path_ and
-    // resolves both required symbols. Called once from run(), before
-    // fee_plugin_thread_ starts. Throws (never partially leaving
-    // fee_plugin_handle_/fee_plugin_check_ set to something unusable) on
-    // any failure - a missing symbol, an ABI version mismatch, or dlopen()
-    // itself failing - so a misconfigured plugin path fails mediator
-    // startup loudly instead of silently running with no plugin at all.
     void load_fee_plugin() {
         ::dlerror();
         void* handle = ::dlopen(fee_plugin_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -2831,11 +2397,6 @@ private:
         fee_plugin_check_ = check_fn;
     }
 
-    // Polls every pending fee against the loaded plugin and confirms any
-    // it reports paid - the in-process equivalent of an operator typing
-    // CONFIRMFEE, or Mode A's admin-channel-driven plugin, but with no
-    // separate process or credential involved. See fee_plugin_abi.h for
-    // the exact contract each call to fee_plugin_check_ makes.
     void fee_plugin_loop() {
         while (fee_plugin_running_.load()) {
             try {
@@ -2926,11 +2487,6 @@ private:
              << "\",\"clients\":" << client_count
              << ",\"pending_invites\":" << pending_invites;
         {
-            // This snapshot is the mediator-wide CURRENT fee (what a NEW
-            // offer would be charged right now) - deliberately current_fee(),
-            // unlike a specific room's persisted/reported fee elsewhere in
-            // this file, which must stay pinned to what that room actually
-            // committed to.
             const FeeTerms fee = current_fee();
             json << ",\"fee_asset\":\"" << json_escape(fee.asset)
                  << "\",\"fee_amount\":" << fee.amount
@@ -3006,70 +2562,34 @@ private:
     ServerTlsIdentity identity_;
     std::string state_file_;
     std::string room_persistence_path_;
-    // Guards fee_ - see current_fee()/set_fee() above for why every access
-    // goes through those rather than touching fee_ directly.
     mutable std::mutex fee_mutex_;
     FeeTerms fee_;
-    // Phase 6: this mediator's own identifier (matching the "host:port" text
-    // convention every client-side mediator_id already uses - see
-    // ReceiptAckFields' comment for why the two must agree for a receipt
-    // ack's signature to verify) and its receipt-signing keypair.
     std::string mediator_id_;
     Ed25519KeyPair mediator_receipt_keypair_;
     MlDsa65KeyPair mediator_receipt_mldsa65_keypair_;
-    // Gates admin_control_loop() - see configured_admin_token()'s comment
-    // for why an empty token disables the channel entirely.
     std::string admin_token_;
-    // See configured_admin_fee_token()'s comment - a scoped, lower-privilege
-    // credential for the same channel, meaningful only once admin_token_
-    // (which gates the channel itself) is also set.
     std::string admin_fee_token_;
     std::uint16_t admin_port_;
-    // See mediator.hpp's SessionState::WaitingForFeeConfirmation. Captured
-    // once at startup and threaded into every new room's MediatorSession -
-    // not itself live-changeable via the admin channel (unlike the fee
-    // amount/asset/address), so a mediator's whole runtime behaves
-    // consistently for this one setting.
     bool require_fee_confirmation_;
-    // See mediator.hpp's FeePosition. Same "captured once at startup, not
-    // live-changeable" treatment as require_fee_confirmation_ above.
     FeePosition fee_position_;
-    // See configured_fee_persist_file()'s comment. Empty disables
-    // persistence entirely - SETFEE stays exactly as live-only as before
-    // this existed, matching prior behavior for anyone not opting in.
     std::string fee_persist_file_;
-    // See mediator_auth.hpp / configured_mediator_auth_port()'s comment.
-    // nullopt disables the mediator auth control channel entirely - no
-    // listening socket opened, no key generated/loaded either (see the
-    // constructor's conditional load above).
     std::optional<std::uint16_t> mediator_auth_port_;
     MlDsa65KeyPair mediator_auth_keypair_;
     std::atomic<bool> snapshot_running_{false};
     std::thread snapshot_thread_;
-    // Mode B (in-process fee plugin) - see configured_fee_plugin_path()'s
-    // comment, load_fee_plugin(), and fee_plugin_loop(). fee_plugin_handle_
-    // is the dlopen() handle (nullptr if no plugin is configured or
-    // loading hasn't happened yet); fee_plugin_check_ is the plugin's
-    // tradep2p_fee_plugin_check symbol, resolved once at load time.
     std::string fee_plugin_path_;
     void* fee_plugin_handle_{nullptr};
     int (*fee_plugin_check_)(const tradep2p_fee_check_request*){nullptr};
     std::atomic<bool> fee_plugin_running_{false};
     std::thread fee_plugin_thread_;
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-    // std::nullopt unless enable_blindsig_signer() has been called (main.cpp,
-    // only if TRADEP2P_BLINDSIG_ENABLE is set and the interactive passphrase
-    // prompt succeeded) - handle_blindsig_info_request()/
-    // handle_blindsig_request_chunk() below both check has_value() first.
-    // BlindSigSigner's own destructor cleanly joins its worker thread(s), so
-    // no explicit teardown is needed in ~Impl() beyond this member existing.
     std::optional<blindsig::BlindSigSigner> blindsig_signer_;
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+    // Owns the q7933 secret backend, durable ticket store and NIZK1 verifier
+    // workers. Nothing in the lobby can sign a ticket inline.
+    std::unique_ptr<blindsig::Q7933BlindSigService> q7933_blindsig_service_;
 #endif
-    // Bounded per-pair completed-trade price history - see
-    // record_completed_trade()/handle_get_candles(). Key is "base/quote"
-    // (canonical_pair()'s output joined with '/'); never persisted to
-    // disk, so this resets on every mediator restart like everything else
-    // that isn't explicitly opted into persistence in this file.
+#endif
     std::unordered_map<std::string, std::deque<TradeTick>> price_history_;
     mutable std::mutex price_history_mutex_;
     std::atomic<std::size_t> pending_handshakes_{0U};
@@ -3078,22 +2598,8 @@ private:
     std::unordered_map<std::string, OpenOffer> offers_;
     std::unordered_map<std::string, PendingInvite> invites_;
     std::unordered_map<std::string, std::shared_ptr<RoomEntry>> rooms_;
-    // Phase 3 mediator-side room persistence: a cache of the last-known
-    // PersistedRoom per room, kept in sync incrementally by
-    // persist_room_upsert()/persist_room_remove() so that writing the full
-    // snapshot file never requires re-locking every room's own mutex (only
-    // the room that was JUST mutated needs its mutex held - the rest of the
-    // snapshot comes from this cache, already up to date from whenever it
-    // was last touched). Guarded by its own mutex, separate from
-    // hub_mutex_/each room's mutex - see persist_room_upsert()'s comment
-    // for the lock-ordering discipline this depends on.
     std::mutex persistence_mutex_;
     std::unordered_map<std::string, PersistedRoom> persisted_rooms_;
-    // Phase 4 dashboard wiring: how many rooms load_persisted_rooms_at_startup()
-    // actually restored the one time it ran (0 if persistence is disabled, or
-    // if it is enabled but nothing was on file yet). Surfaced in
-    // write_state_snapshot()'s JSON so tradep2p-mediator-dashboard can show
-    // this fact instead of only the one-line stdout log above.
     std::size_t rooms_restored_at_startup_{0U};
 };
 
@@ -3108,6 +2614,16 @@ void LobbyServer::run() { impl_->run(); }
 void LobbyServer::enable_blindsig_signer(blindsig::BlindSigKeystore keystore) {
     impl_->enable_blindsig_signer(std::move(keystore));
 }
+
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+void LobbyServer::enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                               std::string ticket_directory,
+                                               std::string prover_path,
+                                               std::size_t queue_capacity) {
+    impl_->enable_q7933_blindsig_signer(
+        std::move(keystore), std::move(ticket_directory), std::move(prover_path), queue_capacity);
+}
+#endif
 #endif
 
 } // namespace tradep2p
