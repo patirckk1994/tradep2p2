@@ -3,6 +3,7 @@
 #include "tradep2p/blindsig_ticket_store_q7933.hpp"
 #include "tradep2p/blindsig_wire_q7933.hpp"
 #include "tradep2p/protocol.hpp"
+#include "tradep2p/q7933_credential.hpp"
 
 #include <atomic>
 #include <functional>
@@ -30,6 +31,10 @@ struct Q7933BlindSigCredential {
     std::string rho_hex;
     std::string pi2_path;
     std::string mu;
+    // Populated only for the replay-protected credential issuance path.
+    // This object contains the hidden client-generated serial and therefore
+    // must remain local; it is never copied into the clear issuance metadata.
+    std::optional<q7933_credential::CredentialPayload> credential_payload;
 };
 
 class Q7933BlindSigClientSession {
@@ -44,7 +49,18 @@ public:
 
     void request_info();
     void on_info_response(const Q7933BlindSigInfoResponse& info);
+
+    // Raw research primitive. No room/party issuance uniqueness is attached.
     void start_request(std::string message);
+
+    // Credential-layer path. Generates a fresh hidden 32-byte serial,
+    // constructs a domain-separated credential payload as the blinded `mu`,
+    // and sends room+epoch only as clear authorization metadata. The server
+    // derives the party slot from live room membership; the client never gets
+    // to assert Party A/B itself.
+    void start_credential_request(const RoomId& completed_room_id,
+                                  std::uint32_t credential_epoch = 0U);
+
     void poll_ticket();
     void on_signer_response(const Q7933BlindSigResponse& response);
 
@@ -54,6 +70,12 @@ public:
     [[nodiscard]] std::optional<TicketId> pending_ticket_id() const;
 
 private:
+    void start_request_internal(
+        std::string message,
+        bool credential_issuance,
+        RoomId issuance_room_id,
+        std::uint32_t credential_epoch,
+        std::optional<q7933_credential::CredentialPayload> credential_payload);
     void run_blind_and_prove_nizk1(std::string message);
     void run_finalize_and_verify(Q7933BlindSigResponse response);
     void send_chunked(const std::vector<std::uint8_t>& assembled_bytes);
@@ -76,6 +98,11 @@ private:
     std::string r_json_;
     std::string rho_hex_;
     std::string pi1_path_;
+
+    bool credential_issuance_{false};
+    RoomId issuance_room_id_{};
+    std::uint32_t credential_epoch_{0U};
+    std::optional<q7933_credential::CredentialPayload> credential_payload_;
 
     std::thread worker_;
 };
