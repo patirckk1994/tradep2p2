@@ -17,7 +17,12 @@ endif()
 
 target_sources(tradep2p_blns7933_reference PRIVATE
     src/blindsig_ntru_q7933.cpp
+    src/blindsig_keystore_q7933.cpp
+    src/blindsig_ticket_store_q7933.cpp
 )
+# OpenSSL::Crypto is already linked PUBLIC by BLNS7933Reference.cmake
+# (blindsig_blns7933_csprng.cpp's own CryptoRng needs it); this file's
+# blindsig_keystore_q7933.cpp needs the same library, no new link needed.
 
 add_executable(tradep2p_blns7933_ntru_adapter_tests
     tests/blindsig_ntru_q7933_tests.cpp
@@ -30,3 +35,27 @@ target_compile_options(tradep2p_blns7933_ntru_adapter_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_ntru_adapter_tests
     COMMAND tradep2p_blns7933_ntru_adapter_tests)
+
+add_executable(tradep2p_blns7933_keystore_tests
+    tests/blindsig_keystore_q7933_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_keystore_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_keystore_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_keystore_tests
+    COMMAND tradep2p_blns7933_keystore_tests)
+
+add_executable(tradep2p_blns7933_ticket_store_tests
+    tests/blindsig_ticket_store_q7933_tests.cpp
+)
+target_link_libraries(tradep2p_blns7933_ticket_store_tests PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_options(tradep2p_blns7933_ticket_store_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
+add_test(NAME tradep2p_blns7933_ticket_store_tests
+    COMMAND tradep2p_blns7933_ticket_store_tests)

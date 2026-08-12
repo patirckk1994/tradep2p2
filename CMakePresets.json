@@ -8,7 +8,8 @@
       "binaryDir": "${sourceDir}/build-blns7933-root",
       "cacheVariables": {
         "TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL": "ON",
-        "CMAKE_PROJECT_INCLUDE": "${sourceDir}/cmake/BLNS7933Integration.cmake"
+        "CMAKE_PROJECT_INCLUDE": "${sourceDir}/cmake/BLNS7933Integration.cmake",
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
