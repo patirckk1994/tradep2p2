@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <span>
 #include <stdexcept>
 
 #include <unistd.h>
@@ -17,6 +18,7 @@ namespace tradep2p::blindsig {
 namespace {
 
 constexpr std::size_t kChunkPayloadSize = 65536;
+constexpr char kCredentialMuPrefix[] = "tradep2p-q7933-credential-v1:";
 
 std::string u16_array_to_hex(const std::array<std::uint16_t, kQ7933RingDegree>& v) {
     std::string out;
@@ -25,6 +27,17 @@ std::string u16_array_to_hex(const std::array<std::uint16_t, kQ7933RingDegree>& 
     for (auto x : v) {
         std::snprintf(buf, sizeof buf, "%04x", x);
         out += buf;
+    }
+    return out;
+}
+
+std::string bytes_to_hex(std::span<const std::uint8_t> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const auto byte : bytes) {
+        out.push_back(digits[(byte >> 4U) & 0x0fU]);
+        out.push_back(digits[byte & 0x0fU]);
     }
     return out;
 }
@@ -102,6 +115,31 @@ void Q7933BlindSigClientSession::on_info_response(const Q7933BlindSigInfoRespons
 }
 
 void Q7933BlindSigClientSession::start_request(std::string message) {
+    start_request_internal(std::move(message), false, RoomId{}, 0U, std::nullopt);
+}
+
+void Q7933BlindSigClientSession::start_credential_request(
+    const RoomId& completed_room_id, std::uint32_t credential_epoch) {
+    q7933_credential::CredentialPayload payload;
+    payload.version = q7933_credential::kCredentialVersion;
+    // issuer_scope=0 means "the q7933 signer whose t/B were obtained for
+    // this live mediator session". The present v1 substrate only carries a
+    // one-byte scope; do not pretend it is a globally unique issuer id.
+    payload.issuer_scope = 0U;
+    payload.epoch = credential_epoch;
+    payload.serial = q7933_credential::generate_serial();
+
+    const auto encoded = q7933_credential::encode_credential_for_blind(payload);
+    const std::string mu = std::string(kCredentialMuPrefix) + bytes_to_hex(encoded);
+    start_request_internal(mu, true, completed_room_id, credential_epoch, payload);
+}
+
+void Q7933BlindSigClientSession::start_request_internal(
+    std::string message,
+    bool credential_issuance,
+    RoomId issuance_room_id,
+    std::uint32_t credential_epoch,
+    std::optional<q7933_credential::CredentialPayload> credential_payload) {
     if (stage_.load() != Q7933BlindSigClientStage::kIdle) {
         throw std::logic_error(
             "q7933 blindsig client session: start_request() called outside kIdle");
@@ -115,6 +153,12 @@ void Q7933BlindSigClientSession::start_request(std::string message) {
         pending_ticket_id_.reset();
         last_error_.clear();
     }
+
+    credential_issuance_ = credential_issuance;
+    issuance_room_id_ = issuance_room_id;
+    credential_epoch_ = credential_epoch;
+    credential_payload_ = std::move(credential_payload);
+
     stage_.store(Q7933BlindSigClientStage::kBlindingAndProvingNizk1);
     worker_ = std::thread(&Q7933BlindSigClientSession::run_blind_and_prove_nizk1, this,
                           std::move(message));
@@ -150,8 +194,10 @@ void Q7933BlindSigClientSession::run_blind_and_prove_nizk1(std::string message) 
         pi1_path_ = pi1_path;
 
         Q7933BlindSigAssembledRequest assembled{};
-        assembled.c = json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("c"));
-        assembled.b = json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("b"));
+        assembled.c =
+            json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("c"));
+        assembled.b =
+            json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("b"));
         assembled.enc_a =
             json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("enc_a"));
         assembled.enc_pk =
@@ -164,6 +210,9 @@ void Q7933BlindSigClientSession::run_blind_and_prove_nizk1(std::string message) 
             json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("ct1_mu"));
         assembled.ct2_mu =
             json_to_array<std::uint16_t, kQ7933RingDegree>(blind_json.at("public").at("ct2_mu"));
+        assembled.credential_issuance = credential_issuance_;
+        assembled.issuance_room_id = issuance_room_id_;
+        assembled.credential_epoch = credential_epoch_;
         assembled.pi1_receipt = read_file_bytes(pi1_path);
 
         send_chunked(encode_q7933_blindsig_assembled_request(assembled));
@@ -175,8 +224,8 @@ void Q7933BlindSigClientSession::run_blind_and_prove_nizk1(std::string message) 
 
 void Q7933BlindSigClientSession::send_chunked(const std::vector<std::uint8_t>& assembled_bytes) {
     const auto total_length = static_cast<std::uint32_t>(assembled_bytes.size());
-    const std::uint32_t total_chunks =
-        static_cast<std::uint32_t>((assembled_bytes.size() + kChunkPayloadSize - 1) / kChunkPayloadSize);
+    const std::uint32_t total_chunks = static_cast<std::uint32_t>(
+        (assembled_bytes.size() + kChunkPayloadSize - 1U) / kChunkPayloadSize);
     for (std::uint32_t i = 0; i < total_chunks; ++i) {
         const std::size_t offset = static_cast<std::size_t>(i) * kChunkPayloadSize;
         const std::size_t length = std::min(kChunkPayloadSize, assembled_bytes.size() - offset);
@@ -251,7 +300,8 @@ void Q7933BlindSigClientSession::run_finalize_and_verify(Q7933BlindSigResponse r
         const std::string finalize_stdout = require_sidecar_stdout(finalize_result);
         const auto finalize_json = nlohmann::json::parse(finalize_stdout);
         if (!finalize_json.value("ok", false)) {
-            fail("user-finalize-prove-nizk2 failed: " + finalize_json.value("error", std::string("unknown")));
+            fail("user-finalize-prove-nizk2 failed: " +
+                 finalize_json.value("error", std::string("unknown")));
             return;
         }
 
@@ -275,7 +325,7 @@ void Q7933BlindSigClientSession::run_finalize_and_verify(Q7933BlindSigResponse r
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            credential_ = Q7933BlindSigCredential{rho_hex_, pi2_path, mu_};
+            credential_ = Q7933BlindSigCredential{rho_hex_, pi2_path, mu_, credential_payload_};
             pending_ticket_id_.reset();
         }
         stage_.store(Q7933BlindSigClientStage::kReady);
