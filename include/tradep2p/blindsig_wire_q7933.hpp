@@ -9,11 +9,19 @@
 // issuance right, but the credential's random serial and payload remain
 // inside `mu` and therefore hidden by the blind-signature protocol.
 //
+// A credential request carries the mediator-signed stage-4 completion
+// receipt plus a hybrid proof of possession of one party's per-room
+// ephemeral key, bound to the exact blinded target `c`. The client never
+// names Party A/B; the mediator derives that by verification against the two
+// public keys embedded in its own completion receipt. This remains usable
+// after the completed room has been pruned from live mediator state.
+//
 // `credential_issuance == false` preserves the raw experimental primitive
 // path used by research/demo callers. It receives no one-per-room guarantee
 // and must never be advertised as a replay-protected trade credential.
 
 #include "tradep2p/blindsig_wire.hpp"
+#include "tradep2p/protocol.hpp"
 
 #include <array>
 #include <cstddef>
@@ -42,13 +50,22 @@ struct Q7933BlindSigAssembledRequest {
     std::array<std::uint16_t, kQ7933RingDegree> ct1_mu{};
     std::array<std::uint16_t, kQ7933RingDegree> ct2_mu{};
 
-    // Clear authorization metadata for the credential layer. The client is
-    // NOT trusted to name its party slot; lobby.cpp derives Party A/B from
-    // the authenticated live room membership before constructing the
-    // server-side IssuanceContext.
+    // Clear authorization metadata for the credential layer. Room+epoch are
+    // not credential contents; they only identify which one-shot issuance
+    // right is being exercised. Party is deliberately absent.
     bool credential_issuance{false};
     std::array<std::uint8_t, 32> issuance_room_id{};
     std::uint32_t credential_epoch{0};
+
+    // Present only when credential_issuance=true. The receipt is the normal
+    // protocol ReceiptIssued encoding for the completed stage-4 receipt.
+    // The two signatures prove possession of whichever party's ephemeral
+    // key matches that receipt, over a domain-separated payload containing
+    // room, epoch, receipt hash and this request's exact `c`.
+    std::vector<std::uint8_t> issuance_completion_receipt;
+    std::array<std::uint8_t, kReceiptSignatureLength> issuance_authorization_signature{};
+    std::array<std::uint8_t, kReceiptSignatureLengthMlDsa65>
+        issuance_authorization_signature_mldsa65{};
 
     std::vector<std::uint8_t> pi1_receipt;
 };
