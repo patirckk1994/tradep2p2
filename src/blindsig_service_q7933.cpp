@@ -98,8 +98,7 @@ Q7933TicketPollResult Q7933BlindSigService::poll(const TicketId& ticket_id) cons
     try {
         const auto ticket = ticket_store_->find(ticket_id);
         if (!ticket.has_value()) {
-            result.response.status = Q7933BlindSigResponse::Status::Rejected;
-            result.response.reason = "unknown or already-consumed q7933 blind-signature ticket";
+            result.response = poll_error("unknown or expired q7933 blind-signature ticket");
             return result;
         }
 
