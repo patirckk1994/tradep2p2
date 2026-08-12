@@ -58,15 +58,20 @@ struct Signature {
 [[nodiscard]] std::unique_ptr<FalconTreeNode> build_signing_tree(
     const RingArithmetic& ring, const TrapdoorKey& key, const HighReal& target_sigma);
 
-// Deterministic point-in-the-ring hash of a message, playing the role of
-// falcon.pdf's HashToPoint(salt||m) (Algorithm 3) - NOT bit-identical to
-// FALCON's own SHAKE256-based construction, since this reference
-// substrate has no salt/domain-separation infrastructure of its own yet.
-// Sufficient for exercising and testing the algebraic sign/verify
-// relation; not a claim of matching FALCON's exact hash-to-point security
-// argument. Deterministic (no salt) - unlike real FALCON, repeated
-// Sign() calls on the same message currently produce signatures over the
-// SAME c, differing only in the randomized ffSampling draw.
+// Cryptographic deterministic point-in-the-ring hash used by the plain
+// message convenience wrapper. It absorbs `message` into SHAKE256,
+// consumes 16-bit big-endian words, rejects w >= 5*q, and reduces accepted
+// words modulo q until `degree` coefficients have been produced. The 5*q
+// cutoff contains exactly five complete residue classes, so the reduction
+// is unbiased; at the real q=7933, 5*q=39665 < 2^16.
+//
+// This intentionally still has NO per-signature salt/nonce field of its
+// own. Therefore repeated sign() calls on the same message target the same
+// c and differ only in ffSampling's randomized draw. That is a remaining
+// plain-wrapper deviation from real FALCON's salted HashToPoint, not a
+// weakness in the blind-signature path: a real blind signer never calls
+// this helper at all and instead receives an opaque blinded target `c`
+// which it signs through sign_target().
 [[nodiscard]] PolyQ hash_to_point(const RingArithmetic& ring, const std::string& message);
 
 // Produces a signature via ffSampling on the target this project's own
@@ -94,10 +99,7 @@ struct Signature {
     std::size_t max_attempts = 100U);
 
 // Plain (non-blind) convenience wrapper: signs hash_to_point(message)
-// via sign_target(). What every test/diagnostic in this reference
-// substrate has used so far, and still fine for exercising the
-// algebraic sign/verify relation in isolation - just not what a real
-// blind signer would ever call.
+// via sign_target().
 [[nodiscard]] Signature sign(
     const RingArithmetic& ring, const TrapdoorKey& key, const FalconTreeNode& tree,
     const std::string& message, const BigInt& norm_bound_squared, CryptoRng& rng,
