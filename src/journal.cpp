@@ -50,6 +50,7 @@ namespace {
 
 class Writer {
 public:
+    void reserve(std::size_t total_bytes) { out_.reserve(total_bytes); }
     void u8(std::uint8_t value) { out_.push_back(value); }
     void u16(std::uint16_t value) {
         out_.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
@@ -951,6 +952,20 @@ void Journal::checkpoint_mldsa65(const MlDsa65PrivateSeed& local_history_private
     const MlDsa65Signature signature = mldsa65_sign(key.get(), signed_bytes);
 
     Writer body_writer;
+    // Reserving the exact, statically-known total up front (2 + 8 + hash +
+    // 8 + signature) is what actually matters here - not just performance.
+    // Without it, GCC 15's -Wstringop-overflow static analysis mis-infers
+    // the vector's post-growth capacity through this many inlined
+    // push_back()s ahead of the bytes(hash) insert() below (a known GCC
+    // false-positive class for this exact push-then-bulk-insert shape),
+    // and reports (verified false) that a 6-byte region was overflowed by
+    // a real 32-byte write. A single reserve() gives the optimizer an
+    // exact, provable bound and removes the ambiguity outright, verified
+    // by rebuilding: the warning is gone with this present, and the
+    // resulting object code was already correct either way (insert()
+    // always reallocates/grows correctly on its own) - this is a
+    // diagnostic-clarity fix, not a correctness fix.
+    body_writer.reserve(2U + 8U + hash.size() + 8U + signature.size());
     body_writer.u16(kJournalCheckpointSuiteMlDsa65V1);
     body_writer.u64(index);
     body_writer.bytes(hash);
