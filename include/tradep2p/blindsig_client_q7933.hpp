@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace tradep2p::blindsig {
 
@@ -37,6 +38,19 @@ struct Q7933BlindSigCredential {
     std::optional<q7933_credential::CredentialPayload> credential_payload;
 };
 
+// Produced only after `c` exists, because the party proof must be bound to
+// the exact blinded target being authorized. DashboardClient supplies the
+// callback that has access to the completed room's receipt and private
+// ephemeral key; Q7933BlindSigClientSession never owns those keys itself.
+struct Q7933CredentialIssuanceAuthorization {
+    std::vector<std::uint8_t> completion_receipt;
+    std::array<std::uint8_t, kReceiptSignatureLength> signature{};
+    std::array<std::uint8_t, kReceiptSignatureLengthMlDsa65> signature_mldsa65{};
+};
+
+using Q7933CredentialAuthorizationProvider = std::function<Q7933CredentialIssuanceAuthorization(
+    const std::array<std::uint16_t, kQ7933RingDegree>& blinded_target)>;
+
 class Q7933BlindSigClientSession {
 public:
     Q7933BlindSigClientSession(
@@ -53,13 +67,15 @@ public:
     // Raw research primitive. No room/party issuance uniqueness is attached.
     void start_request(std::string message);
 
-    // Credential-layer path. Generates a fresh hidden 32-byte serial,
-    // constructs a domain-separated credential payload as the blinded `mu`,
-    // and sends room+epoch only as clear authorization metadata. The server
-    // derives the party slot from live room membership; the client never gets
-    // to assert Party A/B itself.
-    void start_credential_request(const RoomId& completed_room_id,
-                                  std::uint32_t credential_epoch = 0U);
+    // Credential-layer path. Generates a fresh hidden 32-byte serial and
+    // constructs the domain-separated credential payload used as blinded
+    // `mu`. `authorization_provider` is invoked later on the worker thread,
+    // after NIZK1's blinded target c has been computed; it must return the
+    // completed stage-4 receipt plus a hybrid party proof bound to that c.
+    void start_credential_request(
+        const RoomId& completed_room_id,
+        std::uint32_t credential_epoch,
+        Q7933CredentialAuthorizationProvider authorization_provider);
 
     void poll_ticket();
     void on_signer_response(const Q7933BlindSigResponse& response);
@@ -75,7 +91,8 @@ private:
         bool credential_issuance,
         RoomId issuance_room_id,
         std::uint32_t credential_epoch,
-        std::optional<q7933_credential::CredentialPayload> credential_payload);
+        std::optional<q7933_credential::CredentialPayload> credential_payload,
+        Q7933CredentialAuthorizationProvider authorization_provider);
     void run_blind_and_prove_nizk1(std::string message);
     void run_finalize_and_verify(Q7933BlindSigResponse response);
     void send_chunked(const std::vector<std::uint8_t>& assembled_bytes);
@@ -103,6 +120,7 @@ private:
     RoomId issuance_room_id_{};
     std::uint32_t credential_epoch_{0U};
     std::optional<q7933_credential::CredentialPayload> credential_payload_;
+    Q7933CredentialAuthorizationProvider credential_authorization_provider_;
 
     std::thread worker_;
 };
