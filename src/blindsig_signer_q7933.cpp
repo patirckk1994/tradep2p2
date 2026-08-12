@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <span>
