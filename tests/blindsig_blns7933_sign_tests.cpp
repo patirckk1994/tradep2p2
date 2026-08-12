@@ -10,6 +10,7 @@ namespace {
 using tradep2p::blns7933::BigInt;
 using tradep2p::blns7933::CryptoRng;
 using tradep2p::blns7933::HighReal;
+using tradep2p::blns7933::PolyQ;
 using tradep2p::blns7933::PublicKey;
 using tradep2p::blns7933::RingArithmetic;
 using tradep2p::blns7933::Signature;
@@ -99,6 +100,27 @@ void test_hash_to_point_is_deterministic() {
     require(c1 != c3, "hash_to_point must (almost certainly) differ for different messages");
 }
 
+void test_hash_to_point_matches_shake256_regression_vectors() {
+    // Independent SHAKE256 regression vectors for the exact extraction
+    // rule used by hash_to_point(): 16-bit big-endian draws, reject w>=5q,
+    // reduce mod q. The q=17 second vector intentionally needs more than
+    // the implementation's first 4096-byte prefix, so it also checks that
+    // the prefix-replay refill continues the SAME SHAKE stream rather than
+    // silently starting a different one.
+    const RingArithmetic toy_ring(4, 17);
+    require(tradep2p::blns7933::hash_to_point(toy_ring, "same message") ==
+                PolyQ({14, 11, 7, 5}),
+            "q=17 SHAKE256 hash_to_point regression vector changed");
+    require(tradep2p::blns7933::hash_to_point(toy_ring, "hello blns7933") ==
+                PolyQ({6, 0, 5, 6}),
+            "q=17 SHAKE256 continuation/refill regression vector changed");
+
+    const RingArithmetic real_q_ring(8, 7933);
+    require(tradep2p::blns7933::hash_to_point(real_q_ring, "hash-to-point regression") ==
+                PolyQ({6394, 155, 461, 5284, 514, 5774, 6722, 6157}),
+            "q=7933 SHAKE256 hash_to_point regression vector changed");
+}
+
 } // namespace
 
 int main() {
@@ -107,6 +129,7 @@ int main() {
         test_verify_rejects_wrong_message();
         test_verify_rejects_corrupted_signature();
         test_hash_to_point_is_deterministic();
+        test_hash_to_point_matches_shake256_regression_vectors();
         std::cout << "blindsig_blns7933_sign_tests: OK\n";
         return 0;
     } catch (const std::exception& e) {
