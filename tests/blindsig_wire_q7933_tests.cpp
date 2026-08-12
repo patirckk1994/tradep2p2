@@ -130,6 +130,8 @@ void test_raw_request_round_trip() {
     require(decoded.ct2_mu == request.ct2_mu, "q7933 request ct2_mu must round-trip");
     require(!decoded.credential_issuance, "raw request must remain raw");
     require(decoded.credential_epoch == 0U, "raw request must have zero epoch");
+    require(decoded.issuance_completion_receipt.empty(),
+            "raw request must not gain completion authorization");
     require(decoded.pi1_receipt == request.pi1_receipt, "q7933 request receipt must round-trip");
 }
 
@@ -140,12 +142,34 @@ void test_credential_request_round_trip() {
         request.issuance_room_id[i] = static_cast<std::uint8_t>(i + 1U);
     }
     request.credential_epoch = 42U;
+    request.issuance_completion_receipt = {0x10U, 0x20U, 0x30U, 0x40U};
+    request.issuance_authorization_signature.fill(0x44U);
+    request.issuance_authorization_signature_mldsa65.fill(0x55U);
+
     const auto decoded =
         decode_q7933_blindsig_assembled_request(encode_q7933_blindsig_assembled_request(request));
     require(decoded.credential_issuance, "credential request flag must round-trip");
     require(decoded.issuance_room_id == request.issuance_room_id,
             "credential issuance room must round-trip");
     require(decoded.credential_epoch == 42U, "credential epoch must round-trip");
+    require(decoded.issuance_completion_receipt == request.issuance_completion_receipt,
+            "credential completion receipt must round-trip");
+    require(decoded.issuance_authorization_signature == request.issuance_authorization_signature,
+            "credential Ed25519 authorization must round-trip");
+    require(decoded.issuance_authorization_signature_mldsa65 ==
+                request.issuance_authorization_signature_mldsa65,
+            "credential ML-DSA authorization must round-trip");
+    require(decoded.pi1_receipt == request.pi1_receipt,
+            "credential NIZK1 receipt must still round-trip");
+}
+
+void test_credential_request_requires_completion_receipt() {
+    auto request = sample_request();
+    request.credential_issuance = true;
+    request.issuance_room_id[0] = 1U;
+    require_throws<std::invalid_argument>(
+        [&] { (void)encode_q7933_blindsig_assembled_request(request); },
+        "credential request without completion receipt must be rejected");
 }
 
 void test_raw_request_rejects_credential_metadata() {
@@ -186,6 +210,7 @@ int main() {
         test_response_decode_rejects_invalid_status();
         test_raw_request_round_trip();
         test_credential_request_round_trip();
+        test_credential_request_requires_completion_receipt();
         test_raw_request_rejects_credential_metadata();
         test_ticket_poll_round_trip();
         test_decode_rejects_trailing_bytes();
