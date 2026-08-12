@@ -1,0 +1,42 @@
+[package]
+name = "methods"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+risc0-build = { version = "^3.0.6" }
+
+[dependencies]
+# Host-side only (used by examples/cycle_count.rs and
+# examples/compute_blinded_target.rs). The guest crate itself never
+# depends on these packages directly through THIS Cargo.toml; it has its
+# own separate dependency on prover-core, compiled by risc0-build as a
+# RISC-V target.
+# Default features (external r0vm subprocess via IPC, real STARK proving
+# on CPU) - deliberately NOT "prove"+"cuda". A real attempt was made
+# mid-session to switch to the in-process LocalProver with CUDA (a real
+# NVIDIA GPU is present: RTX 5070, sm_120/Blackwell), including installing
+# a side-by-side CUDA 12.8 toolkit (the only CUDA line new enough for
+# sm_120 but old enough for risc0-sys 1.5.0's CUDA kernel headers) and
+# patching a real glibc/CUDA math_functions.h noexcept conflict - but
+# compiling RISC0's own CUDA circuit kernels (risc0-sys,
+# risc0-circuit-{rv32im,keccak,recursion}-sys) crashed this machine's RAM
+# twice (once at default cargo parallelism, once even at -j 2). Reverted
+# to the external-r0vm CPU path, which already works (confirmed: ~20 of
+# 24 cores, ~2GB RAM, no crash - just slow, real numbers recorded in
+# BLIND/q7933-reference/README.md once available).
+risc0-zkvm = { version = "^3.0.6" }
+prover-core = { path = "../prover-core" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+# Live prove progress (prove_nizk1.rs/prove_nizk2.rs): the actual proving
+# work happens inside the external r0vm subprocess (default features =
+# IPC, not the in-process LocalProver), which has its own
+# tracing_subscriber reading RUST_LOG from the environment it inherits -
+# confirmed by inspecting the r0vm binary directly (it links
+# tracing-subscriber's EnvFilter::from_default_env), not assumed. Same
+# tracing-subscriber setup as the q=12289 sibling's own prover/src/main.rs.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.risc0]
+methods = ["guest"]

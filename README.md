@@ -97,6 +97,34 @@ It prints the two dashboard URLs (normally `http://127.0.0.1:8081` and
 Both scripts generate a throwaway TLS identity under `test-output/` and clean
 up their own processes on exit (`Ctrl-C` or normal completion).
 
+## 🆕 Post-quantum blind signatures (q7933 experimental)
+
+**Blind-signed credentials are now implemented** using the q7933 trapdoor-sampler scheme
+(Schnorr-based, lattice-resistant). This enables unlinkable commitment tokens that stay
+blind to the mediator even during approval, addressing the aggregate-disclosure use case
+in `specs.txt` §9.3.
+
+The q7933 flow is **experimental and unreviewed** — it is gated behind 
+`TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL` at build time and requires an explicit environment 
+variable at runtime. It coexists with the default q12289 FALCON path and does not change 
+the core trading protocol.
+
+See [`BLIND/`](BLIND/) for the full cryptographic audit trail, research status, and
+deployment instructions. The scheme is based on research documented in related publications 
+(see `../p2p/` directory for reference materials). For practical examples, run:
+
+```sh
+TRADEP2P_BLINDSIG_Q7933_PROVER_PATH=./blindsig-prover-q7933/target/release/blindsig-prover-q7933 \
+  ./scripts/q7933_blindsig_two_client_demo.sh
+```
+
+**Caveats:**
+- Single-use credentials; no cross-room replay protection yet — each room commitment is 
+  independently signed.
+- Ticket storage and approval flow are not hardened for production — this is a research 
+  implementation, not a security tier.
+- The external prover binary is a trust boundary — only invoke with binaries you control.
+
 ## Core model
 
 Each published offer is also a waiting lobby. It records only:
@@ -927,10 +955,12 @@ directory.
   loses that room's signing key (already-issued receipts remain valid and
   disclosable regardless, since verifying them needs only the embedded
   public key);
-- unlinkable aggregate disclosure (blind-signed completion tokens) is
-  documented future work, not implemented — no pairing-friendly curve
-  support in this dependency set, and naive blind Schnorr over Ed25519 is
-  unsafe under concurrent sessions (`specs.txt` §9.3);
+- unlinkable aggregate disclosure (blind-signed completion tokens) is now 
+  **experimentally implemented** as the q7933 trapdoor-sampler scheme — see the 
+  [q7933 section](#-post-quantum-blind-signatures-q7933-experimental) above. The q12289 
+  FALCON path and other alternatives remain as documented design options. The q7933 
+  implementation is unreviewed and gated behind `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL`;
+
 - bond-anchored Sybil resistance is documented as an option with its costs
   stated, not implemented — this architecture does not claim Sybil
   resistance anywhere, and says so plainly (`specs.txt` §12);

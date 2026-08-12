@@ -1,0 +1,19 @@
+[package]
+name = "prover-core"
+version = "0.1.0"
+edition = "2021"
+
+# This crate deliberately has NO dependency on risc0-zkvm. It is compiled
+# for two different targets by two different callers - the RISC0 guest
+# (methods/guest, riscv32im-risc0-zkvm-elf) and the native host CLI
+# (prover, the machine's own target) - and holding the SAME compiled
+# logic for both is the entire point: what the client computes and what
+# the guest later re-derives and checks must be the identical function,
+# not two hand-synced copies. See lib.rs's module comment.
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+rand = "0.8"

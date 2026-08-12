@@ -689,8 +689,13 @@ signatures**: the mediator signs a completion token per room without seeing
 which token it signed, and the holder later proves possession of N tokens
 without revealing which rooms produced them.
 
-**This is explicitly not implemented, and is not scheduled ahead of the
-mechanisms in §7-9.2.** It remains a documented future direction:
+**This credential/reputation LAYER — the token↔room mapping, epoch
+rotation, and aggregate disclosure described above — is explicitly not
+implemented, and is not scheduled ahead of the mechanisms in §7-9.2.** It
+remains a documented future direction. (An experimental, off-by-default
+implementation of the underlying blind-signature PRIMITIVE this layer
+would be built on — blind a message, get it countersigned, finalize,
+verify — now exists separately from this layer; see §9.3a.)
 
 - Naive blind Schnorr over Ed25519 is unsafe under concurrent signing
   sessions (the ROS attack). RSA blind signatures (RFC 9474) are the sound,
@@ -714,6 +719,73 @@ mechanisms in §7-9.2.** It remains a documented future direction:
 
 ---
 
+### 9.3a Blind-signature PRIMITIVE — experimental, unreviewed (implemented)
+
+An experimental, off-by-default implementation of a post-quantum
+lattice-based blind-signature **primitive** now exists
+(`blindsig_*.hpp/cpp`, `blindsig-prover/`), narrower than and separate
+from the §9.3 credential layer above: §9.3's token↔room mapping, epoch
+rotation, and aggregate disclosure remain unscheduled. This primitive
+covers only what sits underneath such a layer — a client blinds a
+message, a mediator blindly signs it, the client finalizes, and anyone
+can verify the result — using the construction cited in §11 (Beullens,
+Lyubashevsky, Nguyen & Seiler, ePrint 2023/077) over real FALCON-512
+trapdoor sampling. Two zero-knowledge proofs, built as RISC0 zkVM STARK
+proofs and run client-side: NIZK1 proves the blinding relation and the
+"encryption to the sky" extractability property without revealing
+`(ρ, r, s)`; NIZK2, run after the mediator's countersignature comes back,
+proves the final signature relation. Both take roughly 100-200 seconds
+on ordinary hardware.
+
+**The cost is asymmetric by design.** All slow proving (NIZK1 and NIZK2)
+happens entirely on the client's own machine. The mediator's own
+per-request cost is fast — one STARK receipt verification plus one
+`Zf(sign_dyn)` call — so a signer is never the bottleneck and does not
+need to be provisioned for proving-grade load.
+
+**Every friction layer below exists on purpose, specifically because this
+is unreviewed cryptography, and none of them should be relaxed casually:**
+
+- Compile-time gate `TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL` (default
+  OFF) — this project's first compile-time option. Confirmed via
+  `nm`/`strings` that a default build carries zero `blindsig`/`falcon`/
+  `nlohmann` symbols anywhere; an operator who never opts in is
+  unaffected by this feature's dependency surface or its new
+  subprocess-spawning code path, not merely by a disabled switch.
+- Runtime gate `TRADEP2P_BLINDSIG_ENABLE` plus an interactive, no-echo
+  passphrase prompt at mediator startup — deliberately not an env var or
+  CLI argument, and deliberately incompatible with fully unattended
+  restarts, so enabling this is always a conscious per-instance decision.
+- A sidecar process, not FFI (`blindsig-prover`, invoked via
+  `posix_spawn`, not `fork()+exec()` — the mediator is multi-threaded and
+  a bare `fork()` risks deadlock if another thread holds a malloc lock at
+  fork time) — keeps the zkVM proving toolchain's entire dependency
+  surface outside the always-compiled C++ binary and its build.
+- A stricter key-custody tier (`blindsig_keystore.hpp/cpp`) than this
+  project's existing `keystore.hpp` pattern: Argon2id + ChaCha20-Poly1305
+  AEAD, no create-if-missing path. A leaked or broken trapdoor here lets
+  an attacker forge arbitrary blind signatures, so keygen is a deliberate,
+  explicit, one-time operator action (`blindsig-keygen`), not something
+  that auto-provisions to keep a service alive across restarts.
+- A small, defensive, non-blocking-at-capacity signer queue (default 8
+  in flight, replies `Busy` rather than blocking past that) — defensive
+  because this is the first code path in this project's history that
+  shells out to an external process at all, not because any individual
+  signing job is slow on the mediator's own side.
+
+**Status: implemented, but NOT independently reviewed.** The
+QRL-adjacent cryptographer review referenced in §11 was still in flight,
+not complete, when this was wired in — see §11's own closing paragraph
+for the reasoning behind proceeding ahead of that review finishing. One
+rule is non-negotiable and does not change because this shipped: no UI
+or API control may expose a "blind signature" action that skips the
+NIZK1/NIZK2 zero-knowledge layer. The raw algebraic blind/sign/unblind
+step alone reveals `(ρ, r, s)` in the clear and has zero blindness —
+anything less than the full NIZK1+NIZK2 path must never be labeled or
+exposed as this feature.
+
+---
+
 ## 10. Implementation status
 
 | # | Layer | Status | Files |
@@ -728,6 +800,7 @@ mechanisms in §7-9.2.** It remains a documented future direction:
 | 7 | Service-scoped login | **Implemented** | `login.hpp/cpp`, `http_webclient.cpp` |
 | 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
 | 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
+| 8c | Blind-signature PRIMITIVE, experimental (§9.3a) | **Implemented, off by default** (compile-time AND runtime gated), not independently reviewed | `blindsig_*.hpp/cpp`, `blindsig-prover/` |
 | 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
 | — | Post-quantum migration (§11) | **Implemented** — TLS hybrid key exchange, TLS server-certificate signatures (ML-DSA-65), receipts/disclosure/ephemeral messages (mandatory Ed25519+ML-DSA-65 hybrid), login/journal/keystore (additive ML-DSA-65-default suite); only §9.3's blind signatures remain unimplemented (candidate constructions now exist but lack maturity/review — see §9.3) | `secure_channel.cpp`, `receipt.hpp/cpp`, `disclosure.hpp/cpp`, `ephemeral.hpp/cpp`, `login.hpp/cpp`, `journal.hpp/cpp`, `keystore.hpp/cpp`, `setup_mediator.sh`, `setup_registry.sh` |
 
@@ -900,11 +973,23 @@ looked sound for a year. Implementing either construction here would mean
 hand-writing novel constant-time lattice arithmetic with no reference
 vectors to test against, for a system that mediates real settlement
 flows — a correctness/side-channel risk this project is not staffed to
-carry without independent cryptographic review. **Still not implemented,
-still not scheduled**; revisit only once one of: a NIST-adjacent
-standardization track opens for blind signatures, the Beullens et al.
-line accumulates several more years without a break the way ML-KEM/ML-DSA
-have, or a vetted, testable open-source implementation appears.
+carry without independent cryptographic review. That risk assessment has
+not changed, and is not being retracted here.
+
+**What changed is the decision about when to act on it.** Rather than
+wait for a NIST-adjacent standardization track to open, the Beullens et
+al. line to accumulate several more years without a break the way
+ML-KEM/ML-DSA have, or a vetted third-party implementation to appear,
+this project built the Beullens et al. primitive itself, ahead of
+independent review, as a separate, off-by-default, explicitly-labeled
+experimental feature (`blindsig_*.hpp/cpp`, §9.3a) — not the §9.3
+credential layer, just the primitive underneath it. This was a deliberate,
+informed call, made with the correctness/side-channel risk described
+above still open, not evidence that independent review turned out to be
+unnecessary. §9.3a lays out the specific friction (compile-time gate,
+runtime gate, sidecar isolation, stricter key custody, defensive queueing)
+that exists precisely because that review hasn't happened yet, and is not
+to be relaxed until it has.
 
 The asymmetry that lowers this risk's urgency regardless of which
 construction (if any) is eventually chosen: a broken blind-signature

@@ -192,6 +192,29 @@ enum class MessageType : std::uint16_t {
     // instead of open ones.
     GetCandles = 39,
     CandleData = 40,
+    // Experimental post-quantum blind-signature primitive (specs.txt
+    // SS9.3a) - compiled in only under TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // (off by default; this repo's first compile-time feature gate). These
+    // four tags are reserved unconditionally here (so the enum's numbering
+    // never depends on build flags), but the message structs and codec live
+    // entirely in the gated blindsig_wire.hpp/cpp, not here - a build
+    // without the flag has no dispatch() case for these at all, and
+    // lobby.cpp's existing default case already rejects unhandled types
+    // safely. See blindsig_wire.hpp for the actual struct definitions.
+    BlindSigInfoRequest = 41,
+    BlindSigInfoResponse = 42,
+    BlindSigRequestChunk = 43,
+    BlindSigResponse = 44,
+    // Parallel q=7933 experimental blind-signature path. Like the q12289
+    // tags above, these numeric values are reserved unconditionally so
+    // frame numbering never depends on whether TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    // was defined for a particular build. See blindsig_wire_q7933.hpp for
+    // the actual structs/codecs.
+    Q7933BlindSigInfoRequest = 45,
+    Q7933BlindSigInfoResponse = 46,
+    Q7933BlindSigRequestChunk = 47,
+    Q7933BlindSigResponse = 48,
+    Q7933BlindSigTicketPoll = 49,
 };
 
 struct Frame {

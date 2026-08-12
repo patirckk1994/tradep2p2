@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "blns7933-root",
+      "displayName": "BLNS7933 whole-repo integration",
+      "description": "Build the full experimental blind-signature tree plus the isolated q=7933 reference substrate and its host-side integration adapters without replacing the existing q=12289 signer.",
+      "binaryDir": "${sourceDir}/build-blns7933-root",
+      "cacheVariables": {
+        "TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL": "ON",
+        "CMAKE_PROJECT_INCLUDE": "${sourceDir}/cmake/BLNS7933Integration.cmake",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "blns7933-root",
+      "configurePreset": "blns7933-root"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "blns7933-root",
+      "configurePreset": "blns7933-root",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

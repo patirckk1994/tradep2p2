@@ -7,6 +7,10 @@
 #include "tradep2p/recognition.hpp"
 #include "tradep2p/secure_channel.hpp"
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+#include "tradep2p/blindsig_client_q7933.hpp"
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -272,6 +276,15 @@ public:
     [[nodiscard]] std::string candles_json(const std::string& asset_a,
                                            const std::string& asset_b) const;
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    void enable_q7933_blindsig(std::string prover_path);
+    void request_q7933_blindsig_info();
+    void start_q7933_blindsig_request(const std::string& message);
+    void start_q7933_blindsig_trade_request(const std::string& room_text);
+    void poll_q7933_blindsig_ticket();
+    [[nodiscard]] std::string q7933_blindsig_state_json() const;
+#endif
+
 private:
     void enqueue(MessageType type,
                  std::vector<std::uint8_t> payload,
@@ -361,6 +374,10 @@ private:
     std::optional<Ed25519PublicKey> mediator_receipt_key_;
     std::optional<MlDsa65PublicKey> mediator_receipt_key_mldsa65_;
     std::map<std::string, std::vector<IssuedReceipt>> room_receipts_;
+
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+    std::optional<tradep2p::blindsig::Q7933BlindSigClientSession> q7933_blindsig_session_;
+#endif
 
     std::mutex queue_mutex_;
     std::deque<OutgoingFrame> outgoing_;

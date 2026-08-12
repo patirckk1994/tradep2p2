@@ -223,6 +223,13 @@ std::uint32_t parse_u32(const std::string& value, const char* name) {
     return static_cast<std::uint32_t>(parsed);
 }
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+std::string env_or_empty(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+}
+#endif
+
 std::string required_param(const httplib::Request& request,
                            const char* name) {
     if (!request.has_param(name)) {
@@ -409,11 +416,38 @@ button.copy{padding:2px 7px;font-size:.8rem;background:transparent;border-color:
             per-mediator alone - your reputation follows you everywhere, and so does the
             linkability.</span> Requires the checkbox above.</span>
           </label>
-          <label class="span2 tier-row tier-disabled">
-            <input type="checkbox" disabled>
-            <span><b>Blind-signature unlinkable credentials</b> - not implemented. See
-            specs.txt SS9.3 for status and why.</span>
-          </label>
+          <div class="span2 tier-row tier-disabled">
+            <span class="muted">&#9432;</span>
+            <span><b>Blind-signature unlinkable credentials</b> live in the dedicated q7933 panel
+            below and are not controlled by this tier section. Start this dashboard process with
+            <code>TRADEP2P_BLINDSIG_Q7933_PROVER_PATH</code> to enable it. See specs.txt SS9.3 for
+            caveats.</span>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>// q7933 blind-signature credential</h2>
+        <p id="q7933-blindsig-disabled-notice" class="muted">This dashboard's local q7933 prover is not enabled. Start it with <code>TRADEP2P_BLINDSIG_Q7933_PROVER_PATH</code> pointing at a local <code>blindsig-prover-q7933</code> binary.</p>
+        <div id="q7933-blindsig-panel-body" style="display:none">
+          <div id="q7933-blindsig-status" class="muted">loading&hellip;</div>
+          <div class="actions">
+            <button type="button" id="q7933-blindsig-fetch-info">Fetch mediator q7933 info</button>
+            <button type="button" id="q7933-blindsig-poll">Poll ticket</button>
+          </div>
+          <form id="q7933-blindsig-form" class="form-grid" style="margin-top:10px">
+            <label class="span2">Message to blind-sign
+              <input name="q7933_blindsig_message" placeholder="credential message" required>
+            </label>
+            <label class="span2">Or blind-sign a trade room commitment (room id)
+              <input id="q7933_blindsig_room_id" placeholder="room id hex">
+            </label>
+            <div class="actions span2">
+              <button type="submit" class="primary">Request q7933 credential</button>
+              <button type="button" id="q7933-blindsig-request-room">Request from room commitment</button>
+              <button type="button" id="q7933-blindsig-save-room">Save room locally</button>
+            </div>
+          </form>
+          <div id="q7933-blindsig-saved" class="muted" style="margin-top:10px">No saved trade room ids yet.</div>
         </div>
       </section>
       <section class="panel">
@@ -539,6 +573,19 @@ document.getElementById('ks-rotate').onclick=async()=>{try{const d=Object.fromEn
 document.getElementById('ks-destroy').onclick=async()=>{try{const d=Object.fromEntries(new FormData(document.getElementById('keystore-form')));if(!confirm('Destroy keystore at '+d.ks_path+'? This cannot be undone.'))return;await post('/api/identity/destroy',{path:d.ks_path});notice('keystore destroyed');refreshIdentity();refreshHistory()}catch(e){notice(e.message,true)}};
 document.getElementById('note-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));await post('/api/history/note',{fingerprint:d.note_fp,text:d.note_text});notice('note added');refreshHistory()}catch(err){notice(err.message,true)}};
 document.getElementById('refresh-history').onclick=()=>refreshHistory();
+async function refreshQ7933Blindsig(){try{const r=await fetch('/api/blindsig-q7933/state',{cache:'no-store'});const s=await r.json();const dis=document.getElementById('q7933-blindsig-disabled-notice');const body=document.getElementById('q7933-blindsig-panel-body');if(!s.enabled){dis.style.display='';body.style.display='none';return}dis.style.display='none';body.style.display='';let html='stage: '+esc(s.stage||'idle');if(s.error)html+='<br><span class="error">error: '+esc(s.error)+'</span>';if(s.ticket_id)html+='<br>pending ticket: <span class="mono-break">'+esc(s.ticket_id)+'</span>';if(s.credential)html+='<br>credential ready - rho: '+esc(s.credential.rho_hex)+'<br>message: "'+esc(s.credential.mu)+'"<br>proof file: '+esc(s.credential.pi2_path);document.getElementById('q7933-blindsig-status').innerHTML=html}catch(e){document.getElementById('q7933-blindsig-status').textContent='q7933 blind-signature status error: '+e.message}}
+document.getElementById('q7933-blindsig-fetch-info').onclick=async()=>{try{await post('/api/blindsig-q7933/info');notice('requested q7933 blind-signature info from mediator');refreshQ7933Blindsig()}catch(e){notice(e.message,true)}};
+document.getElementById('q7933-blindsig-poll').onclick=async()=>{try{await post('/api/blindsig-q7933/poll');notice('q7933 blind-signature poll queued');refreshQ7933Blindsig()}catch(e){notice(e.message,true)}};
+document.getElementById('q7933-blindsig-form').onsubmit=async(e)=>{e.preventDefault();try{const d=Object.fromEntries(new FormData(e.target));if(!d.q7933_blindsig_message)throw new Error('message required');await post('/api/blindsig-q7933/request',{message:d.q7933_blindsig_message});notice('q7933 blind-signature request submitted - proving NIZK1 in the background');refreshQ7933Blindsig()}catch(err){notice(err.message,true)}};
+const Q7933_SAVED_KEY='tradep2p.q7933.savedRooms.v1';
+function loadSavedQ7933Rooms(){try{const raw=localStorage.getItem(Q7933_SAVED_KEY);if(!raw)return[];const parsed=JSON.parse(raw);return Array.isArray(parsed)?parsed.filter(x=>x&&typeof x.room_id==='string'&&typeof x.saved_at==='number'):[]}catch(_){return[]}}
+function saveSavedQ7933Rooms(items){localStorage.setItem(Q7933_SAVED_KEY,JSON.stringify(items.slice(0,24)))}
+function renderSavedQ7933Rooms(){const items=loadSavedQ7933Rooms();const el=document.getElementById('q7933-blindsig-saved');if(!items.length){el.innerHTML='No saved trade room ids yet.';return}el.innerHTML=items.map((x,i)=>`<div style="margin:4px 0"><span class="mono-break">${esc(x.room_id)}</span> <span class="muted">(${new Date(x.saved_at*1000).toLocaleString()})</span> <button type="button" data-q7933-use="${i}">use</button> <button type="button" data-q7933-del="${i}">remove</button></div>`).join('');el.querySelectorAll('[data-q7933-use]').forEach(b=>b.onclick=()=>{const idx=Number(b.dataset.q7933Use);const picked=loadSavedQ7933Rooms()[idx];if(picked)document.getElementById('q7933_blindsig_room_id').value=picked.room_id});el.querySelectorAll('[data-q7933-del]').forEach(b=>b.onclick=()=>{const idx=Number(b.dataset.q7933Del);const itemsNow=loadSavedQ7933Rooms();itemsNow.splice(idx,1);saveSavedQ7933Rooms(itemsNow);renderSavedQ7933Rooms()})}
+function saveCurrentQ7933Room(){const room=document.getElementById('q7933_blindsig_room_id').value.trim();if(!room)throw new Error('room id required');const items=loadSavedQ7933Rooms().filter(x=>x.room_id!==room);items.unshift({room_id:room,saved_at:Math.floor(Date.now()/1000)});saveSavedQ7933Rooms(items);renderSavedQ7933Rooms()}
+document.getElementById('q7933-blindsig-save-room').onclick=()=>{try{saveCurrentQ7933Room();notice('saved room id locally')}catch(e){notice(e.message,true)}};
+document.getElementById('q7933-blindsig-request-room').onclick=async()=>{try{saveCurrentQ7933Room();const room=document.getElementById('q7933_blindsig_room_id').value.trim();await post('/api/blindsig-q7933/request-room',{room_id:room});notice('q7933 trade commitment request submitted - proving NIZK1 in the background');refreshQ7933Blindsig()}catch(e){notice(e.message,true)}};
+renderSavedQ7933Rooms();
+refreshQ7933Blindsig();setInterval(refreshQ7933Blindsig,2000);
 refreshClient();refreshServer();refreshIdentity();refreshHistory();setInterval(refreshClient,1000);setInterval(refreshServer,1500);setInterval(refreshIdentity,2000);setInterval(refreshHistory,2000);
 </script>
 </body>
@@ -743,6 +790,13 @@ int main(int argc, char** argv) {
                         ? tradep2p::LocalOutcome::Successful
                         : tradep2p::LocalOutcome::Incomplete);
             });
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+        if (const std::string prover_path = env_or_empty("TRADEP2P_BLINDSIG_Q7933_PROVER_PATH");
+            !prover_path.empty()) {
+            client.enable_q7933_blindsig(prover_path);
+            std::cout << "Q7933 blind-signature client enabled - EXPERIMENTAL, UNREVIEWED cryptography.\n";
+        }
+#endif
         client.start();
 
         httplib::Server server;
@@ -794,6 +848,22 @@ int main(int argc, char** argv) {
                        response.set_header("Cache-Control", "no-store");
                        response.set_content(read_server_state(server_state_file),
                                             "application/json; charset=utf-8");
+                   });
+
+        server.Get("/api/blindsig-q7933/state",
+                   [&](const httplib::Request& request, httplib::Response& response) {
+                      if (!host_allowed(request)) {
+                          response.status = 403;
+                          return;
+                      }
+                      response.set_header("Cache-Control", "no-store");
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+                      response.set_content(client.q7933_blindsig_state_json(),
+                                           "application/json; charset=utf-8");
+#else
+                      response.set_content("{\"enabled\":false}",
+                                           "application/json; charset=utf-8");
+#endif
                    });
 
         const auto authorized = [&](const httplib::Request& request) {
@@ -869,6 +939,40 @@ int main(int argc, char** argv) {
                             throw std::invalid_argument("unknown recognition suite: " + suite);
                         }
                         client.recognize(required_param(request, "room_id"), suite_id);
+                    }));
+
+        server.Post("/api/blindsig-q7933/info", action([&](const httplib::Request&) {
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+                        client.request_q7933_blindsig_info();
+#else
+                        throw std::invalid_argument("q7933 blind-signature support is not compiled in");
+#endif
+                    }));
+
+        server.Post("/api/blindsig-q7933/request", action([&](const httplib::Request& request) {
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+                        client.start_q7933_blindsig_request(required_param(request, "message"));
+#else
+                        (void)request;
+                        throw std::invalid_argument("q7933 blind-signature support is not compiled in");
+#endif
+                    }));
+
+        server.Post("/api/blindsig-q7933/request-room", action([&](const httplib::Request& request) {
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+                        client.start_q7933_blindsig_trade_request(required_param(request, "room_id"));
+#else
+                        (void)request;
+                        throw std::invalid_argument("q7933 blind-signature support is not compiled in");
+#endif
+                    }));
+
+        server.Post("/api/blindsig-q7933/poll", action([&](const httplib::Request&) {
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+                        client.poll_q7933_blindsig_ticket();
+#else
+                        throw std::invalid_argument("q7933 blind-signature support is not compiled in");
+#endif
                     }));
 
         server.Get("/api/identity/state",
