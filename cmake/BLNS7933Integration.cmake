@@ -82,13 +82,14 @@ target_compile_options(tradep2p_blns7933_wire_tests PRIVATE
 add_test(NAME tradep2p_blns7933_wire_tests
     COMMAND tradep2p_blns7933_wire_tests)
 
-# Phase 3 compile gate. The signer calls the existing blindsig subprocess
-# layer and therefore does not belong inside the isolated math archive. This
-# OBJECT target gives us an explicit cheap compile target even before running
-# a whole mediator build.
+# Phase 3 compile gate. The verifier/service call the existing blindsig
+# subprocess layer and therefore do not belong inside the isolated math
+# archive. This OBJECT target gives us an explicit cheap compile target even
+# before running a whole mediator build.
 add_library(tradep2p_blns7933_phase3_compile OBJECT
     src/blindsig_wire_q7933.cpp
     src/blindsig_signer_q7933.cpp
+    src/blindsig_service_q7933.cpp
 )
 target_include_directories(tradep2p_blns7933_phase3_compile PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -114,6 +115,7 @@ function(tradep2p_attach_blns7933_host_integration)
     target_sources(tradep2p PRIVATE
         src/blindsig_wire_q7933.cpp
         src/blindsig_signer_q7933.cpp
+        src/blindsig_service_q7933.cpp
     )
     target_link_libraries(tradep2p PRIVATE tradep2p_blns7933_reference)
     target_compile_definitions(tradep2p PUBLIC TRADEP2P_ENABLE_BLNS7933_INTEGRATION=1)
