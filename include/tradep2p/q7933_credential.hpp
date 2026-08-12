@@ -1,7 +1,7 @@
 #pragma once
 
 // Credential-layer semantics for q7933 blind-signature primitive.
-// 
+//
 // This module adds the missing credential-layer structures described in
 // specs.txt §9.3 on top of the existing §9.3a blind-signature primitive:
 //
@@ -32,63 +32,31 @@
 
 namespace tradep2p::q7933_credential {
 
-// Credential versioning for forward compatibility.
-constexpr std::uint8_t kCredentialVersion = 1;
+constexpr std::uint8_t kCredentialVersion = 1U;
+// Epoch rotation/pruning policy is intentionally not implemented yet. Until
+// it is, accepting an arbitrary client-chosen epoch would let one completed
+// room mint unlimited credentials simply by incrementing the epoch. V1 is
+// therefore pinned to exactly epoch zero; future rotation must change the
+// server policy deliberately rather than treating this field as free input.
+constexpr std::uint32_t kCredentialEpochV1 = 0U;
 
-// The hidden credential serial: 32 bytes of cryptographically random data.
-// Generated client-side, never revealed to mediator (included in blinded
-// commitment), included in nullifier derivation and presentaton binding.
 using CredentialSerial = std::array<std::uint8_t, 32>;
 
-// Issuance context identifier: uniquely identifies which room/party/epoch
-// combination this credential can be issued for. Stored by the mediator
-// to enforce the one-per-context uniqueness constraint.
-//
-// Versioned and length-prefixed to support future credential types.
 struct IssuanceContext {
-    std::uint8_t version;
-    // Identifies the issuer's public key (implicit in single-signer mediator model).
-    std::uint8_t issuer_scope;
-    // Credential epoch: allows rotating to new credentials across time periods.
-    std::uint32_t epoch;
-    // Room this credential can be issued for (32 bytes).
-    std::array<std::uint8_t, 32> room_id;
-    // Participant's slot in the room (A or B, 0 or 1).
-    std::uint8_t party;
+    std::uint8_t version{kCredentialVersion};
+    std::uint8_t issuer_scope{0U};
+    std::uint32_t epoch{kCredentialEpochV1};
+    std::array<std::uint8_t, 32> room_id{};
+    std::uint8_t party{0U};
 
     [[nodiscard]] std::vector<std::uint8_t> encode() const;
     [[nodiscard]] static IssuanceContext decode(std::span<const std::uint8_t> bytes);
 };
 
-// Derives a domain-separated nullifier from the hidden serial and
-// presentation scope. The nullifier is stable and recomputable ONLY within
-// a specific presentation scope (room_id + verifier/counterparty identity +
-// epoch). Different scopes produce different nullifiers, preventing both
-// cross-room replay and double-counting within the same room.
-//
-// Nullifier = H(
-//   "TRADEP2P-Q7933-CREDENTIAL-NULLIFIER-v1" ||
-//   issuer_scope ||
-//   epoch ||
-//   presentation_scope ||
-//   serial
-// )
-//
-// Where presentation_scope typically includes:
-//   - current room_id
-//   - intended verifier/counterparty ephemeral key (if available)
-//   - fresh challenge (if implemented)
-//
-// The empty presentation_scope variant is defined for testing/default cases
-// where a verifier is not yet specified.
 using Nullifier = std::array<std::uint8_t, 32>;
 
-// Generate a random credential serial.
 [[nodiscard]] CredentialSerial generate_serial();
 
-// Derive a nullifier from the serial, issuer scope, epoch, and
-// presentation scope. Supports both a full scope (room + verifier) and
-// an empty scope (testing/generation phase).
 [[nodiscard]] Nullifier derive_nullifier(
     const CredentialSerial& serial,
     std::uint8_t issuer_scope,
@@ -97,23 +65,17 @@ using Nullifier = std::array<std::uint8_t, 32>;
 
 [[nodiscard]] Nullifier derive_nullifier_empty();
 
-// Credential payload structure (client-side internal representation).
-// Versioned and length-prefixed for serialization.
 struct CredentialPayload {
-    std::uint8_t version;
-    std::uint8_t issuer_scope;
-    std::uint32_t epoch;
-    CredentialSerial serial;
-    // Additional fields for future extensions (marked as reserved).
+    std::uint8_t version{kCredentialVersion};
+    std::uint8_t issuer_scope{0U};
+    std::uint32_t epoch{kCredentialEpochV1};
+    CredentialSerial serial{};
     std::vector<std::uint8_t> reserved;
 
     [[nodiscard]] std::vector<std::uint8_t> encode() const;
     [[nodiscard]] static CredentialPayload decode(std::span<const std::uint8_t> bytes);
 };
 
-// Test/utility function: encode credential payload and serial for hashing
-// during NIZK1 proof generation. The mediator never sees the serial;
-// the client uses this to bind the serial into the blinded commitment.
 [[nodiscard]] std::vector<std::uint8_t> encode_credential_for_blind(
     const CredentialPayload& payload);
 
