@@ -186,7 +186,7 @@ enum class MessageType : std::uint16_t {
     // ever sent by the mediator; a client never sends this type.
     FeeConfirmationPending = 38,
     // A client's request for the mediator's retained price history for one
-    // asset pair - see lobby.cpp's price_history_/handle_get_candles(). Not
+    // asset pair - see lobby.cpp's price_history_/record_completed_trade(). Not
     // room-scoped and not admin-gated: this is public market data, the same
     // trust level as ListOffers/OfferList, just for completed trades
     // instead of open ones.
@@ -205,6 +205,16 @@ enum class MessageType : std::uint16_t {
     BlindSigInfoResponse = 42,
     BlindSigRequestChunk = 43,
     BlindSigResponse = 44,
+    // q=7933 BLNS23 reference path. These are a deliberately parallel set,
+    // not aliases for 41-44: q7933 carries t=f*g^-1 and explicit {s0,s1},
+    // plus deferred operator approval via a durable 32-byte ticket id.
+    // Reserved unconditionally for the same reason as 41-44: builds without
+    // the q7933 integration simply have no dispatch cases and reject them.
+    Q7933BlindSigInfoRequest = 45,
+    Q7933BlindSigInfoResponse = 46,
+    Q7933BlindSigRequestChunk = 47,
+    Q7933BlindSigResponse = 48,
+    Q7933BlindSigTicketPoll = 49,
 };
 
 struct Frame {
