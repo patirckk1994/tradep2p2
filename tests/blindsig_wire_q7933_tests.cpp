@@ -138,27 +138,42 @@ void test_raw_request_round_trip() {
 void test_credential_request_round_trip() {
     auto request = sample_request();
     request.credential_issuance = true;
+
     for (std::size_t i = 0; i < request.issuance_room_id.size(); ++i) {
         request.issuance_room_id[i] = static_cast<std::uint8_t>(i + 1U);
     }
+
     request.credential_epoch = 42U;
+
     request.issuance_completion_receipt = {0x10U, 0x20U, 0x30U, 0x40U};
     request.issuance_authorization_signature.fill(0x44U);
     request.issuance_authorization_signature_mldsa65.fill(0x55U);
 
     const auto decoded =
-        decode_q7933_blindsig_assembled_request(encode_q7933_blindsig_assembled_request(request));
-    require(decoded.credential_issuance, "credential request flag must round-trip");
+        decode_q7933_blindsig_assembled_request(
+            encode_q7933_blindsig_assembled_request(request));
+
+    require(decoded.credential_issuance,
+            "credential request flag must round-trip");
+
     require(decoded.issuance_room_id == request.issuance_room_id,
             "credential issuance room must round-trip");
-    require(decoded.credential_epoch == 42U, "credential epoch must round-trip");
-    require(decoded.issuance_completion_receipt == request.issuance_completion_receipt,
+
+    require(decoded.credential_epoch == 42U,
+            "credential epoch must round-trip");
+
+    require(decoded.issuance_completion_receipt ==
+                request.issuance_completion_receipt,
             "credential completion receipt must round-trip");
-    require(decoded.issuance_authorization_signature == request.issuance_authorization_signature,
+
+    require(decoded.issuance_authorization_signature ==
+                request.issuance_authorization_signature,
             "credential Ed25519 authorization must round-trip");
+
     require(decoded.issuance_authorization_signature_mldsa65 ==
                 request.issuance_authorization_signature_mldsa65,
             "credential ML-DSA authorization must round-trip");
+
     require(decoded.pi1_receipt == request.pi1_receipt,
             "credential NIZK1 receipt must still round-trip");
 }

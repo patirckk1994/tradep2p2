@@ -4,7 +4,6 @@
 #include "tradep2p/blindsig_signer.hpp"
 #include "tradep2p/blindsig_signer_q7933.hpp"
 #include "tradep2p/blindsig_wire_q7933.hpp"
-#include "tradep2p/q7933_issuance_authorization.hpp"
 #endif
 #include "tradep2p/ephemeral.hpp"
 #include "tradep2p/fee_plugin_abi.h"
@@ -1437,97 +1436,103 @@ private:
     void handle_q7933_blindsig_request_chunk(const std::shared_ptr<Client>& client,
                                              blindsig::BlindSigRequestChunk chunk) {
         if (!q7933_blindsig_signer_.has_value()) {
-            throw BenignRejection(
-                "q7933 blind-signature signer is not enabled on this mediator");
+            throw BenignRejection("q7933 blind-signature signer is not enabled on this mediator");
         }
-
         if (!client->q7933_blindsig_assembler.has_value()) {
             client->q7933_blindsig_assembler.emplace();
         }
-
-        const bool complete =
-            client->q7933_blindsig_assembler->add_chunk(chunk);
-
+        const bool complete = client->q7933_blindsig_assembler->add_chunk(chunk);
         if (!complete) {
             return;
         }
 
-        const auto assembled_bytes =
-            client->q7933_blindsig_assembler->assembled_bytes();
-
-        auto request =
-            blindsig::decode_q7933_blindsig_assembled_request(
-                assembled_bytes);
-
+        /*
+        const auto assembled_bytes = client->q7933_blindsig_assembler->assembled_bytes();
+        const auto request = blindsig::decode_q7933_blindsig_assembled_request(assembled_bytes);
         client->q7933_blindsig_assembler.reset();
 
-        auto reply =
-            [client](const blindsig::Q7933BlindSigResponse& response) {
+        q7933_blindsig_signer_->submit(
+            request, [client](const blindsig::Q7933BlindSigResponse& response) {
+                client->enqueue(MessageType::Q7933BlindSigResponse,
+                                blindsig::encode_q7933_blindsig_response(response));
+            });
+            */
+
+            const auto assembled_bytes =
+                client->q7933_blindsig_assembler->assembled_bytes();
+
+            auto request =
+                blindsig::decode_q7933_blindsig_assembled_request(assembled_bytes);
+
+            client->q7933_blindsig_assembler.reset();
+
+            auto reply = [client](const blindsig::Q7933BlindSigResponse& response) {
                 client->enqueue(
                     MessageType::Q7933BlindSigResponse,
                     blindsig::encode_q7933_blindsig_response(response));
             };
 
-        // Keep the raw q7933 research primitive available exactly as before.
-        // It intentionally has no completed-room issuance semantics.
-        if (!request.credential_issuance) {
+            // Raw q7933 research primitive: preserve existing behavior.
+            if (!request.credential_issuance) {
+                q7933_blindsig_signer_->submit(
+                    std::move(request),
+                    std::move(reply));
+                return;
+            }
+
+            // Credential issuance requires:
+            //   1. genuine mediator-signed stage-4 completion receipt,
+            //   2. proof of possession of A or B's ephemeral hybrid key,
+            //   3. proof bound to this exact blinded target c.
+            //
+            // The client never supplies a trusted Party value.
+            q7933_credential::IssuanceAuthorizationProof proof;
+
+            proof.completion_receipt =
+                decode_receipt_issued(request.issuance_completion_receipt);
+
+            proof.signature =
+                request.issuance_authorization_signature;
+
+            proof.signature_mldsa65 =
+                request.issuance_authorization_signature_mldsa65;
+
+            const auto authorized_party =
+                q7933_credential::verify_issuance_authorization_proof(
+                    proof,
+                    mediator_id_,
+                    mediator_receipt_keypair_.public_key,
+                    mediator_receipt_mldsa65_keypair_.public_key,
+                    request.issuance_room_id,
+                    request.credential_epoch,
+                    request.c);
+
+            if (!authorized_party.has_value()) {
+                blindsig::Q7933BlindSigResponse rejected;
+                rejected.status =
+                    blindsig::Q7933BlindSigResponse::Status::Rejected;
+                rejected.reason =
+                    "q7933 credential issuance authorization did not verify";
+
+                reply(rejected);
+                return;
+            }
+
+            q7933_credential::IssuanceContext issuance_context{};
+            issuance_context.version =
+                q7933_credential::kCredentialVersion;
+            issuance_context.issuer_scope = 0U;
+            issuance_context.epoch =
+                request.credential_epoch;
+            issuance_context.room_id =
+                request.issuance_room_id;
+            issuance_context.party =
+                *authorized_party == Party::A ? 0U : 1U;
+
             q7933_blindsig_signer_->submit(
                 std::move(request),
+                std::move(issuance_context),
                 std::move(reply));
-            return;
-        }
-
-        // Credential issuance is authorized by:
-        //   - this mediator's own hybrid-signed stage-4 completion receipt;
-        //   - possession of one of the receipt's A/B ephemeral hybrid keys;
-        //   - an authorization signature bound to this exact blinded target c.
-        //
-        // Party is therefore DERIVED by verification. It is never trusted
-        // from client-supplied metadata.
-        q7933_credential::IssuanceAuthorizationProof proof;
-        proof.completion_receipt =
-            decode_receipt_issued(
-                request.issuance_completion_receipt);
-        proof.signature =
-            request.issuance_authorization_signature;
-        proof.signature_mldsa65 =
-            request.issuance_authorization_signature_mldsa65;
-
-        const auto authorized_party =
-            q7933_credential::verify_issuance_authorization_proof(
-                proof,
-                mediator_id_,
-                mediator_receipt_keypair_.public_key,
-                mediator_receipt_mldsa65_keypair_.public_key,
-                request.issuance_room_id,
-                request.credential_epoch,
-                request.c);
-
-        if (!authorized_party.has_value()) {
-            blindsig::Q7933BlindSigResponse rejected;
-            rejected.status =
-                blindsig::Q7933BlindSigResponse::Status::Rejected;
-            rejected.reason =
-                "q7933 credential issuance authorization did not verify";
-            reply(rejected);
-            return;
-        }
-
-        q7933_credential::IssuanceContext issuance_context{};
-        issuance_context.version =
-            q7933_credential::kCredentialVersion;
-        issuance_context.issuer_scope = 0U;
-        issuance_context.epoch =
-            request.credential_epoch;
-        issuance_context.room_id =
-            request.issuance_room_id;
-        issuance_context.party =
-            *authorized_party == Party::A ? 0U : 1U;
-
-        q7933_blindsig_signer_->submit(
-            std::move(request),
-            std::move(issuance_context),
-            std::move(reply));
     }
 
     void handle_q7933_blindsig_ticket_poll(const std::shared_ptr<Client>& client,

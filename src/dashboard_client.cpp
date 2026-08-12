@@ -15,6 +15,10 @@
 #include <stdexcept>
 #include <utility>
 
+#ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
+#include "tradep2p/q7933_issuance_authorization.hpp"
+#endif
+
 namespace tradep2p::dashboard {
 
 namespace {
@@ -314,7 +318,7 @@ void DashboardClient::start_q7933_blindsig_request(const std::string& message) {
     }
     q7933_blindsig_session_->start_request(message);
 }
-
+/*
 void DashboardClient::start_q7933_blindsig_trade_request(const std::string& room_text) {
     if (!q7933_blindsig_session_.has_value()) {
         throw std::logic_error("q7933 blind-signature client is not enabled");
@@ -331,6 +335,152 @@ void DashboardClient::start_q7933_blindsig_trade_request(const std::string& room
         message = q7933_trade_commitment_message(mediator_id_, room_it->second);
     }
     q7933_blindsig_session_->start_request(message);
+}*/
+
+void DashboardClient::start_q7933_blindsig_trade_request(
+    const std::string& room_text) {
+
+    if (!q7933_blindsig_session_.has_value()) {
+        throw std::logic_error(
+            "q7933 blind-signature client is not enabled");
+    }
+
+    const RoomId room_id =
+        tradep2p::room_id_from_hex(room_text);
+
+    const std::string canonical =
+        tradep2p::room_id_to_hex(room_id);
+
+    constexpr std::uint32_t credential_epoch = 0U;
+
+    Party party{Party::A};
+
+    {
+        std::scoped_lock lock(state_mutex_);
+
+        const auto room_it = rooms_.find(canonical);
+        if (room_it == rooms_.end()) {
+            throw std::invalid_argument("room not found");
+        }
+
+        if (room_it->second.status != "complete") {
+            throw std::invalid_argument(
+                "q7933 credential may only be requested for a completed room");
+        }
+
+        if (!room_it->second.receipt_chain_verifies) {
+            throw std::invalid_argument(
+                "completed room does not have a verified receipt chain");
+        }
+
+        const auto receipts_it =
+            room_receipts_.find(canonical);
+
+        if (receipts_it == room_receipts_.end()) {
+            throw std::invalid_argument(
+                "completed room has no mediator receipt");
+        }
+
+        const bool has_stage4 =
+            std::any_of(
+                receipts_it->second.begin(),
+                receipts_it->second.end(),
+                [](const IssuedReceipt& receipt) {
+                    return
+                        receipt.fields.stage ==
+                            ReceiptStage::SettlementCompleted &&
+                        receipt.fields.completed;
+                });
+
+        if (!has_stage4) {
+            throw std::invalid_argument(
+                "completed room has no stage-4 completion receipt");
+        }
+
+        if (!ephemeral_keypairs_.contains(canonical) ||
+            !ephemeral_keypairs_mldsa65_.contains(canonical)) {
+            throw std::invalid_argument(
+                "completed room's ephemeral signing keys are unavailable");
+        }
+
+        party = room_it->second.party;
+    }
+
+    q7933_blindsig_session_->start_credential_request(
+        room_id,
+        credential_epoch,
+
+        [this,
+         canonical,
+         party,
+         credential_epoch](
+            const std::array<
+                std::uint16_t,
+                blindsig::kQ7933RingDegree>& c)
+            -> blindsig::Q7933CredentialIssuanceAuthorization {
+
+            std::scoped_lock lock(state_mutex_);
+
+            const auto receipts_it =
+                room_receipts_.find(canonical);
+
+            if (receipts_it == room_receipts_.end()) {
+                throw std::runtime_error(
+                    "completion receipt disappeared before credential authorization");
+            }
+
+            const auto receipt_it =
+                std::find_if(
+                    receipts_it->second.rbegin(),
+                    receipts_it->second.rend(),
+                    [](const IssuedReceipt& receipt) {
+                        return
+                            receipt.fields.stage ==
+                                ReceiptStage::SettlementCompleted &&
+                            receipt.fields.completed;
+                    });
+
+            if (receipt_it == receipts_it->second.rend()) {
+                throw std::runtime_error(
+                    "stage-4 completion receipt disappeared before credential authorization");
+            }
+
+            const auto ed_it =
+                ephemeral_keypairs_.find(canonical);
+
+            const auto ml_it =
+                ephemeral_keypairs_mldsa65_.find(canonical);
+
+            if (ed_it == ephemeral_keypairs_.end() ||
+                ml_it == ephemeral_keypairs_mldsa65_.end()) {
+                throw std::runtime_error(
+                    "ephemeral credential-authorization key disappeared");
+            }
+
+            const auto proof =
+                q7933_credential::
+                    make_issuance_authorization_proof(
+                        *receipt_it,
+                        party,
+                        ed_it->second.private_seed,
+                        ml_it->second.private_seed,
+                        credential_epoch,
+                        c);
+
+            blindsig::Q7933CredentialIssuanceAuthorization out;
+
+            out.completion_receipt =
+                encode_receipt_issued(
+                    proof.completion_receipt);
+
+            out.signature =
+                proof.signature;
+
+            out.signature_mldsa65 =
+                proof.signature_mldsa65;
+
+            return out;
+        });
 }
 
 void DashboardClient::poll_q7933_blindsig_ticket() {
