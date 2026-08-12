@@ -799,7 +799,7 @@ exposed as this feature.
 | 6 | Mediator-signed staged receipts (§9.1) | **Implemented** | `receipt.hpp/cpp` |
 | 7 | Service-scoped login | **Implemented** | `login.hpp/cpp`, `http_webclient.cpp` |
 | 8 | Selective disclosure (§9.2) | **Implemented** | `disclosure.hpp/cpp` |
-| 8b | Unlinkable aggregate credentials / blind signatures (§9.3) | **Future work, unscheduled** | — |
+| 8b | Credential-layer semantics / issuance uniqueness (§9.3) | **Partially implemented** — issuance uniqueness, nullifiers, and presentation binding (unreviewed); aggregate ZK proof remains future work | `q7933_credential.hpp/cpp`, `q7933_issuance_store.hpp/cpp`, `q7933_presentation.hpp/cpp`, `docs/q7933_credential_layer.md` |
 | 8c | Blind-signature PRIMITIVE, experimental (§9.3a) | **Implemented, off by default** (compile-time AND runtime gated), not independently reviewed | `blindsig_*.hpp/cpp`, `blindsig-prover/` |
 | 9 | Hosted web-client integration | **Partially implemented** — key-based login UI wired and live-verified; per-account browser-side history/receipts/disclosure surfacing deferred (see §10's note below) | `http_webclient.cpp` |
 | — | Post-quantum migration (§11) | **Implemented** — TLS hybrid key exchange, TLS server-certificate signatures (ML-DSA-65), receipts/disclosure/ephemeral messages (mandatory Ed25519+ML-DSA-65 hybrid), login/journal/keystore (additive ML-DSA-65-default suite); only §9.3's blind signatures remain unimplemented (candidate constructions now exist but lack maturity/review — see §9.3) | `secure_channel.cpp`, `receipt.hpp/cpp`, `disclosure.hpp/cpp`, `ephemeral.hpp/cpp`, `login.hpp/cpp`, `journal.hpp/cpp`, `keystore.hpp/cpp`, `setup_mediator.sh`, `setup_registry.sh` |

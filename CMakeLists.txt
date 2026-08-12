@@ -98,6 +98,9 @@ if(TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
         src/blindsig_signer_q7933.cpp
         src/blindsig_client.cpp
         src/blindsig_client_q7933.cpp
+        src/q7933_credential.cpp
+        src/q7933_issuance_store.cpp
+        src/q7933_presentation.cpp
     )
     target_link_libraries(tradep2p PRIVATE tradep2p_falcon_vendor)
     target_link_libraries(tradep2p PUBLIC tradep2p_blns7933_reference)
@@ -263,6 +266,13 @@ if(TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow
     )
     add_test(NAME tradep2p_blindsig_keystore_tests COMMAND tradep2p_blindsig_keystore_tests)
+
+    add_executable(tradep2p_q7933_credential_tests tests/q7933_credential_tests.cpp)
+    target_link_libraries(tradep2p_q7933_credential_tests PRIVATE tradep2p)
+    target_compile_options(tradep2p_q7933_credential_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+    )
+    add_test(NAME tradep2p_q7933_credential_tests COMMAND tradep2p_q7933_credential_tests)
 endif()
 
 # ---------------------------------------------------------------------------

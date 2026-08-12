@@ -119,10 +119,9 @@ TRADEP2P_BLINDSIG_Q7933_PROVER_PATH=./blindsig-prover-q7933/target/release/blind
 ```
 
 **Caveats:**
-- Single-use credentials; no cross-room replay protection yet — each room commitment is 
-  independently signed.
-- Ticket storage and approval flow are not hardened for production — this is a research 
-  implementation, not a security tier.
+- Credential-layer replay protection (issuance uniqueness, nullifiers, presentation binding) is now implemented; see [`docs/q7933_credential_layer.md`](docs/q7933_credential_layer.md) for full details.
+- Aggregate ZK proof over N distinct credentials is not yet implemented — the verifier receives the credential, nullifier, and presentation context, but must handle duplicate-detection logic at the application level (formal NIZK proof remains future work).
+- Ticket storage and approval flow are not hardened for production — this is a research implementation, not a security tier.
 - The external prover binary is a trust boundary — only invoke with binaries you control.
 
 ## Core model
