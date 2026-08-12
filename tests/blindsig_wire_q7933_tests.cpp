@@ -60,7 +60,6 @@ void test_info_response_round_trip() {
     message.enabled = true;
     message.t = sample_u16_array(1);
     message.b = sample_u16_array(2);
-
     const auto decoded =
         decode_q7933_blindsig_info_response(encode_q7933_blindsig_info_response(message));
     require(decoded.enabled == message.enabled, "q7933 info enabled must round-trip");
@@ -83,7 +82,6 @@ void test_response_round_trip() {
         message.s1 = sample_i16_array(11);
         message.ticket_id.fill(0x5a);
         message.reason = status == Q7933BlindSigResponse::Status::Ok ? "" : "reason";
-
         const auto decoded =
             decode_q7933_blindsig_response(encode_q7933_blindsig_response(message));
         require(decoded.status == message.status, "q7933 response status must round-trip");
@@ -104,7 +102,7 @@ void test_response_decode_rejects_invalid_status() {
         "q7933 response with an out-of-range status must throw");
 }
 
-void test_request_round_trip() {
+Q7933BlindSigAssembledRequest sample_request() {
     Q7933BlindSigAssembledRequest request;
     request.c = sample_u16_array(21);
     request.b = sample_u16_array(22);
@@ -115,7 +113,11 @@ void test_request_round_trip() {
     request.ct1_mu = sample_u16_array(27);
     request.ct2_mu = sample_u16_array(28);
     request.pi1_receipt = {1, 2, 3, 4, 5, 6};
+    return request;
+}
 
+void test_raw_request_round_trip() {
+    const auto request = sample_request();
     const auto decoded =
         decode_q7933_blindsig_assembled_request(encode_q7933_blindsig_assembled_request(request));
     require(decoded.c == request.c, "q7933 request c must round-trip");
@@ -126,13 +128,41 @@ void test_request_round_trip() {
     require(decoded.ct2_r == request.ct2_r, "q7933 request ct2_r must round-trip");
     require(decoded.ct1_mu == request.ct1_mu, "q7933 request ct1_mu must round-trip");
     require(decoded.ct2_mu == request.ct2_mu, "q7933 request ct2_mu must round-trip");
+    require(!decoded.credential_issuance, "raw request must remain raw");
+    require(decoded.credential_epoch == 0U, "raw request must have zero epoch");
     require(decoded.pi1_receipt == request.pi1_receipt, "q7933 request receipt must round-trip");
+}
+
+void test_credential_request_round_trip() {
+    auto request = sample_request();
+    request.credential_issuance = true;
+    for (std::size_t i = 0; i < request.issuance_room_id.size(); ++i) {
+        request.issuance_room_id[i] = static_cast<std::uint8_t>(i + 1U);
+    }
+    request.credential_epoch = 42U;
+    const auto decoded =
+        decode_q7933_blindsig_assembled_request(encode_q7933_blindsig_assembled_request(request));
+    require(decoded.credential_issuance, "credential request flag must round-trip");
+    require(decoded.issuance_room_id == request.issuance_room_id,
+            "credential issuance room must round-trip");
+    require(decoded.credential_epoch == 42U, "credential epoch must round-trip");
+}
+
+void test_raw_request_rejects_credential_metadata() {
+    auto request = sample_request();
+    auto bytes = encode_q7933_blindsig_assembled_request(request);
+    // Eight 512-coefficient u16 arrays = 8192 bytes. The following byte is
+    // the credential flag, then 32-byte room id, then 4-byte epoch.
+    constexpr std::size_t flag_offset = 8U * kQ7933RingDegree * 2U;
+    bytes[flag_offset + 1U] = 0x42U; // nonzero room id while flag stays false
+    require_throws<std::runtime_error>(
+        [&] { (void)decode_q7933_blindsig_assembled_request(bytes); },
+        "raw request must reject credential-only metadata");
 }
 
 void test_ticket_poll_round_trip() {
     Q7933BlindSigTicketPoll message;
     message.ticket_id.fill(0xa5);
-
     const auto decoded =
         decode_q7933_blindsig_ticket_poll(encode_q7933_blindsig_ticket_poll(message));
     require(decoded.ticket_id == message.ticket_id, "q7933 ticket poll id must round-trip");
@@ -154,7 +184,9 @@ int main() {
         test_info_response_round_trip();
         test_response_round_trip();
         test_response_decode_rejects_invalid_status();
-        test_request_round_trip();
+        test_raw_request_round_trip();
+        test_credential_request_round_trip();
+        test_raw_request_rejects_credential_metadata();
         test_ticket_poll_round_trip();
         test_decode_rejects_trailing_bytes();
         std::cout << "q7933 blindsig wire tests passed\n";
