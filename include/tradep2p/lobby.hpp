@@ -4,9 +4,14 @@
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
 #include "tradep2p/blindsig_keystore.hpp"
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+#include "tradep2p/blindsig_keystore_q7933.hpp"
+#endif
 #endif
 
+#include <cstddef>
 #include <memory>
+#include <string>
 
 namespace tradep2p {
 
@@ -23,13 +28,21 @@ public:
     void run();
 
 #ifdef TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL
-    // Enables the experimental blind-signature primitive (specs.txt
-    // SS9.3a). Must be called before run(), at most once. `keystore` must
-    // already be unlocked - see main.cpp's mediator startup sequence
-    // (an interactive passphrase prompt happens there, deliberately not
-    // here or via any env var - see blindsig_keystore.hpp's file comment
-    // for why).
+    // Enables the existing q=12289 experimental blind-signature primitive
+    // (specs.txt SS9.3a). Must be called before run(), at most once.
     void enable_blindsig_signer(blindsig::BlindSigKeystore keystore);
+
+#if defined(TRADEP2P_ENABLE_BLNS7933_INTEGRATION)
+    // Enables the separate q=7933 deferred/operator-approved path. This is
+    // deliberately not an overload of the q=12289 backend's configuration:
+    // it has its own keystore, prover binary, durable ticket directory and
+    // verifier queue. Submission verifies NIZK1 and returns Pending+ticket;
+    // this hook does not expose any inline signing operation.
+    void enable_q7933_blindsig_signer(blindsig::Q7933Keystore keystore,
+                                      std::string ticket_directory,
+                                      std::string prover_path,
+                                      std::size_t queue_capacity);
+#endif
 #endif
 
 private:
