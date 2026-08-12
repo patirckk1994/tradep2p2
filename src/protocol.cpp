@@ -391,7 +391,7 @@ void validate_registry_node(const RegistryNode& node, bool require_ttl) {
 void validate_message_type(MessageType type) {
     const auto value = static_cast<std::uint16_t>(type);
     if (value < static_cast<std::uint16_t>(MessageType::Welcome) ||
-        value > static_cast<std::uint16_t>(MessageType::BlindSigResponse)) {
+        value > static_cast<std::uint16_t>(MessageType::Q7933BlindSigTicketPoll)) {
         throw std::invalid_argument("unknown message type");
     }
 }
