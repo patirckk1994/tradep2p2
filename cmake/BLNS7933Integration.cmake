@@ -5,6 +5,11 @@
 # and their tests. Nothing here is added to the normal tradep2p target, and
 # the whole file is still only reached through the experimental preset.
 
+# The root CMakeLists may include this layer again later when it wires the
+# actual mediator target. Under the blns7933-root preset this file has already
+# run through CMAKE_PROJECT_INCLUDE, so make that second include a clean no-op.
+include_guard(GLOBAL)
+
 include("${CMAKE_CURRENT_LIST_DIR}/BLNS7933Reference.cmake")
 
 if(NOT TRADEP2P_ENABLE_BLINDSIG_EXPERIMENTAL)
@@ -59,3 +64,25 @@ target_compile_options(tradep2p_blns7933_ticket_store_tests PRIVATE
 )
 add_test(NAME tradep2p_blns7933_ticket_store_tests
     COMMAND tradep2p_blns7933_ticket_store_tests)
+
+# Phase 3 compile gate. These two sources belong to the eventual `tradep2p`
+# mediator target, not to the math/reference archive: the signer calls the
+# existing blindsig subprocess layer and would create a circular static-link
+# dependency if it were stuffed into tradep2p_blns7933_reference. An OBJECT
+# target lets the experimental preset compile them now, under the project's
+# full warning set, without pretending the root protocol/lobby wiring is done.
+add_library(tradep2p_blns7933_phase3_compile OBJECT
+    src/blindsig_wire_q7933.cpp
+    src/blindsig_signer_q7933.cpp
+)
+target_include_directories(tradep2p_blns7933_phase3_compile PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann-json
+)
+target_link_libraries(tradep2p_blns7933_phase3_compile PRIVATE
+    tradep2p_blns7933_reference
+)
+target_compile_features(tradep2p_blns7933_phase3_compile PRIVATE cxx_std_20)
+target_compile_options(tradep2p_blns7933_phase3_compile PRIVATE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+)
