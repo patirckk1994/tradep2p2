@@ -71,6 +71,20 @@ struct TrapdoorKey {
     std::vector<std::int64_t> g;
     std::vector<std::int64_t> F;
     std::vector<std::int64_t> G;
+
+    TrapdoorKey() = default;
+    TrapdoorKey(const TrapdoorKey&) = default;
+    TrapdoorKey& operator=(const TrapdoorKey&) = default;
+    TrapdoorKey(TrapdoorKey&&) = default;
+    TrapdoorKey& operator=(TrapdoorKey&&) = default;
+
+    // Cleanses on every teardown path, not just an owner's own explicit
+    // wipe helper: a std::vector's default destructor frees f/g/F/G without
+    // zeroing them, so any exception thrown by code that has already taken
+    // ownership of a TrapdoorKey (e.g. a caller's constructor rejecting an
+    // invalid trapdoor after moving it in) would otherwise leak the real
+    // secret coefficients into freed heap memory during stack unwinding.
+    ~TrapdoorKey();
 };
 
 struct PublicKey {

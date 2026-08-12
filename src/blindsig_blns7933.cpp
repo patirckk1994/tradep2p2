@@ -6,11 +6,30 @@
 #include "tradep2p/blindsig_blns7933_quality.hpp"
 #include "tradep2p/blindsig_blns7933_reduce.hpp"
 
+#include <openssl/crypto.h>
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
 
 namespace tradep2p::blns7933 {
+namespace {
+
+void cleanse(std::vector<std::int64_t>& v) noexcept {
+    if (!v.empty()) {
+        OPENSSL_cleanse(v.data(), v.size() * sizeof(v[0]));
+    }
+}
+
+} // namespace
+
+TrapdoorKey::~TrapdoorKey() {
+    cleanse(f);
+    cleanse(g);
+    cleanse(F);
+    cleanse(G);
+}
+
 namespace {
 
 std::int64_t scalar_mod(std::int64_t x, std::int64_t q) noexcept {
