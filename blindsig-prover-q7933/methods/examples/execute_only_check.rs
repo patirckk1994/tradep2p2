@@ -16,7 +16,7 @@
 //
 // Run: cargo run -p methods --release --example execute_only_check
 
-use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_schoolbook};
+use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_karatsuba};
 use risc0_zkvm::{default_executor, ExecutorEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -111,7 +111,7 @@ fn check_nizk1() {
 
     let ct = enc::generate_ciphertexts(&coins, &r_i64, mu, &a, &pk);
 
-    let br = poly_mul_mod_q_schoolbook(&b, &r_i64);
+    let br = poly_mul_mod_q_karatsuba(&b, &r_i64);
     let r_i32: Vec<i32> = r_i64.iter().map(|&x| x as i32).collect();
     let rho = g_of_r(&r_i32);
     let h_digest = h_of_rho_mu(&rho, mu);

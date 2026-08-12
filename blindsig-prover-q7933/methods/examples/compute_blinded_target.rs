@@ -7,7 +7,7 @@
 //
 // Run: cargo run -p methods --release --example compute_blinded_target
 
-use prover_core::{add_mod_q, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_schoolbook, N};
+use prover_core::{add_mod_q, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_karatsuba, N};
 use std::fmt::Write as _;
 use std::io::Write as _;
 
@@ -34,7 +34,7 @@ fn main() {
     let rho = g_of_r(&r);
     let mu = "rust-crosscheck-blinded-message";
 
-    let br = poly_mul_mod_q_schoolbook(&b, &r_i64);
+    let br = poly_mul_mod_q_karatsuba(&b, &r_i64);
     let h_digest = h_of_rho_mu(&rho, mu);
     let hash_term = hash_to_point(&h_digest);
     let c = add_mod_q(&br, &hash_term);

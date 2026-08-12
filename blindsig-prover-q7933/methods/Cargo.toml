@@ -29,6 +29,14 @@ risc0-zkvm = { version = "^3.0.6" }
 prover-core = { path = "../prover-core" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+# Live prove progress (prove_nizk1.rs/prove_nizk2.rs): the actual proving
+# work happens inside the external r0vm subprocess (default features =
+# IPC, not the in-process LocalProver), which has its own
+# tracing_subscriber reading RUST_LOG from the environment it inherits -
+# confirmed by inspecting the r0vm binary directly (it links
+# tracing-subscriber's EnvFilter::from_default_env), not assumed. Same
+# tracing-subscriber setup as the q=12289 sibling's own prover/src/main.rs.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [package.metadata.risc0]
 methods = ["guest"]

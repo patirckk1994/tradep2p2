@@ -3,19 +3,49 @@
 // scheme at all, only the blinding relation + encryption-to-the-sky, so
 // no C++ cross-language data is needed here, unlike prove_nizk2.rs).
 //
-// Run: cargo run -p methods --release --example prove_nizk1
-// (real STARK proving - expect this to take a while; the q=12289
-// sibling's own NIZK1 takes ~200s, and this project's own Phase 2
-// measurement found schoolbook-at-7933 costs ~14.46x the cycles of
-// NTT-at-12289 for the multiplication-heavy portion of this exact guest,
-// so budget well beyond that as a rough expectation, not a promise -
-// this file exists specifically to measure the real number.)
+// Run: RUST_LOG=info cargo run -p methods --release --example prove_nizk1
+// (real STARK proving - expect this to take a while, now Karatsuba
+// rather than schoolbook - see poly_mul.rs's own comments for the real,
+// measured cycle-count improvement this bought.)
+//
+// LIVE PROGRESS: RUST_LOG=info (or =debug for more detail) shows real
+// segment-by-segment progress, not just a spinner - the actual proving
+// work happens inside the external r0vm subprocess (default features =
+// IPC, not the in-process LocalProver), which has its own
+// tracing_subscriber reading RUST_LOG from the environment it inherits
+// (confirmed by inspecting the r0vm binary directly - it links
+// tracing-subscriber's EnvFilter::from_default_env - not assumed). This
+// process's own tracing_subscriber below covers this process's own
+// tracing calls (currently none) and matches the q=12289 sibling's own
+// prover/src/main.rs setup; the always-visible elapsed-time ticker
+// beneath it works regardless of RUST_LOG.
 
-use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_schoolbook};
+use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_karatsuba};
 use risc0_zkvm::{default_prover, ExecutorEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+fn prove_with_ticker(env: ExecutorEnv, elf: &[u8]) -> (risc0_zkvm::Receipt, f64) {
+    let start = Instant::now();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_ticker = done.clone();
+    let ticker = std::thread::spawn(move || {
+        while !done_ticker.load(Ordering::Relaxed) {
+            eprint!("\r  ...still proving, {:>6.1}s elapsed", start.elapsed().as_secs_f64());
+            std::io::stderr().flush().ok();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        eprintln!();
+    });
+    let receipt = default_prover().prove(env, elf).unwrap().receipt;
+    done.store(true, Ordering::Relaxed);
+    ticker.join().ok();
+    (receipt, start.elapsed().as_secs_f64())
+}
 
 // Mirrors methods/guest/src/bin/nizk1.rs's own Nizk1Input/Nizk1PublicOutput
 // exactly - same duplication-on-purpose convention the q=12289 sibling's
@@ -62,6 +92,10 @@ fn to_u16(v: &[i64]) -> Vec<u16> {
 }
 
 fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+        .try_init();
+
     // Fixed, reproducible seed - matches this whole project's own
     // established diagnostic convention (fixed seeds throughout the C++
     // q7933-reference track) rather than fresh OS randomness, so this
@@ -84,7 +118,7 @@ fn main() {
     // Recompute c exactly as the guest itself will (see main.rs/nizk1.rs's
     // own identical computation) - this is what a genuine client would
     // send the signer, and what the guest re-derives and checks.
-    let br = poly_mul_mod_q_schoolbook(&b, &r_i64);
+    let br = poly_mul_mod_q_karatsuba(&b, &r_i64);
     let r_i32: Vec<i32> = r_i64.iter().map(|&x| x as i32).collect();
     let rho = g_of_r(&r_i32);
     let h_digest = h_of_rho_mu(&rho, mu);
@@ -106,13 +140,11 @@ fn main() {
     };
 
     println!("Proving NIZK1 at q=7933 (real STARK proving, this will take a while)...");
+    println!("(set RUST_LOG=info or RUST_LOG=debug for live segment-by-segment progress)");
     let env = ExecutorEnv::builder().write(&input).unwrap().build().unwrap();
-    let start = Instant::now();
-    let prove_info = default_prover().prove(env, methods::NIZK1_ELF).unwrap();
-    let elapsed = start.elapsed();
-    println!("NIZK1 prove: {:.1}s", elapsed.as_secs_f64());
+    let (receipt, elapsed) = prove_with_ticker(env, methods::NIZK1_ELF);
+    println!("NIZK1 prove: {elapsed:.1}s");
 
-    let receipt = prove_info.receipt;
     receipt.verify(methods::NIZK1_ID).expect("receipt must verify");
     println!("NIZK1 receipt: verified");
 

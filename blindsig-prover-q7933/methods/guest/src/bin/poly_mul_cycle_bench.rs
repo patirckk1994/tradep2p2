@@ -18,6 +18,13 @@
 // `cargo run -p methods --release --example cycle_count` if this ever
 // needs reconfirming (e.g. after a risc0-zkvm version bump).
 //
+// UPDATE: schoolbook is no longer what the real guest uses - Karatsuba
+// (poly_mul_mod_q_karatsuba) replaced it as the production choice after
+// this same benchmark shape showed a real, measured speedup - see
+// karatsuba_cycle_bench.rs, this file's own direct sibling/successor.
+// Kept as a permanent historical record of the Phase 2 measurement above,
+// same reasoning as ntt_bench_q12289.rs.
+//
 // Shape: 5 schoolbook multiplications, matching NIZK1's real call count
 // (1 for the blinding relation's B*r, plus 4 inside check_encryption's
 // two mul_add/poly_mul pairs) - NIZK1 is the heavier of the two real

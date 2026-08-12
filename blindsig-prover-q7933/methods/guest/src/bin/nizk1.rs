@@ -21,7 +21,7 @@
 //      proof depends on, see prover_core::enc)
 // without revealing r, mu, or coins.
 
-use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_schoolbook, r_in_bounds};
+use prover_core::{add_mod_q, enc, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_karatsuba, r_in_bounds};
 use risc0_zkvm::guest::env;
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +67,7 @@ fn main() {
     //    against the public c the signer actually received.
     let r_i64: Vec<i64> = input.r.iter().map(|&x| x as i64).collect();
     let b_i64 = to_i64(&input.b);
-    let br = poly_mul_mod_q_schoolbook(&b_i64, &r_i64);
+    let br = poly_mul_mod_q_karatsuba(&b_i64, &r_i64);
 
     let rho = g_of_r(&input.r);
     let h_digest = h_of_rho_mu(&rho, &input.mu);

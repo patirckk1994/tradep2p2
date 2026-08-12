@@ -25,7 +25,7 @@
 // sound at q=7933 with a real margin, not carried over on faith.
 const ENCRYPTION_NOISE_BOUND: i64 = 8;
 
-use crate::poly_mul::poly_mul_mod_q_schoolbook;
+use crate::poly_mul::poly_mul_mod_q_karatsuba;
 use crate::{N, Q};
 use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -95,7 +95,7 @@ pub fn uniform_poly_from_seed(seed: &[u8], label: &str) -> Vec<i64> {
 }
 
 fn mul_add(a: &[i64], u: &[i64], noise: &[i64]) -> Vec<i64> {
-    let product = poly_mul_mod_q_schoolbook(a, u);
+    let product = poly_mul_mod_q_karatsuba(a, u);
     (0..N).map(|i| product[i] + noise[i]).collect()
 }
 
@@ -129,7 +129,7 @@ pub fn generate_ciphertexts(coins: &[u8], r: &[i64], mu: &str, a: &[i64], pk: &[
     let e1_r = encryption_noise_from_seed(coins, "e1_r");
     let e2_r = encryption_noise_from_seed(coins, "e2_r");
     let ct1_r = mul_add(a, &u_r, &e1_r);
-    let pku_r = poly_mul_mod_q_schoolbook(pk, &u_r);
+    let pku_r = poly_mul_mod_q_karatsuba(pk, &u_r);
     let ct2_r: Vec<i64> = (0..N).map(|i| pku_r[i] + e2_r[i] + r[i]).collect();
 
     let mu_bits = mu_to_bits(mu);
@@ -137,7 +137,7 @@ pub fn generate_ciphertexts(coins: &[u8], r: &[i64], mu: &str, a: &[i64], pk: &[
     let e1_mu = encryption_noise_from_seed(coins, "e1_mu");
     let e2_mu = encryption_noise_from_seed(coins, "e2_mu");
     let ct1_mu = mul_add(a, &u_mu, &e1_mu);
-    let pku_mu = poly_mul_mod_q_schoolbook(pk, &u_mu);
+    let pku_mu = poly_mul_mod_q_karatsuba(pk, &u_mu);
     let ct2_mu: Vec<i64> = (0..N).map(|i| pku_mu[i] + e2_mu[i] + mu_bits[i]).collect();
 
     Ciphertexts {

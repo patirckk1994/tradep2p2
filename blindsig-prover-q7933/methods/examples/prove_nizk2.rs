@@ -11,19 +11,43 @@
 // signature before the data file was written; this is the same relation
 // re-checked inside a real zkVM guest.
 //
-// Run: cargo run -p methods --release --example prove_nizk2
-// (real STARK proving - the q=12289 sibling's own NIZK2 takes ~100s;
-// this guest does 1 real schoolbook multiplication (t*s0) rather than 2
-// (NIZK1's br + this file's own), so expect it to cost roughly half of
-// what a NIZK1-shaped 14.46x-schoolbook-vs-NTT ratio would suggest -
-// this file exists specifically to measure the real number, not assume it.)
+// Run: RUST_LOG=info cargo run -p methods --release --example prove_nizk2
+// (real STARK proving - the q=12289 sibling's own NIZK2 takes ~100s; this
+// guest does 1 real multiplication (t*s0), now via Karatsuba rather than
+// schoolbook - see poly_mul.rs's own comments for the real, measured
+// cycle-count improvement this bought.)
+//
+// LIVE PROGRESS: see prove_nizk1.rs's own comment on RUST_LOG and why it
+// reaches the actual proving work (the external r0vm subprocess), not
+// just this process.
 
 use risc0_zkvm::{default_prover, ExecutorEnv};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 include!("data/blinded_target_data.rs"); // B, R, RHO, MU, C (this file's own module doc)
 include!("data/rust_crosscheck_data.rs"); // T, S0, S1, TARGET_C, BLINDED_S0, BLINDED_S1
+
+fn prove_with_ticker(env: ExecutorEnv, elf: &[u8]) -> (risc0_zkvm::Receipt, f64) {
+    let start = Instant::now();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_ticker = done.clone();
+    let ticker = std::thread::spawn(move || {
+        while !done_ticker.load(Ordering::Relaxed) {
+            eprint!("\r  ...still proving, {:>6.1}s elapsed", start.elapsed().as_secs_f64());
+            std::io::stderr().flush().ok();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        eprintln!();
+    });
+    let receipt = default_prover().prove(env, elf).unwrap().receipt;
+    done.store(true, Ordering::Relaxed);
+    ticker.join().ok();
+    (receipt, start.elapsed().as_secs_f64())
+}
 
 // Mirrors methods/guest/src/main.rs's own Nizk2Input/Nizk2PublicOutput
 // exactly - same duplication-on-purpose convention as prove_nizk1.rs.
@@ -56,6 +80,10 @@ fn to_u16(v: &[i64]) -> Vec<u16> {
 }
 
 fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+        .try_init();
+
     let input = Nizk2Input {
         t: to_u16(&T),
         b: to_u16(&B),
@@ -67,13 +95,11 @@ fn main() {
     };
 
     println!("Proving NIZK2 at q=7933 (real STARK proving, this will take a while)...");
+    println!("(set RUST_LOG=info or RUST_LOG=debug for live segment-by-segment progress)");
     let env = ExecutorEnv::builder().write(&input).unwrap().build().unwrap();
-    let start = Instant::now();
-    let prove_info = default_prover().prove(env, methods::Q7933_GUEST_ELF).unwrap();
-    let elapsed = start.elapsed();
-    println!("NIZK2 prove: {:.1}s", elapsed.as_secs_f64());
+    let (receipt, elapsed) = prove_with_ticker(env, methods::Q7933_GUEST_ELF);
+    println!("NIZK2 prove: {elapsed:.1}s");
 
-    let receipt = prove_info.receipt;
     receipt.verify(methods::Q7933_GUEST_ID).expect("receipt must verify");
     println!("NIZK2 receipt: verified");
 

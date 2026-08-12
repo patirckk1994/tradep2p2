@@ -23,7 +23,7 @@
 // cycle-count measurement, methods/guest/src/bin/poly_mul_cycle_bench.rs).
 
 use prover_core::{
-    add_mod_q, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_schoolbook,
+    add_mod_q, g_of_r, h_of_rho_mu, hash_to_point, poly_mul::poly_mul_mod_q_karatsuba,
     r_in_bounds,
     relation::{norm_squared, relation_holds},
     NORM_BOUND_SQUARED,
@@ -66,7 +66,7 @@ fn main() {
     // 3. Recompute the blinded target c = B*r + H(rho,mu).
     let r_i64: Vec<i64> = input.r.iter().map(|&x| x as i64).collect();
     let b_i64: Vec<i64> = input.b.iter().map(|&x| x as i64).collect();
-    let br = poly_mul_mod_q_schoolbook(&b_i64, &r_i64);
+    let br = poly_mul_mod_q_karatsuba(&b_i64, &r_i64);
     let h_digest = h_of_rho_mu(&input.rho, &input.mu);
     let hash_term: Vec<i64> = hash_to_point(&h_digest);
     let c = add_mod_q(&br, &hash_term);

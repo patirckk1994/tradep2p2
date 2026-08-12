@@ -7,7 +7,7 @@
 // implementation, not two hand-synced copies, and a place to unit-test
 // against real signature data without needing a zkVM.
 
-use crate::poly_mul::poly_mul_mod_q_schoolbook;
+use crate::poly_mul::poly_mul_mod_q_karatsuba;
 use crate::{add_mod_q, N};
 
 /// Checks t*s0 + s1 == c (mod q). s0/s1 are used RAW (signed, not
@@ -16,7 +16,7 @@ use crate::{add_mod_q, N};
 /// reducing would be pointless here since only the multiplication needs
 /// canonical-range inputs at all, which poly_mul already handles.
 pub fn relation_holds(t: &[i64], s0: &[i64], s1: &[i64], c: &[i64]) -> bool {
-    let t_s0 = poly_mul_mod_q_schoolbook(t, s0);
+    let t_s0 = poly_mul_mod_q_karatsuba(t, s0);
     let lhs = add_mod_q(&t_s0, s1);
     (0..N).all(|i| lhs[i] == c[i])
 }
@@ -42,16 +42,20 @@ mod tests {
     // A tiny, hand-constructed instance: pick t, s0, s1 directly (not a
     // real trapdoor-derived signature - that cross-language check lives
     // in real_signature_tests.rs, using genuine C++ q7933-reference
-    // output) and derive c = t*s0+s1 mod q by definition, so this at
-    // least confirms relation_holds's own arithmetic is self-consistent
-    // and correctly rejects a tampered c.
+    // output) and derive c = t*s0+s1 mod q INDEPENDENTLY via the trusted
+    // schoolbook oracle (not by calling relation_holds() circularly, and
+    // not via the same Karatsuba implementation relation_holds() itself
+    // now uses) - this way the test also cross-checks Karatsuba against
+    // schoolbook at this one instance, on top of confirming
+    // relation_holds's own logic is self-consistent and rejects a
+    // tampered c.
     #[test]
     fn relation_holds_for_a_self_consistent_instance_and_rejects_tampering() {
         let t: Vec<i64> = (0..N as i64).map(|i| (i * 37 + 11) % 7933).collect();
         let s0: Vec<i64> = (0..N as i64).map(|i| ((i * 13) % 21) - 10).collect();
         let s1: Vec<i64> = (0..N as i64).map(|i| ((i * 19) % 21) - 10).collect();
 
-        let t_s0 = poly_mul_mod_q_schoolbook(&t, &s0);
+        let t_s0 = crate::poly_mul::poly_mul_mod_q_schoolbook(&t, &s0);
         let c = add_mod_q(&t_s0, &s1);
 
         assert!(relation_holds(&t, &s0, &s1, &c));
