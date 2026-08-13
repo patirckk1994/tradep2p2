@@ -1,5 +1,8 @@
 <p align="center"><img src="docs/assets/header.svg" alt="A closed eye at the center of a peer-to-peer cryptographic network" width="100%"></p>
 
+Our Discord:
+https://discord.gg/eFbybgPZC
+
 # UMBRA
 
 **U**ntraceable **M**ediated **B**ilateral **R**outing for **A**ssets.
